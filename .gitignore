@@ -1,0 +1,21 @@
+# Python venv
+.venv/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Tools/IDE (선택)
+.pytest_cache/
+.mypy_cache/
+.vscode/
+.idea/
+
+# Secrets (꼭 제외)
+.env
+*.pem
+*.key
+google-key.json

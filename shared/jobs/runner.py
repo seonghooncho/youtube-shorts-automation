@@ -1,0 +1,54 @@
+# runner.py
+import os
+from shared.utils.slack_notify import send_slack_message
+
+# 배치 생성
+try:
+    from shared.jobs.batch_generate import run_batch_pipeline
+except Exception:
+    run_batch_pipeline = None
+
+# 업로드
+try:
+    from shared.jobs.upload_scheduler import upload_batch_pipeline
+except Exception:
+    upload_batch_pipeline = None
+
+
+def _do_generate():
+    if not run_batch_pipeline:
+        raise RuntimeError("run_batch_pipeline() 로더 실패: shared.jobs.batch_generate 확인 필요")
+    send_slack_message("🎬 배치 생성 파이프라인 시작")
+    run_batch_pipeline()
+    send_slack_message("✅ 배치 생성 파이프라인 종료")
+
+
+def _do_upload():
+    if not upload_batch_pipeline:
+        raise RuntimeError("upload_batch_pipeline() 로더 실패: shared.jobs.upload_scheduler 확인 필요")
+    send_slack_message("📤 업로드 파이프라인 시작")
+    upload_batch_pipeline()
+    send_slack_message("🏁 업로드 파이프라인 종료")
+
+
+if __name__ == "__main__":
+    # 우선순위: CLI 인자보다 환경변수 MODE 사용(깃액션에서 세팅)
+    mode = os.getenv("MODE", "upload").lower().strip()
+
+    try:
+        if mode == "generate":
+            _do_generate()
+
+        elif mode == "upload":
+            _do_upload()
+
+        elif mode in ("both", "all"):
+            # 생성 후 업로드까지 한 번에
+            _do_generate()
+            _do_upload()
+
+        else:
+            send_slack_message(f"❓ 알 수 없는 MODE: {mode}")
+    except Exception as e:
+        send_slack_message(f"💥 런너 실패: {e}")
+        raise
