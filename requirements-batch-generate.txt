@@ -1,0 +1,21 @@
+# Core dependencies
+openai
+python-dotenv
+requests
+boto3
+
+# Video processing
+moviepy==1.0.3
+imageio-ffmpeg
+
+# Web scraping
+selenium
+webdriver-manager
+
+# Progress bars
+tqdm
+
+# Image processing (if needed for future features)
+Pillow<10
+
+pysrt

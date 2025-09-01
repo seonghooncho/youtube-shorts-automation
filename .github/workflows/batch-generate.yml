@@ -1,0 +1,126 @@
+name: Batch Generate YouTube Shorts
+
+on:
+  schedule:
+    - cron: "0 1 */14 * *" # 2주마다 1시에 실행
+  workflow_dispatch:
+
+env:
+  AWS_REGION: ap-northeast-2
+  INSTANCE_TYPE: t3.medium
+  AMI_ID: ${{ secrets.EC2_AMI_ID }}
+  SECURITY_GROUP_ID: ${{ secrets.EC2_SECURITY_GROUP_ID }}
+  SUBNET_ID: ${{ secrets.EC2_SUBNET_ID }}
+
+jobs:
+  launch-ec2-and-generate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Launch EC2 instance
+        id: launch-instance
+        run: |
+          # EC2 인스턴스 생성
+          INSTANCE_ID=$(aws ec2 run-instances \
+            --image-id ${{ env.AMI_ID }} \
+            --instance-type ${{ env.INSTANCE_TYPE }} \
+            --security-group-ids ${{ env.SECURITY_GROUP_ID }} \
+            --subnet-id ${{ env.SUBNET_ID }} \
+            --instance-initiated-shutdown-behavior terminate \
+            --iam-instance-profile Name=${{ secrets.EC2_IAM_PROFILE }} \
+            --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=youtube-shorts-generator},{Key=Project,Value=youtube-shorts-automation}]' \
+            --query 'Instances[0].InstanceId' \
+            --output text)
+
+          echo "instance_id=$INSTANCE_ID" >> $GITHUB_OUTPUT
+          echo "🚀 EC2 인스턴스 생성됨: $INSTANCE_ID"
+
+      - name: Wait for instance to be running
+        run: |
+          aws ec2 wait instance-running --instance-ids ${{ steps.launch-instance.outputs.instance_id }}
+          echo "✅ 인스턴스가 실행 중입니다"
+
+      - name: Get instance public IP
+        id: get-ip
+        run: |
+          PUBLIC_IP=$(aws ec2 describe-instances \
+            --instance-ids ${{ steps.launch-instance.outputs.instance_id }} \
+            --query 'Reservations[0].Instances[0].PublicIpAddress' \
+            --output text)
+
+          echo "public_ip=$PUBLIC_IP" >> $GITHUB_OUTPUT
+          echo "🌐 인스턴스 공인 IP: $PUBLIC_IP"
+
+      - name: Wait for SSH to be available
+        run: |
+          until nc -z ${{ steps.get-ip.outputs.public_ip }} 22; do
+            echo "SSH 연결 대기 중..."
+            sleep 10
+          done
+          echo "✅ SSH 연결 가능"
+
+      - name: Execute batch generation
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ steps.get-ip.outputs.public_ip }}
+          username: ${{ secrets.EC2_USERNAME }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            #!/bin/bash
+            set -e
+
+            echo "🎬 YouTube Shorts 배치 생성 시작..."
+
+            # 프로젝트 디렉토리로 이동
+            cd /home/${{ secrets.EC2_USERNAME }}/youtube-shorts-automation
+
+            # 최신 코드 가져오기
+            git pull origin main
+
+            # 가상환경 활성화
+            source venv/bin/activate
+
+            # 배치 생성용 의존성 설치
+            pip install -r requirements-batch-generate.txt
+
+            # 환경변수 설정
+            export OPENAI_API_KEY="${{ secrets.OPENAI_API_KEY }}"
+            export YOUTUBE_API_KEY="${{ secrets.YOUTUBE_API_KEY }}"
+            export SLACK_WEBHOOK_URL="${{ secrets.SLACK_WEBHOOK_URL }}"
+            export AWS_ACCESS_KEY_ID="${{ secrets.AWS_ACCESS_KEY_ID }}"
+            export AWS_SECRET_ACCESS_KEY="${{ secrets.AWS_SECRET_ACCESS_KEY }}"
+            export AWS_DEFAULT_REGION="${{ env.AWS_REGION }}"
+            export PIXABAY_API_KEY="${{ secrets.PIXABAY_API_KEY }}"
+            export GOOGLE_APPLICATION_CREDENTIALS="/home/${{ secrets.EC2_USERNAME }}/youtube-shorts-automation/google-key.json"
+            export MODE="generate"
+
+            # 배치 생성 실행
+            python runner.py
+
+            echo "✅ 배치 생성 완료"
+
+            # 작업 완료 후 인스턴스 종료
+            sudo shutdown -h now
+
+      - name: Wait for instance termination
+        if: always()
+        run: |
+          echo "🔄 인스턴스 종료 대기 중..."
+          aws ec2 wait instance-terminated --instance-ids ${{ steps.launch-instance.outputs.instance_id }}
+          echo "✅ 인스턴스가 종료되었습니다"
+
+      - name: Send completion notification
+        if: always()
+        run: |
+          if [ "${{ job.status }}" == "success" ]; then
+            echo "🎉 배치 생성 작업이 성공적으로 완료되었습니다"
+          else
+            echo "❌ 배치 생성 작업 중 오류가 발생했습니다"
+          fi

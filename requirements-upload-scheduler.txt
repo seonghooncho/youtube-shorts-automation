@@ -1,0 +1,19 @@
+# Core dependencies
+python-dotenv==1.0.1
+requests==2.32.3
+boto3==1.34.162
+
+# Google APIs (YouTube)
+google-api-python-client==2.137.0
+google-auth==2.35.0
+google-auth-oauthlib==1.2.1
+google-auth-httplib2==0.2.0
+
+# Instagram
+instagrapi==2.1.0
+
+# TikTok
+TikTokApi==6.5.2
+
+# Slack
+slack_sdk==3.33.4

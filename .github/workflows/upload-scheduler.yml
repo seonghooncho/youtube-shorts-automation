@@ -1,0 +1,104 @@
+name: Daily Upload All Platforms
+
+on:
+  schedule:
+    - cron: "0 23 * * *" # 매일 08:00 KST
+  workflow_dispatch:
+
+env:
+  AWS_REGION: ap-northeast-2
+  INSTANCE_TYPE: t3.micro
+  AMI_ID: ${{ secrets.EC2_AMI_ID }}
+  SECURITY_GROUP_ID: ${{ secrets.EC2_SECURITY_GROUP_ID }}
+  SUBNET_ID: ${{ secrets.EC2_SUBNET_ID }}
+
+jobs:
+  launch-ec2-and-upload:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Launch EC2 instance
+        id: launch-instance
+        run: |
+          IID=$(aws ec2 run-instances \
+            --image-id ${{ env.AMI_ID }} \
+            --instance-type ${{ env.INSTANCE_TYPE }} \
+            --security-group-ids ${{ env.SECURITY_GROUP_ID }} \
+            --subnet-id ${{ env.SUBNET_ID }} \
+            --instance-initiated-shutdown-behavior terminate \
+            --iam-instance-profile Name=${{ secrets.EC2_IAM_PROFILE }} \
+            --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=youtube-shorts-uploader},{Key=Project,Value=youtube-shorts-automation}]' \
+            --query 'Instances[0].InstanceId' --output text)
+          echo "instance_id=$IID" >> $GITHUB_OUTPUT
+
+      - name: Wait for instance running
+        run: aws ec2 wait instance-running --instance-ids ${{ steps.launch-instance.outputs.instance_id }}
+
+      - name: Get instance public IP
+        id: get-ip
+        run: |
+          echo "public_ip=$(aws ec2 describe-instances --instance-ids ${{ steps.launch-instance.outputs.instance_id }} --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)" >> $GITHUB_OUTPUT
+
+      - name: Wait for SSH
+        run: |
+          until nc -z ${{ steps.get-ip.outputs.public_ip }} 22; do echo "waiting ssh"; sleep 10; done
+
+      - name: Execute upload
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ steps.get-ip.outputs.public_ip }}
+          username: ${{ secrets.EC2_USERNAME }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            set -e
+            cd /home/${{ secrets.EC2_USERNAME }}/youtube-shorts-automation
+            git pull origin main
+            source venv/bin/activate
+            pip install -r requirements.txt
+
+            # (선택) GCP 키 필요시
+            if [ ! -z "${{ secrets.GCP_SA_JSON }}" ]; then
+              echo "${{ secrets.GCP_SA_JSON }}" > google-key.json
+              export GOOGLE_APPLICATION_CREDENTIALS="$PWD/google-key.json"
+            fi
+
+            # 공통
+            export SLACK_WEBHOOK_URL="${{ secrets.SLACK_WEBHOOK_URL }}"
+            export AWS_ACCESS_KEY_ID="${{ secrets.AWS_ACCESS_KEY_ID }}"
+            export AWS_SECRET_ACCESS_KEY="${{ secrets.AWS_SECRET_ACCESS_KEY }}"
+            export AWS_DEFAULT_REGION="${{ env.AWS_REGION }}"
+
+            # 대상 플랫폼 선택 (없으면 기본: youtube,instagram,tiktok)
+            export TARGET_PLATFORMS="${{ vars.TARGET_PLATFORMS || 'youtube,instagram,tiktok' }}"
+
+            # YouTube (현재 레거시 브리지 사용)
+            export YOUTUBE_API_KEY="${{ secrets.YOUTUBE_API_KEY }}"
+
+            # Instagram (스킵 해제하려면 ENABLE=1 세팅)
+            export INSTAGRAM_UPLOAD_ENABLED="${{ vars.INSTAGRAM_UPLOAD_ENABLED || '0' }}"
+            export IG_USER_ID="${{ secrets.IG_USER_ID }}"
+            export IG_ACCESS_TOKEN="${{ secrets.IG_ACCESS_TOKEN }}"
+
+            # TikTok (스킵 해제하려면 ENABLE=1 세팅)
+            export TIKTOK_UPLOAD_ENABLED="${{ vars.TIKTOK_UPLOAD_ENABLED || '0' }}"
+            export TT_CLIENT_KEY="${{ secrets.TT_CLIENT_KEY }}"
+            export TT_CLIENT_SECRET="${{ secrets.TT_CLIENT_SECRET }}"
+            export TT_ACCESS_TOKEN="${{ secrets.TT_ACCESS_TOKEN }}"
+
+            export MODE="upload"
+            python runner.py
+
+            sudo shutdown -h now
+
+      - name: Force terminate (failsafe)
+        if: always()
+        run: |
+          aws ec2 terminate-instances --instance-ids ${{ steps.launch-instance.outputs.instance_id }} || true
+          aws ec2 wait instance-terminated --instance-ids ${{ steps.launch-instance.outputs.instance_id }} || true
