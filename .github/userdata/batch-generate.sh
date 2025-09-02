@@ -98,6 +98,9 @@ fi
 ( set -x; python runner.py )
 RC=$?
 
-# ===== 종료(보장) =====
+# ===== 세이프가드 (혹시 위가 멈춰도 120분 후 종료) =====
+( sleep 7200; shutdown -h now ) >/dev/null 2>&1 &
+
+# ===== 즉시 종료 시도 =====
 shutdown -h now || poweroff || halt || true
 exit "$RC"
