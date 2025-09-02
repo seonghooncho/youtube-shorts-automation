@@ -2,12 +2,12 @@ name: Batch Generate YouTube Shorts
 
 on:
   schedule:
-    - cron: "0 1 */14 * *" # 2주마다 1시에 실행
+    - cron: "0 16 */14 * *" # ⚠️ UTC (KST 10시). KST 01시면 조정 필요
   workflow_dispatch:
 
 env:
   AWS_REGION: ap-northeast-2
-  INSTANCE_TYPE: t3.medium
+  INSTANCE_TYPE: m7i.large
   AMI_ID: ${{ secrets.EC2_AMI_ID }}
   SECURITY_GROUP_ID: ${{ secrets.EC2_SECURITY_GROUP_ID }}
   SUBNET_ID: ${{ secrets.EC2_SUBNET_ID }}
@@ -24,103 +24,146 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Launch EC2 instance
-        id: launch-instance
+      - name: Build user data (deploy key + SSM secrets)
         run: |
-          # EC2 인스턴스 생성
-          INSTANCE_ID=$(aws ec2 run-instances \
-            --image-id ${{ env.AMI_ID }} \
-            --instance-type ${{ env.INSTANCE_TYPE }} \
-            --security-group-ids ${{ env.SECURITY_GROUP_ID }} \
-            --subnet-id ${{ env.SUBNET_ID }} \
-            --instance-initiated-shutdown-behavior terminate \
-            --iam-instance-profile Name=${{ secrets.EC2_IAM_PROFILE }} \
-            --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=youtube-shorts-generator},{Key=Project,Value=youtube-shorts-automation}]' \
-            --query 'Instances[0].InstanceId' \
-            --output text)
+          cat > userdata.sh <<'EOF'
+          #!/bin/bash
+          set -euo pipefail
 
+          # 기본 패키지
+          apt-get update -y
+          apt-get install -y --no-install-recommends git awscli openssh-client jq ca-certificates
+
+          # 작업 디렉토리
+          mkdir -p /opt/ytshorts
+          chown -R ubuntu:ubuntu /opt/ytshorts
+          cd /opt/ytshorts
+
+          export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-ap-northeast-2}"
+
+          # =====[ Deploy Key 복구 ]=====
+          sudo -u ubuntu mkdir -p /home/ubuntu/.ssh
+          aws ssm get-parameter --name "/ytshorts/DEPLOY_KEY" --with-decryption --output json \
+            | jq -r .Parameter.Value > /home/ubuntu/.ssh/id_ed25519
+          chown ubuntu:ubuntu /home/ubuntu/.ssh/id_ed25519
+          chmod 600 /home/ubuntu/.ssh/id_ed25519
+
+          # GitHub 호스트키 등록 + SSH 설정
+          sudo -u ubuntu ssh-keyscan -t rsa github.com >> /home/ubuntu/.ssh/known_hosts
+          cat > /home/ubuntu/.ssh/config <<'CONF'
+          Host github.com
+            HostName github.com
+            User git
+            IdentityFile /home/ubuntu/.ssh/id_ed25519
+            StrictHostKeyChecking accept-new
+          CONF
+          chown ubuntu:ubuntu /home/ubuntu/.ssh/known_hosts /home/ubuntu/.ssh/config
+          chmod 644 /home/ubuntu/.ssh/known_hosts
+          chmod 600 /home/ubuntu/.ssh/config
+
+          # =====[ 레포 클론 ]=====
+          sudo -u ubuntu git clone --depth=1 git@github.com:seonghooncho/youtube-shorts-automation.git /opt/ytshorts || {
+            echo "ERROR: git clone failed"; exit 1;
+          }
+          chown -R ubuntu:ubuntu /opt/ytshorts
+          cd /opt/ytshorts
+
+          # =====[ 앱 시크릿: SSM에서 로드 ]=====
+          export OPENAI_API_KEY="$(aws ssm get-parameter --name "/ytshorts/OPENAI_API_KEY" --with-decryption --query 'Parameter.Value' --output text || echo "")"
+          export YOUTUBE_API_KEY="$(aws ssm get-parameter --name "/ytshorts/YOUTUBE_API_KEY" --with-decryption --query 'Parameter.Value' --output text || echo "")"
+          export SLACK_WEBHOOK_URL="$(aws ssm get-parameter --name "/ytshorts/SLACK_WEBHOOK_URL" --with-decryption --query 'Parameter.Value' --output text || echo "")"
+          export PIXABAY_API_KEY="$(aws ssm get-parameter --name "/ytshorts/PIXABAY_API_KEY" --with-decryption --query 'Parameter.Value' --output text || echo "")"
+          export MODE="generate"
+
+          # S3/Polly 액세스 키 (요청대로 SSM 사용)
+          export AWS_S3_ACCESS_KEY="$(aws ssm get-parameter --name "/ytshorts/AWS_S3_ACCESS_KEY" --with-decryption --query 'Parameter.Value' --output text || echo "")"
+          export AWS_S3_SECRET_ACCESS_KEY="$(aws ssm get-parameter --name "/ytshorts/AWS_S3_SECRET_ACCESS_KEY" --with-decryption --query 'Parameter.Value' --output text || echo "")"
+          export AWS_POLLY_ACCESS_KEY_ID="$(aws ssm get-parameter --name "/ytshorts/AWS_POLLY_ACCESS_KEY_ID" --with-decryption --query 'Parameter.Value' --output text || echo "")"
+          export AWS_POLLY_SECRET_ACCESS_KEY="$(aws ssm get-parameter --name "/ytshorts/AWS_POLLY_SECRET_ACCESS_KEY" --with-decryption --query 'Parameter.Value' --output text || echo "")"
+
+          # 버킷 이름
+          export S3_BUCKET_NAME="$(aws ssm get-parameter --name "/ytshorts/S3_BUCKET_NAME" --with-decryption --query 'Parameter.Value' --output text 2>/dev/null || echo "")"
+
+
+          # =====[ venv + 의존성 설치 (wheelhouse 우선) ]=====
+          # --- Python 3.11 & venv 보장 (없으면 설치, 있으면 스킵) ---
+          if ! command -v python3.11 >/dev/null 2>&1; then
+            apt-get install -y python3.11 python3.11-venv || true
+          fi
+          # 없으면 시스템 python3로 폴백
+          if command -v python3.11 >/dev/null 2>&1; then
+            PY=python3.11
+          else
+            apt-get install -y python3 python3-venv
+            PY=python3
+          fi
+
+          # venv 생성
+          rm -rf .venv
+          $PY -m venv .venv
+          . .venv/bin/activate
+          pip install -U pip
+
+          # --- ffmpeg 처리: 있으면 경로 고정, 없으면 설치 시도 → 그래도 없으면 자동 다운로드 활용 ---
+          if command -v ffmpeg >/dev/null 2>&1; then
+            export IMAGEIO_FFMPEG_EXE="$(command -v ffmpeg)"
+          else
+            apt-get install -y ffmpeg || true
+            if command -v ffmpeg >/dev/null 2>&1; then
+              export IMAGEIO_FFMPEG_EXE="$(command -v ffmpeg)"
+            else
+              # 시스템 ffmpeg 없으면 imageio-ffmpeg가 자체 다운로드를 하게 둠 (환경변수 지정 X)
+              echo "ℹ️ ffmpeg system binary not found; imageio-ffmpeg will download one on first use."
+              unset IMAGEIO_FFMPEG_EXE || true
+            fi
+          fi
+
+          # ======[파이썬의존성]======
+          if [ -f /opt/ytshorts/requirements-batch-generate.txt ]; then
+            pip install --no-index --find-links=/opt/wheelhouse -r /opt/ytshorts/requirements-batch-generate.txt || \
+            pip install -r /opt/ytshorts/requirements-batch-generate.txt
+          else
+            pip install moviepy imageio-ffmpeg openai selenium webdriver-manager tqdm "Pillow<10" pysrt python-dotenv boto3 requests
+          fi
+
+          # =====[ 실행 ]=====
+          python runner.py
+
+          # =====[ 종료 (Terminate로 변환됨) ]=====
+          # shutdown -h now
+          EOF
+
+      - name: Launch EC2 with self-termination & delete-on-termination root
+        id: launch
+        run: |
+          INSTANCE_ID=$(
+            aws ec2 run-instances \
+              --image-id "${{ env.AMI_ID }}" \
+              --instance-type "${{ env.INSTANCE_TYPE }}" \
+              --security-group-ids "${{ env.SECURITY_GROUP_ID }}" \
+              --subnet-id "${{ env.SUBNET_ID }}" \
+              --iam-instance-profile Name="${{ secrets.EC2_IAM_PROFILE }}" \
+              --instance-initiated-shutdown-behavior terminate \
+              --block-device-mappings '[
+                {"DeviceName":"/dev/xvda",
+                 "Ebs":{"VolumeSize":40,"VolumeType":"gp3","DeleteOnTermination":true,"Encrypted":true}}
+              ]' \
+              --network-interfaces "DeviceIndex=0,SubnetId=${{ env.SUBNET_ID }},Groups=${{ env.SECURITY_GROUP_ID }},AssociatePublicIpAddress=true" \
+              --user-data file://userdata.sh \
+              --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=youtube-shorts-generator},{Key=Project,Value=youtube-shorts-automation}]' \
+              --query 'Instances[0].InstanceId' --output text
+          )
           echo "instance_id=$INSTANCE_ID" >> $GITHUB_OUTPUT
-          echo "🚀 EC2 인스턴스 생성됨: $INSTANCE_ID"
+          echo "🚀 Launched: $INSTANCE_ID"
 
-      - name: Wait for instance to be running
+      - name: (Optional) Verify DeleteOnTermination flag
         run: |
-          aws ec2 wait instance-running --instance-ids ${{ steps.launch-instance.outputs.instance_id }}
-          echo "✅ 인스턴스가 실행 중입니다"
-
-      - name: Get instance public IP
-        id: get-ip
-        run: |
-          PUBLIC_IP=$(aws ec2 describe-instances \
-            --instance-ids ${{ steps.launch-instance.outputs.instance_id }} \
-            --query 'Reservations[0].Instances[0].PublicIpAddress' \
-            --output text)
-
-          echo "public_ip=$PUBLIC_IP" >> $GITHUB_OUTPUT
-          echo "🌐 인스턴스 공인 IP: $PUBLIC_IP"
-
-      - name: Wait for SSH to be available
-        run: |
-          until nc -z ${{ steps.get-ip.outputs.public_ip }} 22; do
-            echo "SSH 연결 대기 중..."
-            sleep 10
-          done
-          echo "✅ SSH 연결 가능"
-
-      - name: Execute batch generation
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ steps.get-ip.outputs.public_ip }}
-          username: ${{ secrets.EC2_USERNAME }}
-          key: ${{ secrets.EC2_SSH_KEY }}
-          script: |
-            #!/bin/bash
-            set -e
-
-            echo "🎬 YouTube Shorts 배치 생성 시작..."
-
-            # 프로젝트 디렉토리로 이동
-            cd /home/${{ secrets.EC2_USERNAME }}/youtube-shorts-automation
-
-            # 최신 코드 가져오기
-            git pull origin main
-
-            # 가상환경 활성화
-            source venv/bin/activate
-
-            # 배치 생성용 의존성 설치
-            pip install -r requirements-batch-generate.txt
-
-            # 환경변수 설정
-            export OPENAI_API_KEY="${{ secrets.OPENAI_API_KEY }}"
-            export YOUTUBE_API_KEY="${{ secrets.YOUTUBE_API_KEY }}"
-            export SLACK_WEBHOOK_URL="${{ secrets.SLACK_WEBHOOK_URL }}"
-            export AWS_ACCESS_KEY_ID="${{ secrets.AWS_ACCESS_KEY_ID }}"
-            export AWS_SECRET_ACCESS_KEY="${{ secrets.AWS_SECRET_ACCESS_KEY }}"
-            export AWS_DEFAULT_REGION="${{ env.AWS_REGION }}"
-            export PIXABAY_API_KEY="${{ secrets.PIXABAY_API_KEY }}"
-            export GOOGLE_APPLICATION_CREDENTIALS="/home/${{ secrets.EC2_USERNAME }}/youtube-shorts-automation/google-key.json"
-            export MODE="generate"
-
-            # 배치 생성 실행
-            python runner.py
-
-            echo "✅ 배치 생성 완료"
-
-            # 작업 완료 후 인스턴스 종료
-            sudo shutdown -h now
+          aws ec2 describe-instances \
+            --instance-ids "${{ steps.launch.outputs.instance_id }}" \
+            --query 'Reservations[0].Instances[0].BlockDeviceMappings[0].Ebs.DeleteOnTermination' \
+            --output text
 
       - name: Wait for instance termination
-        if: always()
         run: |
-          echo "🔄 인스턴스 종료 대기 중..."
-          aws ec2 wait instance-terminated --instance-ids ${{ steps.launch-instance.outputs.instance_id }}
-          echo "✅ 인스턴스가 종료되었습니다"
-
-      - name: Send completion notification
-        if: always()
-        run: |
-          if [ "${{ job.status }}" == "success" ]; then
-            echo "🎉 배치 생성 작업이 성공적으로 완료되었습니다"
-          else
-            echo "❌ 배치 생성 작업 중 오류가 발생했습니다"
-          fi
+          aws ec2 wait instance-terminated --instance-ids "${{ steps.launch.outputs.instance_id }}"
+          echo "✅ Instance terminated"
