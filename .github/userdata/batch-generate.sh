@@ -5,7 +5,7 @@ set -euo pipefail
 
 # ===== 무조건 종료 보장 (성공/실패 상관없이) =====
 cleanup() {
-  ( sleep 900; shutdown -h now ) >/dev/null 2>&1 &   # 15분 세이프가드
+  ( sleep 1800; shutdown -h now ) >/dev/null 2>&1 &   # 30분 세이프가드
   shutdown -h now || poweroff || halt || true        # 즉시 종료 시도
 }
 trap cleanup EXIT
@@ -106,6 +106,12 @@ export AWS_POLLY_SECRET_ACCESS_KEY="$(aws ssm get-parameter --name "/ytshorts/AW
 
 # 버킷 이름
 export S3_BUCKET_NAME="$(aws ssm get-parameter --name "/ytshorts/S3_BUCKET_NAME" --with-decryption --query 'Parameter.Value' --output text 2>/dev/null || echo "")"
+
+echo "SSM sanity snapshot:"
+for v in OPENAI_API_KEY YOUTUBE_API_KEY SLACK_WEBHOOK_URL PIXABAY_API_KEY S3_BUCKET_NAME; do
+  eval "val=\${$v:-}"
+  if [[ -z "$val" ]]; then echo "❌ $v is EMPTY"; else echo "✅ $v loaded (len=${#val})"; fi
+done
 
 # ===== 파이썬 의존성 =====
 if [[ -f "$REPO_DIR/requirements-batch-generate.txt" ]]; then
