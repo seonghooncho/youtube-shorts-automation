@@ -54,7 +54,36 @@ jobs:
           echo "instance_id=$INSTANCE_ID" >> "$GITHUB_OUTPUT"
           echo "🚀 Launched: $INSTANCE_ID"
 
-      - name: Wait for instance termination
+      - name: Wait for self-termination (robust polling)
+        shell: bash
         run: |
-          aws ec2 wait instance-terminated --instance-ids "${{ steps.launch.outputs.instance_id }}"
-          echo "✅ Instance terminated"
+          IID="${{ steps.launch.outputs.instance_id }}"
+          TIMEOUT=$(( 90 * 60 ))   # 최대 90분
+          INTERVAL=15
+          ELAPSED=0
+
+          while true; do
+            STATE=$(aws ec2 describe-instances \
+              --instance-ids "$IID" \
+              --query 'Reservations[0].Instances[0].State.Name' \
+              --output text 2>/dev/null || echo 'notfound')
+
+            echo "state=$STATE (t=${ELAPSED}s)"
+
+            # 성공 조건: terminated 이거나(정상) 더이상 조회되지 않을 때(계정/리전 전파 지연 등)
+            if [[ "$STATE" == "terminated" || "$STATE" == "notfound" ]]; then
+              echo "✅ Instance terminated"
+              break
+            fi
+
+            # 타임아웃: 강제 종료 후 마무리
+            if (( ELAPSED >= TIMEOUT )); then
+              echo "❌ Timeout. Forcing terminate..."
+              aws ec2 terminate-instances --instance-ids "$IID" || true
+              aws ec2 wait instance-terminated --instance-ids "$IID" || true
+              exit 1
+            fi
+
+            sleep $INTERVAL
+            ELAPSED=$(( ELAPSED + INTERVAL ))
+          done
