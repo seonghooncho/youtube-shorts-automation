@@ -140,13 +140,11 @@ jobs:
             aws ec2 run-instances \
               --image-id "${{ env.AMI_ID }}" \
               --instance-type "${{ env.INSTANCE_TYPE }}" \
-              --security-group-ids "${{ env.SECURITY_GROUP_ID }}" \
-              --subnet-id "${{ env.SUBNET_ID }}" \
               --iam-instance-profile Name="${{ secrets.EC2_IAM_PROFILE }}" \
               --instance-initiated-shutdown-behavior terminate \
               --block-device-mappings '[
                 {"DeviceName":"/dev/xvda",
-                 "Ebs":{"VolumeSize":40,"VolumeType":"gp3","DeleteOnTermination":true,"Encrypted":true}}
+                "Ebs":{"VolumeSize":40,"VolumeType":"gp3","DeleteOnTermination":true,"Encrypted":true}}
               ]' \
               --network-interfaces "DeviceIndex=0,SubnetId=${{ env.SUBNET_ID }},Groups=${{ env.SECURITY_GROUP_ID }},AssociatePublicIpAddress=true" \
               --user-data file://userdata.sh \
