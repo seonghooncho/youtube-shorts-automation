@@ -2,6 +2,7 @@
 openai
 python-dotenv
 requests
+chardet<6
 boto3
 
 # Video processing

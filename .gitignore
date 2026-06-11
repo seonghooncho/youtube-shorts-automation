@@ -26,6 +26,7 @@ output/
 assets/tmp/
 assets/output/
 temp/
+.tmp/
 
 # Terraform
 **/.terraform/

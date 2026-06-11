@@ -20,7 +20,7 @@ def load_credentials_from_env() -> Optional[Credentials]:
     refresh_token = os.getenv("YOUTUBE_REFRESH_TOKEN")
     client_id = os.getenv("YOUTUBE_CLIENT_ID")
     client_secret = os.getenv("YOUTUBE_CLIENT_SECRET")
-    if not (refresh_token and client_id and client_secret):
+    if not (refresh_token and client_id):
         return None
 
     return Credentials(
@@ -28,7 +28,7 @@ def load_credentials_from_env() -> Optional[Credentials]:
         refresh_token=refresh_token,
         token_uri=os.getenv("YOUTUBE_TOKEN_URI", "https://oauth2.googleapis.com/token"),
         client_id=client_id,
-        client_secret=client_secret,
+        client_secret=_normalize_public_client_secret(client_secret),
         scopes=SCOPES,
     )
 
@@ -68,16 +68,22 @@ def build_youtube_credentials(interactive: Optional[bool] = None) -> Credentials
         return creds
 
     raise RuntimeError(
-        "YouTube OAuth credentials are not configured. Set YOUTUBE_CLIENT_ID, "
-        "YOUTUBE_CLIENT_SECRET, and YOUTUBE_REFRESH_TOKEN, or run scripts/youtube_oauth_setup.py."
+        "YouTube OAuth credentials are not configured. Set YOUTUBE_CLIENT_ID "
+        "and YOUTUBE_REFRESH_TOKEN, or run scripts/youtube_oauth_setup.py."
     )
 
 
 def export_refresh_token_json(creds: Credentials) -> str:
     data = {
         "YOUTUBE_CLIENT_ID": creds.client_id,
-        "YOUTUBE_CLIENT_SECRET": creds.client_secret,
+        "YOUTUBE_CLIENT_SECRET": creds.client_secret or "PUBLIC_CLIENT",
         "YOUTUBE_REFRESH_TOKEN": creds.refresh_token,
         "YOUTUBE_TOKEN_URI": creds.token_uri,
     }
     return json.dumps(data, indent=2)
+
+
+def _normalize_public_client_secret(value: Optional[str]) -> Optional[str]:
+    if not value or value.strip().upper() in {"PENDING", "PUBLIC_CLIENT"}:
+        return None
+    return value

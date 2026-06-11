@@ -14,6 +14,11 @@ try:
 except Exception:
     upload_batch_pipeline = None
 
+try:
+    from shared.jobs.staged_generate import run_generate_stage
+except Exception:
+    run_generate_stage = None
+
 
 def _do_generate():
     if not run_batch_pipeline:
@@ -34,9 +39,17 @@ def _do_upload():
 if __name__ == "__main__":
     # 우선순위: CLI 인자보다 환경변수 MODE 사용(깃액션에서 세팅)
     mode = os.getenv("MODE", "upload").lower().strip()
+    stage = os.getenv("STAGE", "").lower().strip()
 
     try:
-        if mode == "generate":
+        if stage:
+            if not run_generate_stage:
+                raise RuntimeError("run_generate_stage() 로더 실패: shared.jobs.staged_generate 확인 필요")
+            send_slack_message(f"🎬 생성 스테이지 시작: {stage}")
+            run_generate_stage(stage)
+            send_slack_message(f"✅ 생성 스테이지 종료: {stage}")
+
+        elif mode == "generate":
             _do_generate()
 
         elif mode == "upload":

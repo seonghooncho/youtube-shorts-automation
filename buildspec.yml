@@ -1,0 +1,20 @@
+version: 0.2
+
+phases:
+  pre_build:
+    commands:
+      - aws ecr get-login-password --region "$AWS_DEFAULT_REGION" | docker login --username AWS --password-stdin "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com"
+      - IMAGE_URI="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME"
+      - COMMIT_TAG="${CODEBUILD_RESOLVED_SOURCE_VERSION:-latest}"
+  build:
+    commands:
+      - docker build -t "$IMAGE_URI:latest" -t "$IMAGE_URI:$COMMIT_TAG" .
+  post_build:
+    commands:
+      - docker push "$IMAGE_URI:latest"
+      - docker push "$IMAGE_URI:$COMMIT_TAG"
+      - printf '{"imageUri":"%s"}\n' "$IMAGE_URI:$COMMIT_TAG" > image-detail.json
+
+artifacts:
+  files:
+    - image-detail.json

@@ -1,11 +1,14 @@
-from shared.jobs.runner import _do_generate, _do_upload
+from shared.jobs.runner import _do_generate, _do_upload, run_generate_stage
 
 
 if __name__ == "__main__":
     import os
 
     mode = os.getenv("MODE", "upload").lower().strip()
-    if mode == "generate":
+    stage = os.getenv("STAGE", "").lower().strip()
+    if stage:
+        run_generate_stage(stage)
+    elif mode == "generate":
         _do_generate()
     elif mode == "upload":
         _do_upload()

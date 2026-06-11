@@ -23,29 +23,69 @@ variable "bucket_name" {
   default = "youtube-shorts-automation-160885253413-apne2"
 }
 
-variable "generator_instance_type" {
+variable "source_bundle_key" {
   type    = string
-  default = "m7i.large"
+  default = "source/source.zip"
 }
 
-variable "uploader_instance_type" {
-  type    = string
-  default = "t3.micro"
-}
-
-variable "root_volume_size_gb" {
+variable "generation_batch_days" {
   type    = number
-  default = 60
+  default = 14
+}
+
+variable "batch_max_vcpus" {
+  type    = number
+  default = 32
+}
+
+variable "batch_vcpu" {
+  type    = string
+  default = "2"
+}
+
+variable "batch_memory_mib" {
+  type    = string
+  default = "8192"
+}
+
+variable "batch_timeout_seconds" {
+  type    = number
+  default = 14400
+}
+
+variable "codebuild_compute_type" {
+  type    = string
+  default = "BUILD_GENERAL1_MEDIUM"
+}
+
+variable "youtube_privacy_status" {
+  type    = string
+  default = "private"
 }
 
 variable "generate_schedule_expression" {
   type    = string
-  default = "cron(0 16 */14 * ? *)"
+  default = "cron(0 2 ? * MON *)"
 }
 
 variable "upload_schedule_expression" {
   type    = string
-  default = "cron(0 23 * * ? *)"
+  default = "cron(0 8 * * ? *)"
+}
+
+variable "schedule_timezone" {
+  type    = string
+  default = "Asia/Seoul"
+}
+
+variable "publish_hour_local" {
+  type    = number
+  default = 8
+}
+
+variable "publish_minute_local" {
+  type    = number
+  default = 0
 }
 
 variable "enable_schedules" {

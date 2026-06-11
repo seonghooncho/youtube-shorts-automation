@@ -6,6 +6,8 @@ from shared.utils.config import (
     get_temp_file,
     get_s3_state_key,
     get_data_file,
+    S3_LEGACY_STATE_PREFIX,
+    S3_PUBLISH_READY_PREFIX,
 )
 from shared.storage import S3Store
 
@@ -42,14 +44,15 @@ def update_metadata_after_video_creation():
     영상 생성 후, 이전 메타데이터와 새로운 메타데이터를 병합하고 S3에 업로드합니다.
     """
     # 경로 구성
-    s3_metadata_key = get_s3_state_key(FINAL_METADATA_FILE)       # S3 key: shorts/state/final_metadata.json
+    s3_metadata_key = f"{S3_PUBLISH_READY_PREFIX}/{FINAL_METADATA_FILE.name}"
+    legacy_metadata_key = f"{S3_LEGACY_STATE_PREFIX}/{FINAL_METADATA_FILE.name}"
     tmp_old_metadata_path = get_temp_file("old_final_metadata.json") # temp/old_final_metadata.json
     new_metadata_path = get_data_file("final_metadata.json")    # output/final_metadata.json
     merged_output_path = FINAL_METADATA_FILE                       # data/final_metadata.json
 
     # 1. S3에서 기존 metadata 다운로드 (파일이 없을 경우 빈 리스트)
     old_data = []
-    if download_from_s3(s3_metadata_key, str(tmp_old_metadata_path)):
+    if download_from_s3(s3_metadata_key, str(tmp_old_metadata_path)) or download_from_s3(legacy_metadata_key, str(tmp_old_metadata_path)):
         try:
             with open(tmp_old_metadata_path, "r", encoding="utf-8") as f:
                 old_data = json.load(f)
@@ -79,3 +82,4 @@ def update_metadata_after_video_creation():
 
     # 5. 병합 결과를 S3에 업로드
     upload_to_s3(str(merged_output_path), s3_metadata_key)
+    upload_to_s3(str(merged_output_path), legacy_metadata_key)

@@ -82,8 +82,14 @@ def get_video_source(name: str) -> Path:
     return OUTPUT_DIR / "video-sources" / name
 
 # S3 경로 관리
-S3_VIDEO_PREFIX = "shorts/videos"
-S3_STATE_PREFIX = "shorts/state"
+S3_RAW_PREFIX = "raw"
+S3_SCRIPT_PREFIX = "scripts"
+S3_AUDIO_PREFIX = "audio"
+S3_VIDEO_PREFIX = "videos/final"
+S3_PUBLISH_READY_PREFIX = "publish-ready"
+S3_STATE_PREFIX = "state"
+S3_LEGACY_VIDEO_PREFIX = "shorts/videos"
+S3_LEGACY_STATE_PREFIX = "shorts/state"
 
 def get_s3_video_key(local_path: Path) -> str:
     return f"{S3_VIDEO_PREFIX}/{local_path.name}"
