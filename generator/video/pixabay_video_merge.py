@@ -2,9 +2,13 @@ import requests
 import os
 import json
 from pathlib import Path
+from PIL import Image
 from moviepy.editor import VideoFileClip, concatenate_videoclips
 from shared.utils.slack_notify import send_slack_message
 from shared.utils.config import  USED_PIXABAY_IDS_FILE, get_data_file, get_output_file, get_assets_file, get_video_source
+
+if not hasattr(Image, "ANTIALIAS"):
+    Image.ANTIALIAS = Image.Resampling.LANCZOS
 
 PIXABAY_API_KEY = os.getenv("PIXABAY_API_KEY")
 STATE_PATH = get_data_file("used_pixabay_state.json")

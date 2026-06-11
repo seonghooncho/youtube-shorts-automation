@@ -6,10 +6,13 @@ import urllib.request
 from pathlib import Path
 import numpy as np
 
+from PIL import Image, ImageDraw, ImageFont
 from moviepy.editor import VideoFileClip, CompositeVideoClip, ImageClip, vfx
 from moviepy.video.tools.subtitles import SubtitlesClip
 import pysrt
-from PIL import Image, ImageDraw, ImageFont
+
+if not hasattr(Image, "ANTIALIAS"):
+    Image.ANTIALIAS = Image.Resampling.LANCZOS
 
 from shared.utils.config import (
     AUDIO_DIR,
