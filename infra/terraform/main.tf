@@ -40,8 +40,8 @@ locals {
     { name = "CONTENT_TABLE_NAME", value = aws_dynamodb_table.content.name },
     { name = "TARGET_PLATFORMS", value = "youtube" },
     { name = "YOUTUBE_PRIVACY_STATUS", value = var.youtube_privacy_status },
-    { name = "REDDIT_MAX_POSTS", value = tostring(var.generation_batch_days) },
-    { name = "REDDIT_MIN_NEEDED", value = tostring(var.generation_batch_days) },
+    { name = "REDDIT_MAX_POSTS", value = tostring(var.reddit_max_posts) },
+    { name = "REDDIT_MIN_NEEDED", value = tostring(var.reddit_min_needed) },
     { name = "REDDIT_FALLBACK_PROVIDER", value = "pullpush" },
     { name = "GENERATION_BATCH_DAYS", value = tostring(var.generation_batch_days) },
     { name = "SCHEDULE_TIMEZONE", value = var.schedule_timezone },
@@ -676,84 +676,119 @@ resource "aws_sfn_state_machine" "pipeline" {
             Variable     = "$.mode"
             StringEquals = "upload"
             Next         = "PublishReady"
+          },
+          {
+            Variable           = "$.days"
+            NumericGreaterThan = 0
+            Next               = "Collect"
           }
         ]
-        Default = "Collect"
+        Default = "SetDefaultGenerationDays"
+      }
+      SetDefaultGenerationDays = {
+        Type       = "Pass"
+        Result     = var.generation_batch_days
+        ResultPath = "$.days"
+        Next       = "Collect"
       }
       Collect = {
-        Type     = "Task"
-        Resource = "arn:aws:states:::batch:submitJob.sync"
+        Type       = "Task"
+        Resource   = "arn:aws:states:::batch:submitJob.sync"
+        ResultPath = null
         Parameters = {
           JobName       = "${var.project_name}-collect"
           JobQueue      = aws_batch_job_queue.pipeline.arn
           JobDefinition = aws_batch_job_definition.stage.arn
           ContainerOverrides = {
-            Environment = [{ Name = "STAGE", Value = "collect" }]
+            Environment = [
+              { Name = "STAGE", Value = "collect" },
+              { Name = "GENERATION_BATCH_DAYS", "Value.$" = "States.Format('{}', $.days)" }
+            ]
           }
         }
         Next = "Filter"
       }
       Filter = {
-        Type     = "Task"
-        Resource = "arn:aws:states:::batch:submitJob.sync"
+        Type       = "Task"
+        Resource   = "arn:aws:states:::batch:submitJob.sync"
+        ResultPath = null
         Parameters = {
           JobName       = "${var.project_name}-filter"
           JobQueue      = aws_batch_job_queue.pipeline.arn
           JobDefinition = aws_batch_job_definition.stage.arn
           ContainerOverrides = {
-            Environment = [{ Name = "STAGE", Value = "filter" }]
+            Environment = [
+              { Name = "STAGE", Value = "filter" },
+              { Name = "GENERATION_BATCH_DAYS", "Value.$" = "States.Format('{}', $.days)" }
+            ]
           }
         }
         Next = "Script"
       }
       Script = {
-        Type     = "Task"
-        Resource = "arn:aws:states:::batch:submitJob.sync"
+        Type       = "Task"
+        Resource   = "arn:aws:states:::batch:submitJob.sync"
+        ResultPath = null
         Parameters = {
           JobName       = "${var.project_name}-script"
           JobQueue      = aws_batch_job_queue.pipeline.arn
           JobDefinition = aws_batch_job_definition.stage.arn
           ContainerOverrides = {
-            Environment = [{ Name = "STAGE", Value = "script" }]
+            Environment = [
+              { Name = "STAGE", Value = "script" },
+              { Name = "GENERATION_BATCH_DAYS", "Value.$" = "States.Format('{}', $.days)" }
+            ]
           }
         }
         Next = "Tts"
       }
       Tts = {
-        Type     = "Task"
-        Resource = "arn:aws:states:::batch:submitJob.sync"
+        Type       = "Task"
+        Resource   = "arn:aws:states:::batch:submitJob.sync"
+        ResultPath = null
         Parameters = {
           JobName       = "${var.project_name}-tts"
           JobQueue      = aws_batch_job_queue.pipeline.arn
           JobDefinition = aws_batch_job_definition.stage.arn
           ContainerOverrides = {
-            Environment = [{ Name = "STAGE", Value = "tts" }]
+            Environment = [
+              { Name = "STAGE", Value = "tts" },
+              { Name = "GENERATION_BATCH_DAYS", "Value.$" = "States.Format('{}', $.days)" }
+            ]
           }
         }
         Next = "Subtitles"
       }
       Subtitles = {
-        Type     = "Task"
-        Resource = "arn:aws:states:::batch:submitJob.sync"
+        Type       = "Task"
+        Resource   = "arn:aws:states:::batch:submitJob.sync"
+        ResultPath = null
         Parameters = {
           JobName       = "${var.project_name}-subtitles"
           JobQueue      = aws_batch_job_queue.pipeline.arn
           JobDefinition = aws_batch_job_definition.stage.arn
           ContainerOverrides = {
-            Environment = [{ Name = "STAGE", Value = "subtitles" }]
+            Environment = [
+              { Name = "STAGE", Value = "subtitles" },
+              { Name = "GENERATION_BATCH_DAYS", "Value.$" = "States.Format('{}', $.days)" }
+            ]
           }
         }
         Next = "Render"
       }
       Render = {
-        Type     = "Task"
-        Resource = "arn:aws:states:::batch:submitJob.sync"
+        Type       = "Task"
+        Resource   = "arn:aws:states:::batch:submitJob.sync"
+        ResultPath = null
         Parameters = {
           JobName       = "${var.project_name}-render"
           JobQueue      = aws_batch_job_queue.pipeline.arn
           JobDefinition = aws_batch_job_definition.stage.arn
           ContainerOverrides = {
-            Environment = [{ Name = "STAGE", Value = "render" }]
+            Environment = [
+              { Name = "STAGE", Value = "render" },
+              { Name = "GENERATION_BATCH_DAYS", "Value.$" = "States.Format('{}', $.days)" }
+            ]
           }
         }
         Next = "GenerateDone"

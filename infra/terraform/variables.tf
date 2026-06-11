@@ -33,6 +33,16 @@ variable "generation_batch_days" {
   default = 14
 }
 
+variable "reddit_max_posts" {
+  type    = number
+  default = 30
+}
+
+variable "reddit_min_needed" {
+  type    = number
+  default = 15
+}
+
 variable "batch_max_vcpus" {
   type    = number
   default = 32

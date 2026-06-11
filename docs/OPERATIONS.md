@@ -27,6 +27,8 @@ aws stepfunctions start-execution \
   --region ap-northeast-2
 ```
 
+생성 smoke는 같은 workflow에 `{"mode":"generate","days":1}`을 전달합니다. 후보 수집량은 Terraform의 `reddit_max_posts`, `reddit_min_needed`로 별도 관리됩니다.
+
 업로드 workflow:
 
 ```bash
@@ -51,8 +53,7 @@ aws lambda invoke \
 
 ```bash
 mkdir -p infra/terraform/.build
-git ls-files -co --exclude-standard -z \
-  | xargs -0 zip -q infra/terraform/.build/source.zip
+git archive --format=zip -o infra/terraform/.build/source.zip HEAD
 aws s3 cp infra/terraform/.build/source.zip \
   s3://youtube-shorts-automation-160885253413-apne2/source/source.zip \
   --region ap-northeast-2

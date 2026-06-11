@@ -13,6 +13,8 @@
 - [x] Selenium Reddit crawler 제거
 - [x] Reddit OAuth/public JSON/PullPush fallback 수집기 구현
 - [x] Batch stage runner 추가: `collect`, `filter`, `script`, `tts`, `subtitles`, `render`
+- [x] 생성 일수와 Reddit 후보 수집량 분리
+- [x] 빈 산출물을 성공으로 넘기지 않도록 stage artifact 검증 추가
 - [x] S3Store upload/download/list/prefix sync 추상화
 - [x] YouTube OAuth refresh token 기반 uploader 구현
 - [x] upload scheduler를 새 `publish-ready/` prefix와 예약 시간 기준으로 수정
@@ -45,6 +47,7 @@
 - [x] Reddit public JSON 403 상황에서 PullPush fallback 검증
 - [x] YouTube OAuth refresh token 확보
 - [x] 실제 YouTube upload E2E 확인
+- [x] Step Functions generate smoke에서 상태 전달 버그 발견 및 `ResultPath = null` 수정
 
 ## 남은 외부 의존성
 

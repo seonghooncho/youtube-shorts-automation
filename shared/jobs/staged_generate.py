@@ -65,6 +65,9 @@ def collect_stage() -> None:
 def filter_stage() -> None:
     _download_required("raw/raw_posts.json", RAW_POSTS_FILE)
     filter_viable_posts()
+    viable_posts = _read_json_file(VIABLE_POSTS_FILE)
+    if not viable_posts:
+        raise RuntimeError("No viable Reddit posts found after filtering.")
     store.upload_file(VIABLE_POSTS_FILE, "scripts/viable_posts.json")
 
 
@@ -72,23 +75,31 @@ def script_stage() -> None:
     _download_required("scripts/viable_posts.json", VIABLE_POSTS_FILE)
     generate_scripts_from_filtered()
     _prepare_publish_schedule()
+    metadata = _read_json_file(FINAL_METADATA_FILE)
+    if not metadata:
+        raise RuntimeError("No final metadata generated from viable posts.")
     store.upload_file(FINAL_METADATA_FILE, "scripts/final_metadata.json")
     if FAILED_POSTS_FILE.exists():
         store.upload_file(FAILED_POSTS_FILE, "scripts/failed_posts.json")
-    with open(FINAL_METADATA_FILE, "r", encoding="utf-8") as f:
-        content_repo.upsert_items(json.load(f), "SCRIPTED")
+    content_repo.upsert_items(metadata, "SCRIPTED")
 
 
 def tts_stage() -> None:
     _download_required("scripts/final_metadata.json", FINAL_METADATA_FILE)
     run_batch_tts()
-    store.upload_directory(AUDIO_DIR, "audio/mp3")
-    store.upload_directory(MARKS_DIR, "audio/marks")
+    uploaded_audio = store.upload_directory(AUDIO_DIR, "audio/mp3")
+    uploaded_marks = store.upload_directory(MARKS_DIR, "audio/marks")
+    if not uploaded_audio or not uploaded_marks:
+        raise RuntimeError("TTS did not produce both audio and speech mark artifacts.")
 
 
 def subtitles_stage() -> None:
-    store.download_prefix("audio/marks", MARKS_DIR)
+    downloaded_marks = store.download_prefix("audio/marks", MARKS_DIR)
+    if not downloaded_marks:
+        raise RuntimeError("No speech mark artifacts found in S3 for subtitle generation.")
     convert_all_marks_to_srt()
+    if not list(SUBTITLES_DIR.glob("*.srt")):
+        raise RuntimeError("Subtitle generation produced no SRT files.")
     store.download_prefix("audio/mp3", AUDIO_DIR)
     analyze_all_tts()
     store.upload_directory(SUBTITLES_DIR, "audio/subtitles")
@@ -103,6 +114,8 @@ def render_stage() -> None:
     _download_required("audio/tts_check_result.json", get_output_file("tts_check_result.json"))
     batch_merge_videos_for_tts()
     batch_render_all_videos()
+    if not list(FINAL_DIR.glob("*.mp4")):
+        raise RuntimeError("Video rendering produced no final MP4 files.")
     _attach_video_keys()
     update_metadata_after_video_creation()
     store.upload_directory(FINAL_DIR, "videos/final")
@@ -164,10 +177,16 @@ def _attach_video_keys() -> None:
 
 
 def _read_metadata() -> list[dict]:
-    with open(FINAL_METADATA_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+    return _read_json_file(FINAL_METADATA_FILE)
 
 
 def _write_metadata(items: list[dict]) -> None:
     with open(FINAL_METADATA_FILE, "w", encoding="utf-8") as f:
         json.dump(items, f, ensure_ascii=False, indent=2)
+
+
+def _read_json_file(path) -> list[dict]:
+    if not path.exists():
+        return []
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
