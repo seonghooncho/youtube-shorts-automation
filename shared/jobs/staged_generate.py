@@ -73,6 +73,7 @@ def filter_stage() -> None:
 
 def script_stage() -> None:
     _download_required("scripts/viable_posts.json", VIABLE_POSTS_FILE)
+    _limit_viable_posts_for_batch()
     generate_scripts_from_filtered()
     _prepare_publish_schedule()
     metadata = _read_json_file(FINAL_METADATA_FILE)
@@ -160,6 +161,14 @@ def _prepare_publish_schedule() -> None:
     _write_metadata(items)
 
 
+def _limit_viable_posts_for_batch() -> None:
+    posts = _read_json_file(VIABLE_POSTS_FILE)
+    batch_days = int(os.getenv("GENERATION_BATCH_DAYS", "14"))
+    if batch_days > 0 and len(posts) > batch_days:
+        _write_json_file(VIABLE_POSTS_FILE, posts[:batch_days])
+        print(f"✂️ viable_posts 제한: {len(posts)} -> {batch_days}")
+
+
 def _attach_video_keys() -> None:
     if not FINAL_METADATA_FILE.exists():
         return
@@ -181,8 +190,7 @@ def _read_metadata() -> list[dict]:
 
 
 def _write_metadata(items: list[dict]) -> None:
-    with open(FINAL_METADATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(items, f, ensure_ascii=False, indent=2)
+    _write_json_file(FINAL_METADATA_FILE, items)
 
 
 def _read_json_file(path) -> list[dict]:
@@ -190,3 +198,8 @@ def _read_json_file(path) -> list[dict]:
         return []
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def _write_json_file(path, items: list[dict]) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(items, f, ensure_ascii=False, indent=2)

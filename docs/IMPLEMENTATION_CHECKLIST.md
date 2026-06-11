@@ -14,6 +14,7 @@
 - [x] Reddit OAuth/public JSON/PullPush fallback 수집기 구현
 - [x] Batch stage runner 추가: `collect`, `filter`, `script`, `tts`, `subtitles`, `render`
 - [x] 생성 일수와 Reddit 후보 수집량 분리
+- [x] GPT 대본 생성은 요청된 생성 일수만큼만 수행하도록 제한
 - [x] 빈 산출물을 성공으로 넘기지 않도록 stage artifact 검증 추가
 - [x] S3Store upload/download/list/prefix sync 추상화
 - [x] YouTube OAuth refresh token 기반 uploader 구현
