@@ -29,6 +29,8 @@ temp/
 
 # Terraform
 **/.terraform/
+**/.build/
 *.tfstate
 *.tfstate.*
 *.tfplan
+tfplan
