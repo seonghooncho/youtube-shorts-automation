@@ -91,11 +91,14 @@ def _ask_yes_no(client: openai.OpenAI, prompt: str, model: str) -> str:
 
     for attempt, messages in enumerate(messages_templates, start=1):
         try:
-            resp = client.responses.create(
-                model=model,
-                input=messages,
-                max_output_tokens=16,
-            )
+            kwargs = {
+                "model": model,
+                "input": messages,
+                "max_output_tokens": 128,
+            }
+            if model.startswith("gpt-5"):
+                kwargs["reasoning"] = {"effort": "minimal"}
+            resp = client.responses.create(**kwargs)
             raw = (resp.output_text or "").strip()
             verdict = _normalize_yes_no(raw)
             if verdict:

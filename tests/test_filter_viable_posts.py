@@ -24,3 +24,12 @@ def test_ask_yes_no_omits_temperature_for_responses_api():
 
     assert _ask_yes_no(client, "Is this viable?", "gpt-5-mini") == "YES"
     assert "temperature" not in client.responses.kwargs
+    assert client.responses.kwargs["max_output_tokens"] == 128
+    assert client.responses.kwargs["reasoning"] == {"effort": "minimal"}
+
+
+def test_ask_yes_no_omits_reasoning_for_non_gpt5_models():
+    client = _Client()
+
+    assert _ask_yes_no(client, "Is this viable?", "gpt-4.1-mini") == "YES"
+    assert "reasoning" not in client.responses.kwargs
