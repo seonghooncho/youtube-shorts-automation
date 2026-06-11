@@ -1,9 +1,13 @@
 #!/bin/bash
 exec > >(tee /var/log/ytshorts-userdata.log | logger -t ytshorts-userdata -s 2>/dev/console) 2>&1
 set -euo pipefail
+set -x
+
+export S3_BUCKET_NAME="${bucket_name}"
+export MODE="__MODE__"
 
 cleanup() {
-  if [[ -n "$${S3_BUCKET_NAME:-}" ]]; then
+  if [[ -n "$${S3_BUCKET_NAME:-}" ]] && command -v aws >/dev/null 2>&1; then
     aws s3 cp /var/log/ytshorts-userdata.log "s3://$${S3_BUCKET_NAME}/logs/userdata-$${MODE}-$(date +%Y%m%d-%H%M%S).log" || true
     [[ -d /opt/ytshorts/logs ]] && aws s3 cp /opt/ytshorts/logs/ "s3://$${S3_BUCKET_NAME}/logs/" --recursive || true
   fi
@@ -14,7 +18,6 @@ trap cleanup EXIT
 export DEBIAN_FRONTEND=noninteractive
 export AWS_DEFAULT_REGION="${aws_region}"
 export AWS_REGION="${aws_region}"
-export MODE="__MODE__"
 export REPO_URL="${repository_url}"
 export GIT_REF="${git_ref}"
 
@@ -75,7 +78,7 @@ export TARGET_PLATFORMS="$${TARGET_PLATFORMS:-youtube}"
 export YOUTUBE_PRIVACY_STATUS="$${YOUTUBE_PRIVACY_STATUS:-private}"
 export REDDIT_FALLBACK_PROVIDER="$${REDDIT_FALLBACK_PROVIDER:-pullpush}"
 
-if [[ -z "$S3_BUCKET_NAME" ]]; then
+if [[ -z "$${S3_BUCKET_NAME:-}" ]]; then
   export S3_BUCKET_NAME="${bucket_name}"
 fi
 
