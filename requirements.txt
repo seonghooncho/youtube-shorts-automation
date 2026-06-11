@@ -22,6 +22,7 @@ google-auth-httplib2
 tqdm
 
 # Image processing
-Pillow>=10.4,<12
+# moviepy 1.0.3 still uses Image.ANTIALIAS, removed in Pillow 10.
+Pillow>=9.5,<10
 
 pysrt
