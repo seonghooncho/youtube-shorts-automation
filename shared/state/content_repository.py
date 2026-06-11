@@ -27,10 +27,11 @@ class ContentRepository:
                 content_id = item.get("id")
                 if not content_id:
                     continue
+                item_status = "UPLOADED" if item.get("uploaded") or item.get("upload_status") == "UPLOADED" else status
                 batch.put_item(
                     Item={
                         "content_id": str(content_id),
-                        "status": status,
+                        "status": item_status,
                         "title": item.get("title", ""),
                         "source_url": item.get("source_url", ""),
                         "updated_at": now,

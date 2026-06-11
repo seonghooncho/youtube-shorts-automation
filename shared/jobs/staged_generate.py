@@ -180,8 +180,12 @@ def _attach_video_keys() -> None:
         video_path = FINAL_DIR / f"{content_id}.mp4"
         if video_path.exists():
             item["video_key"] = f"videos/final/{content_id}.mp4"
-            item["upload_status"] = "PUBLISH_READY"
-            item["status"] = "PUBLISH_READY"
+            if item.get("uploaded") or item.get("upload_status") == "UPLOADED":
+                item["upload_status"] = "UPLOADED"
+                item["status"] = "UPLOADED"
+            else:
+                item["upload_status"] = "PUBLISH_READY"
+                item["status"] = "PUBLISH_READY"
     _write_metadata(items)
 
 
