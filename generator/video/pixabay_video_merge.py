@@ -1,9 +1,12 @@
 import requests
 import os
 import json
+import shutil
+import subprocess
 from pathlib import Path
 from PIL import Image
-from moviepy.editor import VideoFileClip, concatenate_videoclips
+from imageio_ffmpeg import get_ffmpeg_exe
+from moviepy.editor import VideoFileClip
 from shared.utils.slack_notify import send_slack_message
 from shared.utils.config import  USED_PIXABAY_IDS_FILE, get_data_file, get_output_file, get_assets_file, get_video_source
 
@@ -76,34 +79,90 @@ def download_video_to_ebs(video_url: str, dest_path: Path):
 
 def prepare_bg_videos_for_tts(video_paths: list, tts_length: float, output_video_path: Path, margin: float = 2.0):
     target_len = tts_length + margin
-    clips, cur_len = [], 0.0
+    segment_paths, cur_len = [], 0.0
+    segment_dir = output_video_path.parent / f"{output_video_path.stem}_segments"
+    segment_dir.mkdir(parents=True, exist_ok=True)
+
     for vid_path in video_paths:
-        video = VideoFileClip(str(vid_path))
-        if video.duration is None or video.duration < 0.1:
-            print(f"⚠️ 잘못된 클립 무시 (duration={video.duration:.2f}): {vid_path}")
-            continue
-        video = video.resize(height=1920)
-        video = video.crop(x_center=video.w/2, y_center=video.h/2, width=1080, height=1920)
         remain = target_len - cur_len
         if remain <= 0:
             break
-        if video.duration <= remain:
-            clips.append(video)
-            cur_len += video.duration
-        else:
-            if remain < 0.1:
-                print(f"⚠️ remain 너무 짧아 생략: {remain:.2f}s")
+
+        video = VideoFileClip(str(vid_path))
+        try:
+            if video.duration is None or video.duration < 0.1:
+                print(f"⚠️ 잘못된 클립 무시 (duration={video.duration}): {vid_path}")
                 continue
-            clips.append(video.subclip(0, remain))
-            cur_len += remain
-            break
-    if not clips:
+
+            clip_duration = min(video.duration, remain)
+        finally:
+            video.close()
+
+        if clip_duration < 0.1:
+            print(f"⚠️ remain 너무 짧아 생략: {clip_duration:.2f}s")
+            continue
+
+        segment_path = segment_dir / f"segment_{len(segment_paths):03}.mp4"
+        _write_vertical_segment(Path(vid_path), segment_path, clip_duration)
+        segment_paths.append(segment_path)
+        cur_len += clip_duration
+
+    if not segment_paths:
         raise Exception("영상 클립 부족")
+
     output_video_path.parent.mkdir(parents=True, exist_ok=True)
-    final_video = concatenate_videoclips(clips)
-    final_video.write_videofile(str(output_video_path), codec="libx264", audio=False, fps=24)
+    _concat_segments(segment_paths, output_video_path)
     print(f"✅ 영상 생성 완료: {output_video_path}")
     return str(output_video_path)
+
+
+def _ffmpeg_bin() -> str:
+    return shutil.which("ffmpeg") or get_ffmpeg_exe()
+
+
+def _write_vertical_segment(input_path: Path, output_path: Path, duration: float) -> None:
+    video_filter = "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fps=24,setsar=1"
+    cmd = [
+        _ffmpeg_bin(),
+        "-y",
+        "-i",
+        str(input_path),
+        "-t",
+        f"{duration:.3f}",
+        "-vf",
+        video_filter,
+        "-an",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-pix_fmt",
+        "yuv420p",
+        str(output_path),
+    ]
+    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+
+
+def _concat_segments(segment_paths: list[Path], output_path: Path) -> None:
+    concat_file = output_path.parent / f"{output_path.stem}_concat.txt"
+    with open(concat_file, "w", encoding="utf-8") as f:
+        for path in segment_paths:
+            f.write(f"file '{path.resolve().as_posix()}'\n")
+
+    cmd = [
+        _ffmpeg_bin(),
+        "-y",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        str(concat_file),
+        "-c",
+        "copy",
+        str(output_path),
+    ]
+    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
 def batch_merge_videos_for_tts():
     used_ids = load_used_ids()
