@@ -197,8 +197,7 @@ def render_video_with_ffmpeg(filename: str):
     audio_path = AUDIO_DIR / f"{filename}.mp3"
     subtitle_path = SUBTITLES_DIR / f"{filename}.srt"
     output_path = FINAL_DIR / f"{filename}.mp4"
-    temp_no_audio_video = FINAL_DIR / f"{filename}_no_audio.mp4"
-    temp_audio_path = FINAL_DIR / f"{filename}_sped_audio.aac"
+    temp_adjusted_srt = FINAL_DIR / f"{filename}_adjusted.srt"
 
     # 메타 조회
     metadata = get_tts_metadata(filename)
@@ -215,34 +214,53 @@ def render_video_with_ffmpeg(filename: str):
     background_path = get_video_source(f"{filename}.mp4")
     if not background_path.exists():
         raise FileNotFoundError(f"배경 영상이 없습니다: {background_path}")
-    background = VideoFileClip(str(background_path))
-    video = background.without_audio()
 
     # 자막 타이밍 보정
     if not subtitle_path.exists():
         raise FileNotFoundError(f"SRT가 없습니다: {subtitle_path}")
     adjusted_subs = adjust_subtitle_timings(subtitle_path, speed)
-
-    # 중앙 자막 생성 (비디오 폭 기준 wrap 폭 계산)
-    # 1080x1920 세로 비디오는 보통 w=1080. 여백 고려하여 85~90% 폭 사용 추천.
-    max_text_width = int(video.w * 0.88)
-    generator = lambda txt: make_textclip_via_pil(
-        text=txt,
-        fontsize=DEFAULT_FONT_SIZE,
-        max_width=max_text_width,
-        stroke_width=DEFAULT_STROKE_WIDTH,
-    )
-    subs = SubtitlesClip(adjusted_subs, generator).set_position("center").set_start(margin)
-
-    final_video = CompositeVideoClip([video, subs.set_duration(video.duration)])
-
-    # 1) 무음 영상 출력
-    print(f"🎬 1. 영상 렌더링 (무음): {temp_no_audio_video}")
     FINAL_DIR.mkdir(parents=True, exist_ok=True)
-    final_video.write_videofile(str(temp_no_audio_video), codec="libx264", audio=False)
+    _write_adjusted_srt(adjusted_subs, temp_adjusted_srt, offset_seconds=margin)
 
-    # 2) FFmpeg로 오디오 배속(피치 유지)
-    print(f"🎧 2. FFmpeg: 오디오 배속 (피치 유지)")
+    print(f"🎬 FFmpeg: subtitles + audio merge → {output_path}")
+    font_path = ensure_anton_font()
+    subtitle_filter = (
+        f"subtitles='{_escape_filter_path(temp_adjusted_srt)}'"
+        f":fontsdir='{_escape_filter_path(font_path.parent)}'"
+        ":force_style='FontName=Anton,FontSize=84,"
+        "PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,"
+        "BorderStyle=1,Outline=8,Alignment=5'"
+    )
+    filter_complex = (
+        f"[0:v]{subtitle_filter}[v];"
+        f"[2:a]{_atempo_filter(speed)}[a1];"
+        "[1:a][a1][3:a]concat=n=3:v=0:a=1[a]"
+    )
+
+    ffmpeg_cmd = [
+        _ffmpeg_bin(),
+        "-y",
+        "-i", str(background_path),
+        "-f", "lavfi", "-t", "1", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+        "-i", str(audio_path),
+        "-f", "lavfi", "-t", "1", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+        "-filter_complex", filter_complex,
+        "-map", "[v]",
+        "-map", "[a]",
+        "-c:v", "libx264",
+        "-preset", "veryfast",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac",
+        "-shortest",
+        str(output_path),
+    ]
+    subprocess.run(ffmpeg_cmd, check=True)
+
+    # 임시파일 정리
+    temp_adjusted_srt.unlink(missing_ok=True)
+
+
+def _atempo_filter(speed: float) -> str:
     atempo_filters = []
     remaining_speed = speed
     while remaining_speed > 2.0:
@@ -252,41 +270,27 @@ def render_video_with_ffmpeg(filename: str):
         atempo_filters.append("atempo=0.5")
         remaining_speed /= 0.5
     atempo_filters.append(f"atempo={remaining_speed:.4f}")
-    atempo_filter_str = ",".join(atempo_filters)
+    return ",".join(atempo_filters)
 
-    ffmpeg_cmd_audio = [
-        _ffmpeg_bin(),
-        "-y",
-        # 앞 무음
-        "-f", "lavfi", "-t", "1", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
-        # 실제 오디오
-        "-i", str(audio_path),
-        # 뒤 무음
-        "-f", "lavfi", "-t", "1", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
-        # 실제 오디오에 atempo 적용
-        "-filter_complex", f"[1:a]{atempo_filter_str}[a1];[0:a][a1][2:a]concat=n=3:v=0:a=1[outa]",
-        "-map", "[outa]",
-        "-acodec", "aac",
-        str(temp_audio_path),
-    ]
-    subprocess.run(ffmpeg_cmd_audio, check=True)
 
-    # 3) 무음 영상 + 가공된 오디오 병합
-    print(f"🎬 3. FFmpeg: 영상 + 오디오 병합 → {output_path}")
-    ffmpeg_cmd_merge = [
-        _ffmpeg_bin(),
-        "-y",
-        "-i", str(temp_no_audio_video),
-        "-i", str(temp_audio_path),
-        "-c:v", "copy",
-        "-c:a", "aac",
-        str(output_path),
-    ]
-    subprocess.run(ffmpeg_cmd_merge, check=True)
+def _write_adjusted_srt(adjusted_subs, path: Path, offset_seconds: float) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        for index, ((start, end), text) in enumerate(adjusted_subs, start=1):
+            f.write(f"{index}\n")
+            f.write(f"{_srt_time(start + offset_seconds)} --> {_srt_time(end + offset_seconds)}\n")
+            f.write(f"{text}\n\n")
 
-    # 임시파일 정리
-    temp_no_audio_video.unlink(missing_ok=True)
-    temp_audio_path.unlink(missing_ok=True)
+
+def _srt_time(seconds: float) -> str:
+    total_ms = max(0, int(round(seconds * 1000)))
+    hours, rem = divmod(total_ms, 3600_000)
+    minutes, rem = divmod(rem, 60_000)
+    secs, millis = divmod(rem, 1000)
+    return f"{hours:02}:{minutes:02}:{secs:02},{millis:03}"
+
+
+def _escape_filter_path(path: Path) -> str:
+    return str(path).replace("\\", "\\\\").replace("'", "\\'")
 
 
 def batch_render_all_videos():
