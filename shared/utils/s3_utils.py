@@ -1,11 +1,5 @@
-# service/s3_utils.py
-
-import os
 import json
-from pathlib import Path
 from dotenv import load_dotenv
-import boto3
-from botocore.exceptions import NoCredentialsError, ClientError
 
 from shared.utils.config import (
     FINAL_METADATA_FILE,
@@ -13,31 +7,15 @@ from shared.utils.config import (
     get_s3_state_key,
     get_data_file,
 )
+from shared.storage import S3Store
 
 load_dotenv()
 
-# 환경 변수 로드 및 예외 처리
-try:
-    AWS_S3_ACCESS_KEY = os.getenv("AWS_S3_ACCESS_KEY")
-    AWS_S3_SECRET_ACCESS_KEY = os.getenv("AWS_S3_SECRET_ACCESS_KEY")
-    BUCKET_NAME = os.getenv("S3_BUCKET_NAME")
-
-    s3 = boto3.client(
-        "s3",
-        aws_access_key_id=AWS_S3_ACCESS_KEY,
-        aws_secret_access_key=AWS_S3_SECRET_ACCESS_KEY,
-        region_name="ap-northeast-2"
-    )
-except (NoCredentialsError, ClientError) as e:
-    print(f"⚠️ AWS S3 설정 오류: {e}")
-    s3 = None
+s3_store = S3Store()
 
 def upload_to_s3(file_path: str, s3_key: str):
-    if not s3:
-        print("🚨 S3 클라이언트가 초기화되지 않았습니다. 업로드를 건너뜁니다.")
-        return
     try:
-        s3.upload_file(file_path, BUCKET_NAME, s3_key)
+        s3_store.upload_file(file_path, s3_key)
         print(f"✅ Uploaded to S3: {s3_key}")
     except Exception as e:
         print(f"🚨 S3 업로드 실패: {e}")
@@ -47,22 +25,16 @@ def download_from_s3(s3_key: str, file_path: str) -> bool:
     S3에서 로컬 경로로 파일을 다운로드합니다.
     파일이 존재하지 않으면 예외를 발생시키지 않고 False를 반환합니다.
     """
-    if not s3:
-        print("🚨 S3 클라이언트가 초기화되지 않았습니다. 다운로드를 건너뜁니다.")
-        return False
     try:
-        s3.download_file(BUCKET_NAME, s3_key, file_path)
-        print(f"⬇️ Downloaded from S3: {s3_key}")
-        return True
-    except ClientError as e:
-        if e.response['Error']['Code'] == '404':
+        downloaded = s3_store.download_file(s3_key, file_path)
+        if downloaded:
+            print(f"⬇️ Downloaded from S3: {s3_key}")
+            return True
+        else:
             print(f"⚠️ S3에 파일이 없습니다: {s3_key}")
             return False
-        else:
-            print(f"🚨 S3 다운로드 실패: {e}")
-            return False
     except Exception as e:
-        print(f"🚨 예상치 못한 S3 다운로드 오류: {e}")
+        print(f"🚨 S3 다운로드 실패: {e}")
         return False
 
 def update_metadata_after_video_creation():

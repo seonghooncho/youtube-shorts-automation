@@ -1,9 +1,8 @@
-#shared/utils/config.py
 from pathlib import Path
 import shutil
 
 # 프로젝트 루트 경로
-PROJECT_ROOT = Path(__file__).parent.resolve()
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 # 주요 디렉토리 경로들
 DATA_DIR = PROJECT_ROOT / "data"
@@ -72,12 +71,15 @@ def get_assets_file(filename: str) -> Path:
     return ASSETS_DIR / filename
 
 def get_font_file() -> Path:
-    """assets 디렉토리의 파일 경로를 반환합니다."""
-    return PROJECT_ROOT / "Anton-Regular.ttf"
+    """자막 렌더링에 사용할 기본 폰트 경로를 반환합니다."""
+    bundled_font = PROJECT_ROOT / "shared" / "utils" / "Anton-Regular.ttf"
+    if bundled_font.exists():
+        return bundled_font
+    return ASSETS_DIR / "fonts" / "Anton-Regular.ttf"
 
 def get_video_source(name: str) -> Path:
     """유튜브 업로드용 병합 영상 소스 경로를 반환합니다."""
-    return Path("output/video-sources") / name
+    return OUTPUT_DIR / "video-sources" / name
 
 # S3 경로 관리
 S3_VIDEO_PREFIX = "shorts/videos"

@@ -19,3 +19,16 @@ __pycache__/
 *.pem
 *.key
 google-key.json
+
+# Runtime artifacts
+data/
+output/
+assets/tmp/
+assets/output/
+temp/
+
+# Terraform
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan

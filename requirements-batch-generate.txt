@@ -9,13 +9,12 @@ moviepy==1.0.3
 imageio-ffmpeg
 
 # Web scraping
-selenium
-webdriver-manager
+# Reddit collection uses OAuth/JSON requests. Selenium is no longer required.
 
 # Progress bars
 tqdm
 
-# Image processing (if needed for future features)
-Pillow<10
+# Image processing
+Pillow>=10.4,<12
 
 pysrt

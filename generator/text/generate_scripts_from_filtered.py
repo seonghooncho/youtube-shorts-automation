@@ -117,6 +117,7 @@ def generate_scripts_from_filtered():
         max_retries = 2  # 최대 2회까지 재생성 (기존 유지)
 
         while try_count <= max_retries:
+            result = None
             try:
                 if try_count == 0:
                     result: ReturnScript = call_gpt_generate_script(title, content)
@@ -149,10 +150,11 @@ def generate_scripts_from_filtered():
                 break  # 성공 시 루프 종료
 
             except Exception as e:
-                print(
-                    f"🧠 GPT 응답 (post {idx}, 시도 {try_count+1}):\n"
-                    f"{json.dumps(result.model_dump(), ensure_ascii=False, indent=2)}\n"
-                )
+                if isinstance(result, ReturnScript):
+                    print(
+                        f"🧠 GPT 응답 (post {idx}, 시도 {try_count+1}):\n"
+                        f"{json.dumps(result.model_dump(), ensure_ascii=False, indent=2)}\n"
+                    )
                 msg = str(e)
 
                 # 에러 사유별 재생성 가이드 유지

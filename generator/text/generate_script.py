@@ -13,8 +13,8 @@ def _get_client() -> openai.OpenAI:
         raise RuntimeError("OPENAI_API_KEY가 설정되지 않았습니다.")
     return openai.OpenAI(api_key=api_key)
 
-client = _get_client()
-DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-mini")  # 필요시 gpt-4o-2024-08-06 로 변경
+def _default_model() -> str:
+    return os.getenv("OPENAI_MODEL", "gpt-5-mini")
 
 # --- Schema ---
 class ReturnScript(BaseModel):
@@ -54,9 +54,9 @@ def _json_slice(s: str) -> Optional[str]:
     return s[: last + 1] if last != -1 else None
 
 # --- Core calls ---
-def _try_structured(prompt: str, max_output_tokens: int) -> ReturnScript:
+def _try_structured(client: openai.OpenAI, prompt: str, max_output_tokens: int) -> ReturnScript:
     resp = client.responses.parse(
-        model=DEFAULT_MODEL,
+        model=_default_model(),
         input=[
             {"role": "system", "content": "You are a YouTube Shorts script writer."},
             {"role": "user", "content": prompt},
@@ -71,12 +71,12 @@ def _try_structured(prompt: str, max_output_tokens: int) -> ReturnScript:
     _assert_no_nulls(parsed)
     return parsed
 
-def _fallback_json_mode(prompt: str, max_output_tokens: int) -> ReturnScript:
+def _fallback_json_mode(client: openai.OpenAI, prompt: str, max_output_tokens: int) -> ReturnScript:
     """
     Structured Outputs 실패 시 JSON 모드로 재시도 후 Pydantic 검증.
     """
     resp = client.responses.create(
-        model=DEFAULT_MODEL,
+        model=_default_model(),
         input=[
             {"role": "developer",
              "content": (
@@ -111,17 +111,18 @@ def generate_script(prompt: str) -> ReturnScript:
     """
     budgets = [1800, 2400, 3000]  # 상황에 맞게 조정 가능
     last_err: Optional[Exception] = None
+    client = _get_client()
 
     for i, max_tokens in enumerate(budgets, start=1):
         try:
             # 1차: Structured
-            return _try_structured(prompt, max_tokens)
+            return _try_structured(client, prompt, max_tokens)
         except Exception as e1:
             last_err = e1
             print(f"⚠️ Structured 실패 (시도 {i}/{len(budgets)} | tokens={max_tokens}): {e1}")
             try:
                 # 2차: 폴백(JSON 모드)
-                rs = _fallback_json_mode(prompt, max_tokens)
+                rs = _fallback_json_mode(client, prompt, max_tokens)
                 _assert_no_nulls(rs)
                 return rs
             except Exception as e2:

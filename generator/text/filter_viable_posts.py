@@ -91,13 +91,13 @@ def _ask_yes_no(client: openai.OpenAI, prompt: str, model: str) -> str:
 
     for attempt, messages in enumerate(messages_templates, start=1):
         try:
-            resp = client.chat.completions.create(
-                model=model,            # 예: "gpt-3.5-turbo" (기본), 필요시 환경변수로 교체 가능
-                messages=messages,
+            resp = client.responses.create(
+                model=model,
+                input=messages,
                 temperature=0,
-                max_tokens=16,          # 너무 낮게 주면 일부 SDK에서 에러 → 16 이상 권장
+                max_output_tokens=16,
             )
-            raw = (resp.choices[0].message.content or "").strip()
+            raw = (resp.output_text or "").strip()
             verdict = _normalize_yes_no(raw)
             if verdict:
                 return verdict
@@ -112,7 +112,7 @@ def _ask_yes_no(client: openai.OpenAI, prompt: str, model: str) -> str:
 # -----------------------------
 def filter_viable_posts():
     client = _get_client()
-    model = os.getenv("FILTER_MODEL", "gpt-3.5-turbo")
+    model = os.getenv("FILTER_MODEL") or os.getenv("OPENAI_MODEL", "gpt-5-mini")
 
     if not RAW_POSTS_FILE.exists():
         print("❌ raw_posts.json이 없습니다.")

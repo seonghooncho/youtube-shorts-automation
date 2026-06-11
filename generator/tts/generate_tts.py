@@ -14,14 +14,17 @@ load_dotenv()
 MALE_VOICES = ["Matthew", "Justin", "Joey", "Kevin", "Stephen"]
 FEMALE_VOICES = ["Joanna", "Kendra", "Kimberly", "Salli"]
 # AWS Polly 설정
-polly = boto3.client(
-    "polly",
-    aws_access_key_id=os.getenv("AWS_POLLY_ACCESS_KEY_ID"),
-    aws_secret_access_key=os.getenv("AWS_POLLY_SECRET_ACCESS_KEY"),
-    region_name=os.getenv("AWS_REGION"),
-)
+_polly_kwargs = {"region_name": os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION") or "ap-northeast-2"}
+if os.getenv("AWS_POLLY_ACCESS_KEY_ID") and os.getenv("AWS_POLLY_SECRET_ACCESS_KEY"):
+    _polly_kwargs.update(
+        aws_access_key_id=os.getenv("AWS_POLLY_ACCESS_KEY_ID"),
+        aws_secret_access_key=os.getenv("AWS_POLLY_SECRET_ACCESS_KEY"),
+    )
+polly = boto3.client("polly", **_polly_kwargs)
 
 def generate_tts_with_timestamps(text, filename, voice_id):
+    AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+    MARKS_DIR.mkdir(parents=True, exist_ok=True)
     # 1. 음성(mp3) 생성
     audio_response = polly.synthesize_speech(
         OutputFormat='mp3',
@@ -85,7 +88,6 @@ def run_batch_tts():
         success = False
 
         while try_count <= max_retries:
-            temp_filename = f"{original_filename}_try{try_count}"
             audio_path, marks_path = generate_tts_with_timestamps(script_text, original_filename, voice_id)
 
             audio = AudioFileClip(audio_path)

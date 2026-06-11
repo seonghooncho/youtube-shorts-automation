@@ -9,11 +9,8 @@ google-auth==2.35.0
 google-auth-oauthlib==1.2.1
 google-auth-httplib2==0.2.0
 
-# Instagram
-instagrapi==2.1.0
-
-# TikTok
-TikTokApi==6.5.2
+# Optional platform uploaders are intentionally not installed by default.
+# Enable and pin them separately only when Instagram/TikTok upload is actively used.
 
 # Slack
 slack_sdk==3.33.4
