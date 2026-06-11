@@ -94,7 +94,6 @@ def _ask_yes_no(client: openai.OpenAI, prompt: str, model: str) -> str:
             resp = client.responses.create(
                 model=model,
                 input=messages,
-                temperature=0,
                 max_output_tokens=16,
             )
             raw = (resp.output_text or "").strip()
