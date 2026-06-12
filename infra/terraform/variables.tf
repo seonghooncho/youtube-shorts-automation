@@ -118,6 +118,11 @@ variable "youtube_privacy_status" {
   default = "private"
 }
 
+variable "youtube_min_upload_bytes" {
+  type    = number
+  default = 1048576
+}
+
 variable "generate_schedule_expression" {
   type    = string
   default = "cron(0 2 1,15 * ? *)"

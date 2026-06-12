@@ -3,6 +3,7 @@ import os
 import json
 import shutil
 import subprocess
+import hashlib
 from pathlib import Path
 from PIL import Image
 from imageio_ffmpeg import get_ffmpeg_exe
@@ -32,6 +33,16 @@ def load_used_ids():
 def save_used_ids(used_ids):
     with open(USED_PIXABAY_IDS_FILE, "w", encoding="utf-8") as f:
         json.dump(list(used_ids), f, ensure_ascii=False, indent=2)
+
+def _pixabay_page_spread() -> int:
+    try:
+        return max(1, int(os.getenv("PIXABAY_PAGE_SPREAD", "5")))
+    except ValueError:
+        return 5
+
+def _start_page_for_content(content_id: str, query: str) -> int:
+    digest = hashlib.sha256(f"{content_id}:{query}".encode("utf-8")).digest()
+    return 1 + (int.from_bytes(digest[:2], "big") % _pixabay_page_spread())
 '''
 def load_pixabay_state():
     if STATE_PATH.exists():
@@ -188,7 +199,7 @@ def batch_merge_videos_for_tts(target_ids: list[str] | None = None):
 
         for query in VIDEO_QUERY_CANDIDATES:
             print(f"🔍 [{tts_basename}] 쿼리 '{query}'로 영상 시도 중...")
-            page = 1
+            page = _start_page_for_content(tts_basename, query)
             while total_duration < tts_length + margin:
                 candidates = fetch_pixabay_video_urls(
                     query=query, min_sec=10, max_sec=30, count=50,

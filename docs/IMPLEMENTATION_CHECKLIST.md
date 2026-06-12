@@ -20,11 +20,20 @@
 - [x] publish-ready 버퍼/백필 정책 추가
 - [x] 오래 밀린 업로드 큐 예약일 rebase 보정 추가
 - [x] 렌더링 stage를 Batch array job으로 병렬화
+- [x] planner Lambda로 publish-ready 재고 충분 시 Batch 전체 스킵
+- [x] 렌더링 array size를 부족 수량(`needed_new_items`) 기준으로 동적 조정
+- [x] 부족 수량 1개일 때 단건 render job 경로 추가
 - [x] 빈 산출물을 성공으로 넘기지 않도록 stage artifact 검증 추가
+- [x] 최종 MP4 ffprobe 검증 추가: 크기, 길이, 해상도, 오디오/비디오 스트림
+- [x] publisher Lambda 업로드 전 최소 파일 크기 차단 추가
+- [x] Pixabay used-id array shard 경합 완화 및 finalize 병합 추가
+- [x] Pixabay page offset을 content/query 기준으로 분산해 동시 shard 중복 선택 완화
 - [x] S3Store upload/download/list/prefix sync 추상화
 - [x] YouTube OAuth refresh token 기반 uploader 구현
+- [x] YouTube OAuth scope를 상태조회/삭제 가능한 `youtube.force-ssl` 포함으로 확장
 - [x] upload scheduler를 새 `publish-ready/` prefix와 예약 시간 기준으로 수정
 - [x] Lambda publisher 추가
+- [x] Lambda planner 추가
 - [x] Dockerfile/buildspec 추가
 
 ## AWS/Terraform
@@ -37,6 +46,7 @@
 - [x] Batch/Fargate compute environment, queue, stage/script/render job definition 생성
 - [x] Step Functions state machine 생성
 - [x] EventBridge Scheduler twice-monthly refill/daily upload 생성
+- [x] Planner Lambda 생성
 - [x] Publisher Lambda 생성
 - [x] Budget/Batch/Step Functions 실패 Slack 알림 경로 생성
 - [x] S3 lifecycle, ECR lifecycle, CloudWatch log retention 설정
@@ -50,13 +60,21 @@
 - [x] Terraform validate 통과
 - [x] Terraform apply 완료
 - [x] CodeBuild image build 완료
+- [x] CodeBuild image build #16 완료: ECR `ytshorts-app:latest` 갱신
 - [x] Step Functions upload smoke 완료
+- [x] planner Lambda smoke 완료: `days=0`, `buffer_days=0`, `max_new_items=0` → `should_generate=false`
+- [x] Step Functions planner skip smoke 완료: `GenerateSkipped`로 Batch 미실행 성공
+- [x] publisher Lambda smoke 완료: 예약 도래 항목 없음 → no-op
 - [x] Batch collect smoke 완료
 - [x] Reddit public JSON 403 상황에서 PullPush fallback 검증
 - [x] YouTube OAuth refresh token 확보
 - [x] 실제 YouTube upload E2E 확인
 - [x] Step Functions generate smoke에서 상태 전달 버그 발견 및 `ResultPath = null` 수정
+- [x] YouTube 처리중 원인 분석: 2026-06-12 기준 2초/9KB smoke MP4 업로드로 확인
+- [x] 현재 OAuth scope 한계 확인: `videos.list`/`videos.delete`는 `ACCESS_TOKEN_SCOPE_INSUFFICIENT`
 
 ## 남은 외부 의존성
 
-YouTube upload에는 API key가 아니라 OAuth client와 refresh token이 필요합니다. 현재 `/ytshorts/YOUTUBE_CLIENT_ID`, `/ytshorts/YOUTUBE_CLIENT_SECRET`, `/ytshorts/YOUTUBE_REFRESH_TOKEN`은 SSM SecureString에 저장되어 있습니다. 실제 upload E2E는 publish-ready 영상이 생성된 뒤 `private` 상태로 검증합니다.
+YouTube upload에는 API key가 아니라 OAuth client와 refresh token이 필요합니다. 현재 `/ytshorts/YOUTUBE_CLIENT_ID`, `/ytshorts/YOUTUBE_CLIENT_SECRET`, `/ytshorts/YOUTUBE_REFRESH_TOKEN`은 SSM SecureString에 저장되어 있습니다.
+
+2026-06-12에 업로드된 smoke 영상 `Ra2dUfPJmJE`는 현재 token scope로 API 삭제/상태조회가 불가능합니다. 새 refresh token을 발급할 때는 코드에 반영된 `youtube.upload` + `youtube.force-ssl` scope로 재인증해야 처리 상태 조회와 삭제까지 가능합니다.

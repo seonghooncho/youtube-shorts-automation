@@ -27,6 +27,7 @@ PUBLISH_HOUR_LOCAL = int(os.getenv("PUBLISH_HOUR_LOCAL", "8"))
 PUBLISH_MINUTE_LOCAL = int(os.getenv("PUBLISH_MINUTE_LOCAL", "0"))
 SCHEDULE_TIMEZONE = os.getenv("SCHEDULE_TIMEZONE", "Asia/Seoul")
 PUBLISH_REBASE_STALE_DAYS = int(os.getenv("PUBLISH_REBASE_STALE_DAYS", "3"))
+YOUTUBE_MIN_UPLOAD_BYTES = int(os.getenv("YOUTUBE_MIN_UPLOAD_BYTES", "1048576"))
 
 
 def handler(event, context):
@@ -54,6 +55,23 @@ def handler(event, context):
     with tempfile.TemporaryDirectory() as tmp_dir:
         local_path = os.path.join(tmp_dir, f"{content_id}.mp4")
         resolved_key = _download_video(video_key, content_id, local_path)
+        valid_upload, block_reason = _validate_upload_candidate(local_path)
+        if not valid_upload:
+            target["upload_status"] = "UPLOAD_BLOCKED"
+            target["upload_error"] = block_reason
+            target["video_key"] = resolved_key
+            target["updated_at"] = int(time.time())
+            _save_metadata(metadata, metadata_key)
+            _mark_content(
+                content_id,
+                "UPLOAD_BLOCKED",
+                {
+                    "upload_error": block_reason,
+                    "video_key": resolved_key,
+                    "upload_status": "UPLOAD_BLOCKED",
+                },
+            )
+            return {"status": "blocked", "reason": block_reason, "content_id": content_id}
         youtube_id = _upload_youtube(local_path, target, youtube_config)
 
     target["uploaded"] = True
@@ -157,6 +175,13 @@ def _download_video(video_key: str, content_id: str, local_path: str) -> str:
                 continue
             raise
     raise FileNotFoundError(f"video object not found for content_id={content_id}")
+
+
+def _validate_upload_candidate(local_path: str) -> tuple[bool, str]:
+    size = os.path.getsize(local_path)
+    if size < YOUTUBE_MIN_UPLOAD_BYTES:
+        return False, f"video_too_small:{size}<{YOUTUBE_MIN_UPLOAD_BYTES}"
+    return True, "ok"
 
 
 def _youtube_config() -> dict[str, str] | None:

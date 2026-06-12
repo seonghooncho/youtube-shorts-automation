@@ -19,12 +19,14 @@
 EventBridge Scheduler
   ├─ twice-monthly refill input: {"mode":"generate","days":14}
   │   -> Step Functions ytshorts-pipeline
+  │      -> Lambda ytshorts-planner: publish-ready 재고/부족분 계산
+  │      -> 부족분 0개면 Batch 전체 스킵
   │      -> Batch stage: collect
   │      -> Batch stage: filter
   │      -> Batch stage: script
   │      -> Batch stage: tts
   │      -> Batch stage: subtitles
-  │      -> Batch array stage: render per content_id
+  │      -> Batch render: 1개면 single job, 2개 이상이면 needed_new_items 크기의 array job
   │      -> Batch stage: finalize
   │      -> S3 publish-ready + DynamoDB PUBLISH_READY
   └─ daily upload input: {"mode":"upload"}
@@ -46,6 +48,8 @@ videos/sources/       Pixabay 병합 배경 영상
 videos/final/         최종 MP4
 publish-ready/        업로드 대기 metadata
 state/                중복 수집/legacy 호환 상태
+state/render-used-pixabay/
+                      array render shard별 Pixabay 사용 ID 임시 상태
 ```
 
 ## 코드 구조
@@ -60,6 +64,8 @@ shared/storage        S3 object store 추상화
 shared/utils          설정, S3, Slack 유틸
 uploader              플랫폼 업로더와 YouTube OAuth helper
 infra/terraform       AWS 인프라 코드
+infra/terraform/lambda
+                      planner/publisher/budget notifier Lambda
 infra/bootstrap       Terraform remote state bootstrap
 docs                  기획, 구조, 운영 문서
 tests                 Reddit parser와 YouTube credential 테스트
@@ -75,7 +81,11 @@ tests                 Reddit parser와 YouTube credential 테스트
 needed = min(max_new_items, max(0, target_days + buffer_days - current_publish_ready_count))
 ```
 
-기본값은 `target_days=14`, `buffer_days=3`, `max_new_items=21`입니다. Reddit 후보 부족, GPT 검증 실패, TTS 길이 실패, 렌더 실패가 있으면 publish-ready가 목표보다 적을 수 있고, 다음 refill에서 부족분을 다시 채웁니다. 업로드 큐가 오래 밀려 예약일이 과거로 누적되면 publisher Lambda가 미업로드 큐를 현재 시점부터 다시 일별 슬롯으로 정렬합니다.
+기본값은 `target_days=14`, `buffer_days=3`, `max_new_items=21`입니다. `ytshorts-planner`가 이 값을 먼저 계산해 `needed_new_items=0`이면 Batch 작업을 전혀 시작하지 않습니다. 생성이 필요하면 모든 Batch stage에 같은 `GENERATION_TARGET_NEW_ITEMS`를 주입하고, 렌더링 array 크기도 이 부족 수량으로 줄입니다.
+
+14개를 요청해도 모든 단계가 14개를 보장하지는 않습니다. Reddit 후보 부족, GPT 검증 실패, TTS 길이 실패, Pixabay/ffmpeg 렌더 실패가 있으면 publish-ready가 목표보다 적을 수 있고, 다음 refill에서 부족분을 다시 채웁니다. 업로드 큐가 오래 밀려 예약일이 과거로 누적되면 publisher Lambda가 미업로드 큐를 현재 시점부터 다시 일별 슬롯으로 정렬합니다.
+
+최종 MP4는 Batch 렌더 단계에서 `ffprobe`로 최소 길이, 파일 크기, 세로 해상도, 오디오/비디오 스트림을 검증한 뒤에만 `videos/final/`로 승격합니다. publisher Lambda도 업로드 직전 최소 파일 크기를 다시 확인해 smoke/깨진 파일이 YouTube로 올라가지 않게 차단합니다.
 
 ## Reddit 수집
 
