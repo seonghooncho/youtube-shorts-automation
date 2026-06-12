@@ -1,6 +1,7 @@
 # create_video.py (Pillow 기반 중앙 자막 + 굵은 테두리, ImageMagick 불필요)
 
 import json
+import os
 import subprocess
 import urllib.request
 from pathlib import Path
@@ -34,6 +35,23 @@ DEFAULT_FONT_SIZE = 84
 DEFAULT_STROKE_WIDTH = 24  # 가독성 충분히 두껍게
 DEFAULT_PADDING = 40       # 텍스트 이미지 패딩
 DEFAULT_LINE_SPACING_RATIO = 0.25  # 줄 간격 배수
+CAPTION_PLAY_RES_X = 1080
+CAPTION_PLAY_RES_Y = 1920
+DEFAULT_CAPTION_FONT_SIZE = 76
+DEFAULT_CAPTION_OUTLINE = 5
+DEFAULT_CAPTION_SHADOW = 2
+DEFAULT_CAPTION_CENTER_X = CAPTION_PLAY_RES_X // 2
+DEFAULT_CAPTION_CENTER_Y = CAPTION_PLAY_RES_Y // 2
+DEFAULT_CAPTION_MAX_WORDS = 2
+DEFAULT_CAPTION_MAX_CHARS = 16
+DEFAULT_CAPTION_MAX_DURATION = 1.05
+DEFAULT_CAPTION_FADE_MS = 35
+ASS_WHITE_STYLE = "&H00FFFFFF"
+ASS_YELLOW_STYLE = "&H0000FFFF"
+ASS_BLACK_STYLE = "&H00000000"
+ASS_SHADOW_STYLE = "&H80000000"
+ASS_WHITE_INLINE = "&HFFFFFF&"
+ASS_YELLOW_INLINE = "&H00FFFF&"
 
 
 # ----------------------------
@@ -43,6 +61,8 @@ DEFAULT_LINE_SPACING_RATIO = 0.25  # 줄 간격 배수
 
 def _ffmpeg_bin() -> str:
     return shutil.which("ffmpeg") or get_ffmpeg_exe()
+
+
 def get_tts_metadata(filename: str) -> dict:
     with open(TTS_RESULT_JSON, "r", encoding="utf-8") as f:
         data = json.load(f)
@@ -75,6 +95,16 @@ def ensure_anton_font() -> Path:
         except Exception as e:
             print(f"⚠️ Failed to download Anton font: {e}")
     return font_path
+
+
+def _ensure_ffmpeg_font_dir(font_path: Path) -> Path:
+    """Keep FFmpeg's ASS font scan limited to actual font files."""
+    font_dir = FINAL_DIR / "_fonts"
+    font_dir.mkdir(parents=True, exist_ok=True)
+    target = font_dir / font_path.name
+    if not target.exists() or target.stat().st_size != font_path.stat().st_size:
+        shutil.copy2(font_path, target)
+    return font_dir
 
 
 def _measure_text(draw: ImageDraw.ImageDraw, text: str, font, stroke_width: int):
@@ -197,7 +227,7 @@ def render_video_with_ffmpeg(filename: str):
     audio_path = AUDIO_DIR / f"{filename}.mp3"
     subtitle_path = SUBTITLES_DIR / f"{filename}.srt"
     output_path = FINAL_DIR / f"{filename}.mp4"
-    temp_adjusted_srt = FINAL_DIR / f"{filename}_adjusted.srt"
+    temp_caption_ass = FINAL_DIR / f"{filename}_captions.ass"
 
     # 메타 조회
     metadata = get_tts_metadata(filename)
@@ -220,16 +250,15 @@ def render_video_with_ffmpeg(filename: str):
         raise FileNotFoundError(f"SRT가 없습니다: {subtitle_path}")
     adjusted_subs = adjust_subtitle_timings(subtitle_path, speed)
     FINAL_DIR.mkdir(parents=True, exist_ok=True)
-    _write_adjusted_srt(adjusted_subs, temp_adjusted_srt, offset_seconds=margin)
+    _write_centered_caption_ass(adjusted_subs, temp_caption_ass, offset_seconds=margin)
 
     print(f"🎬 FFmpeg: subtitles + audio merge → {output_path}")
     font_path = ensure_anton_font()
+    ffmpeg_font_dir = _ensure_ffmpeg_font_dir(font_path)
     subtitle_filter = (
-        f"subtitles='{_escape_filter_path(temp_adjusted_srt)}'"
-        f":fontsdir='{_escape_filter_path(font_path.parent)}'"
-        ":force_style='FontName=Anton,FontSize=84,"
-        "PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,"
-        "BorderStyle=1,Outline=8,Alignment=5'"
+        f"subtitles='{_escape_filter_path(temp_caption_ass)}'"
+        f":fontsdir='{_escape_filter_path(ffmpeg_font_dir)}'"
+        f":original_size={CAPTION_PLAY_RES_X}x{CAPTION_PLAY_RES_Y}"
     )
     filter_complex = (
         f"[0:v]{subtitle_filter}[v];"
@@ -257,7 +286,7 @@ def render_video_with_ffmpeg(filename: str):
     subprocess.run(ffmpeg_cmd, check=True)
 
     # 임시파일 정리
-    temp_adjusted_srt.unlink(missing_ok=True)
+    temp_caption_ass.unlink(missing_ok=True)
 
 
 def _atempo_filter(speed: float) -> str:
@@ -279,6 +308,174 @@ def _write_adjusted_srt(adjusted_subs, path: Path, offset_seconds: float) -> Non
             f.write(f"{index}\n")
             f.write(f"{_srt_time(start + offset_seconds)} --> {_srt_time(end + offset_seconds)}\n")
             f.write(f"{text}\n\n")
+
+
+def _write_centered_caption_ass(adjusted_subs, path: Path, offset_seconds: float) -> None:
+    """Write centered Shorts-style captions as ASS for deterministic FFmpeg rendering."""
+    font_size = _env_int("CAPTION_FONT_SIZE", DEFAULT_CAPTION_FONT_SIZE, minimum=24)
+    outline = _env_int("CAPTION_OUTLINE", DEFAULT_CAPTION_OUTLINE, minimum=0)
+    shadow = _env_int("CAPTION_SHADOW", DEFAULT_CAPTION_SHADOW, minimum=0)
+    center_x = _env_int("CAPTION_CENTER_X", DEFAULT_CAPTION_CENTER_X, minimum=0)
+    center_y = _env_int("CAPTION_CENTER_Y", DEFAULT_CAPTION_CENTER_Y, minimum=0)
+    fade_ms = _env_int("CAPTION_FADE_MS", DEFAULT_CAPTION_FADE_MS, minimum=0)
+    events = _build_centered_caption_events(adjusted_subs)
+
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("[Script Info]\n")
+        f.write("ScriptType: v4.00+\n")
+        f.write(f"PlayResX: {CAPTION_PLAY_RES_X}\n")
+        f.write(f"PlayResY: {CAPTION_PLAY_RES_Y}\n")
+        f.write("WrapStyle: 2\n")
+        f.write("ScaledBorderAndShadow: yes\n\n")
+        f.write("[V4+ Styles]\n")
+        f.write(
+            "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
+            "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, "
+            "ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, "
+            "MarginL, MarginR, MarginV, Encoding\n"
+        )
+        f.write(
+            "Style: Caption,Anton,"
+            f"{font_size},{ASS_WHITE_STYLE},{ASS_YELLOW_STYLE},{ASS_BLACK_STYLE},"
+            f"{ASS_SHADOW_STYLE},-1,0,0,0,100,100,0,0,1,{outline},{shadow},"
+            "5,70,70,0,1\n\n"
+        )
+        f.write("[Events]\n")
+        f.write("Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n")
+        for (start, end, words) in events:
+            event_start = start + offset_seconds
+            event_end = max(end + offset_seconds, event_start + 0.1)
+            text = _format_centered_caption_text(words)
+            prefix = f"{{\\an5\\pos({center_x},{center_y})\\fad({fade_ms},{fade_ms})}}"
+            f.write(
+                "Dialogue: 0,"
+                f"{_ass_time(event_start)},{_ass_time(event_end)},"
+                f"Caption,,0,0,0,,{prefix}{text}\n"
+            )
+
+
+def _build_centered_caption_events(
+    adjusted_subs,
+    *,
+    max_words: int | None = None,
+    max_chars: int | None = None,
+    max_duration: float | None = None,
+):
+    max_words = max_words or _env_int("CAPTION_MAX_WORDS", DEFAULT_CAPTION_MAX_WORDS, minimum=1)
+    max_chars = max_chars or _env_int("CAPTION_MAX_CHARS", DEFAULT_CAPTION_MAX_CHARS, minimum=4)
+    max_duration = max_duration or _env_float(
+        "CAPTION_MAX_DURATION",
+        DEFAULT_CAPTION_MAX_DURATION,
+        minimum=0.2,
+    )
+
+    words = []
+    for (start, end), text in adjusted_subs:
+        cleaned = _normalize_caption_word(text)
+        if cleaned:
+            words.append((float(start), float(end), cleaned))
+
+    events = []
+    group = []
+    for item in words:
+        if _should_start_new_caption_group(group, item, max_words, max_chars, max_duration):
+            events.append(_caption_group_to_event(group))
+            group = []
+        group.append(item)
+    if group:
+        events.append(_caption_group_to_event(group))
+    return events
+
+
+def _should_start_new_caption_group(group, next_item, max_words, max_chars, max_duration) -> bool:
+    if not group:
+        return False
+    if _ends_caption_phrase(group[-1][2]):
+        return True
+    candidate_words = [item[2] for item in group] + [next_item[2]]
+    candidate_text = " ".join(candidate_words)
+    candidate_duration = next_item[1] - group[0][0]
+    return (
+        len(group) >= max_words
+        or len(candidate_text) > max_chars
+        or candidate_duration > max_duration
+    )
+
+
+def _caption_group_to_event(group):
+    start = group[0][0]
+    end = group[-1][1]
+    words = [item[2] for item in group]
+    return (start, end, words)
+
+
+def _format_centered_caption_text(words) -> str:
+    uppercase = _env_bool("CAPTION_UPPERCASE", default=True)
+    highlight_last = _env_bool("CAPTION_HIGHLIGHT_LAST_WORD", default=True)
+    display_words = []
+    for word in words:
+        display = word.upper() if uppercase else word
+        display_words.append(_escape_ass_text(display))
+
+    if highlight_last and display_words:
+        if len(display_words) == 1:
+            return f"{{\\c{ASS_YELLOW_INLINE}}}{display_words[0]}{{\\c{ASS_WHITE_INLINE}}}"
+        leading = " ".join(display_words[:-1])
+        focus = display_words[-1]
+        return f"{leading} {{\\c{ASS_YELLOW_INLINE}}}{focus}{{\\c{ASS_WHITE_INLINE}}}"
+    return " ".join(display_words)
+
+
+def _normalize_caption_word(text: str) -> str:
+    return " ".join(str(text or "").replace("\n", " ").split()).strip()
+
+
+def _ends_caption_phrase(text: str) -> bool:
+    return text.rstrip().endswith((".", "?", "!", ";", ":"))
+
+
+def _escape_ass_text(text: str) -> str:
+    return (
+        str(text)
+        .replace("\\", "\\\\")
+        .replace("{", r"\{")
+        .replace("}", r"\}")
+    )
+
+
+def _ass_time(seconds: float) -> str:
+    total_centis = max(0, int(round(seconds * 100)))
+    hours, rem = divmod(total_centis, 3600 * 100)
+    minutes, rem = divmod(rem, 60 * 100)
+    secs, centis = divmod(rem, 100)
+    return f"{hours}:{minutes:02}:{secs:02}.{centis:02}"
+
+
+def _env_int(name: str, default: int, *, minimum: int | None = None) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except ValueError:
+        value = default
+    if minimum is not None:
+        value = max(minimum, value)
+    return value
+
+
+def _env_float(name: str, default: float, *, minimum: float | None = None) -> float:
+    try:
+        value = float(os.getenv(name, str(default)))
+    except ValueError:
+        value = default
+    if minimum is not None:
+        value = max(minimum, value)
+    return value
+
+
+def _env_bool(name: str, *, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in {"0", "false", "no", "off"}
 
 
 def _srt_time(seconds: float) -> str:
