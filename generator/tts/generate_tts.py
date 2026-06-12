@@ -8,6 +8,7 @@ import re
 import random
 from moviepy.editor import AudioFileClip
 from generator.text.generate_scripts_from_filtered import regenerate_post_by_id
+from generator.tts.speed_policy import final_duration_in_range
 from shared.utils.config import FINAL_METADATA_FILE, AUDIO_DIR, MARKS_DIR
 
 load_dotenv()
@@ -89,7 +90,8 @@ def run_batch_tts():
             duration = audio.duration
             audio.close()
 
-            if 30 <= duration <= 170:
+            duration_ok, speed, final_duration = final_duration_in_range(duration)
+            if duration_ok:
                 # 성공
                 final_audio_path = AUDIO_DIR / f"{original_filename}.mp3"
                 final_marks_path = MARKS_DIR / f"{original_filename}_marks.json"
@@ -99,13 +101,25 @@ def run_batch_tts():
                 break
             else:
                 # 실패 → 삭제 및 regenerate 시도
-                print(f"⛔️ {audio_path}: {duration:.2f}s (길이 부적절, 재시도 {try_count+1}/{max_retries})")
+                print(
+                    f"⛔️ {audio_path}: original={duration:.2f}s "
+                    f"speed={speed:.2f} final={final_duration:.2f}s "
+                    f"(길이 부적절, 재시도 {try_count+1}/{max_retries})"
+                )
                 os.remove(audio_path)
                 os.remove(marks_path)
                 try_count += 1
 
                 # regenerate 시도
-                new_metadata = regenerate_post_by_id(original_filename)
+                new_metadata = regenerate_post_by_id(
+                    original_filename,
+                    regenerate_reason=(
+                        "The TTS narration was outside the target Shorts pacing. "
+                        f"Original audio was {duration:.1f}s and would become {final_duration:.1f}s "
+                        f"after {speed:.2f}x speed-up. Rewrite the script to land around "
+                        "45 to 75 seconds after speed-up, with a fast hook and no filler."
+                    ),
+                )
                 if not new_metadata:
                     print(f"❌ [id={original_filename}] regenerate_post_by_id 실패, skip")
                     break

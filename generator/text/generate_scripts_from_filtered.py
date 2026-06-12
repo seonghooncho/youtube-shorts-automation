@@ -10,14 +10,15 @@ EXAMPLE_JSON = """
         "description": "Dealing with a neighbor's tenants' kids running amok in my driveway. Can you relate to this frustrating situation?",
         "tags": ["storytime", "neighborhood", "drama", "reddit", "beachhouse"],
         "voice": "male",
+        "visual_keywords": ["suburban driveway", "security camera", "kids playing", "angry neighbor", "rental house", "phone messages"],
         "script": [
-                "So, get this - I have this sweet little townhouse by the beach, perfect for relaxing weekends. But things took a crazy turn when my neighbor's short-term tenants' kids decided to turn my driveway into a playground!",
-                "At first, it was just a mild annoyance seeing them walking through the yard. But one wild night, my security camera went nuts with alerts. I check it out, and there they were - more than a dozen kids, having a full-blown party on my property!",
-                "Backflips, running around, you name it. It was chaos! I waited a bit, hoping they'd clear out, but when some poor kid face-planted on my driveway, I had to step in.",
-                "I politely told them through the camera to scram, and they did. Thought that would be the end of it, right? Wrong!",
-                "I sent a few screenshots to the short-term rental owner, thinking they'd apologize and handle it. But nope, they defended the invasion, called it 'kids being kids' and 'a family enjoying the outdoors.' What a joke!",
-                "I made it clear - no way I was gonna let their tenants and their wild kids mess up my peace. End of the story.",
-                "Can you believe the nerve? What would you have done in my shoes?"
+                "A dozen kids turned my driveway into their playground, and their parents acted like I was the problem.",
+                "I own a small townhouse near the beach, and the unit next door is a short-term rental. At first, the guests were just cutting across my yard. Annoying, but whatever.",
+                "Then one night my security camera kept pinging. I opened the app and saw kids running across my driveway, doing flips, screaming, and using my property like a party space.",
+                "I waited a few minutes, hoping an adult would step in. Nobody did. When one kid wiped out hard on the concrete, I used the camera speaker and told them they needed to leave.",
+                "The next day, I sent screenshots to the owner next door. I expected an apology. Instead, they said the kids were just enjoying the outdoors and I was overreacting.",
+                "So I told them clearly: their renters do not get to use my driveway, my yard, or my cameras as free supervision.",
+                "Was I too strict, or would you have shut it down too?"
         ]
 }
 """.strip()
@@ -34,18 +35,19 @@ def call_gpt_generate_script(title, content, regenerate_reason=None):
         "\n[Instructions]",
         "- Return the response in the **exact same JSON structure** shown in the example below.",
         '- **Detect the main character\'s gender** from the original story. Add a new key `"voice"` to the output JSON, whose value is either `"male"` or `"female"`, based on the main character’s gender for TTS selection. If gender is ambiguous, return `"neutral"`.',
-        "- The story should be rewritten with natural flow and clarity, including context **before and after the main event**, so the viewer can easily understand what happened.",
+        "- The story should be rewritten with natural flow and clarity, including just enough context **before and after the main event** so the viewer can immediately understand the conflict.",
         "- If the original story lacks detail, you’re encouraged to **creatively expand the scenario** with logical background, emotions, or interactions.",
         "- You may modify, rewrite, or dramatize the story to make it more **relatable and engaging**.",
         "- Write in a **casual, conversational tone**, as if you're sharing a story with a friend.",
         "- Avoid formal or stiff language. Use expressions and tones that are commonly seen in successful YouTube Shorts.",
+        "- The first sentence must be a strong hook: start with the conflict, consequence, or most surprising detail. Do not start with slow setup like 'So, get this' or 'A little backstory'.",
+        "- Keep the pacing fast. Remove filler, repeated setup, and slow explanations. The narration should still be understandable after a moderate speed-up.",
         "- Structure the story in **paragraph-style script**.",
-        "- The entire script should target 1400 to 1800 characters and must NOT exceed 2000 characters.",
-        "- **However, do NOT sacrifice the natural story flow, emotional build-up, or essential details just to fit the character count.**",
-        "- If you cannot meet the character requirement *without harming the story’s quality or flow*, always prioritize a complete, immersive, and logically satisfying script—even if it means being slightly outside the target range.",
-        "- The script should never feel stretched, repetitive, or abruptly shortened; the most important thing is that it feels engaging, natural, and well-paced.",
-        "- If the source story is too short, expand it naturally with plausible background, emotions, or dialogue to help the viewer stay engaged.",
-        "- If the original story lacks enough detail, you're encouraged to creatively fill in the gaps to make it feel complete and immersive.",
+        "- The entire script should target 850 to 1250 characters and must NOT exceed 1400 characters.",
+        "- The target final narration length is roughly 45 to 75 seconds after a moderate speed-up. Prefer concise sentences over long paragraphs.",
+        "- The script should never feel stretched, repetitive, or abruptly shortened; keep only the setup, escalation, decision, and question.",
+        "- Add a `visual_keywords` array with 5 to 8 short English stock-video search phrases that match the story's setting and emotion.",
+        "- Visual keywords should be concrete and searchable, such as 'phone texting', 'couple argument', 'apartment hallway', 'office conversation', 'security camera', or 'angry neighbor'. Avoid generic terms like 'nature', 'background', or 'landscape' unless the story truly needs them.",
         "- End the script with a question or prompt to encourage **viewer engagement**, such as:",
         '  - "So, what do you think?"',
         '  - "Would you have done the same?"',
@@ -54,7 +56,7 @@ def call_gpt_generate_script(title, content, regenerate_reason=None):
         "\n[IMPORTANT]",
         "- The response **must strictly follow the JSON structure** shown above with no missing keys.",
         "- Any syntax or formatting error in the returned JSON will be considered a failure.",
-        "- **If the script contains fewer than 1400 characters, it's also considered invalid.**",
+        "- **If the script contains fewer than 750 characters or more than 1400 characters, it's considered invalid.**",
     ]
     prompt = "\n".join(parts)
 
@@ -79,18 +81,22 @@ def validate_and_parse_metadata(result: ReturnScript, idx, post) -> Dict[str, An
         metadata: Dict[str, Any] = result.model_dump()
 
         # 기존 검증 스펙 유지
-        required_keys = ["title", "description", "tags", "script"]
+        required_keys = ["title", "description", "tags", "visual_keywords", "script"]
         if not all(k in metadata for k in required_keys):
             raise ValueError("❌ 필수 키 누락")
 
         if not isinstance(metadata["script"], list) or not all(isinstance(line, str) for line in metadata["script"]):
             raise ValueError("❌ script는 문자열 리스트여야 함")
+        if not isinstance(metadata["visual_keywords"], list) or not all(isinstance(keyword, str) for keyword in metadata["visual_keywords"]):
+            raise ValueError("❌ visual_keywords는 문자열 리스트여야 함")
 
         script_length = sum(len(line) for line in metadata["script"])
-        if script_length < 500:
+        if script_length < 750:
             raise ValueError(f"❌ script가 너무 짧음 (현재 {script_length}자)")
-        if script_length > 2000:
+        if script_length > 1400:
             raise ValueError(f"❌ script가 너무 긺 (현재 {script_length}자)")
+
+        metadata["visual_keywords"] = _clean_visual_keywords(metadata["visual_keywords"])
 
         return metadata
     except Exception as e:
@@ -159,7 +165,7 @@ def generate_scripts_from_filtered():
 
                 # 에러 사유별 재생성 가이드 유지
                 if "너무 짧음" in msg or "너무 긺" in msg or "character" in msg:
-                    regenerate_reason = "The script's length was out of bounds. Please revise the story so the script targets 1400 to 1800 characters and stays under 2000 characters, without sacrificing natural flow or emotional build-up."
+                    regenerate_reason = "The script's length was out of bounds. Please revise it to 850 to 1250 characters and under 1400 characters, with a fast first-sentence hook and no filler."
                 elif "필수 키 누락" in msg or "script는 문자열 리스트" in msg:
                     regenerate_reason = "The script did not follow the required JSON structure. Please strictly follow the JSON example format."
                 else:
@@ -243,7 +249,7 @@ def regenerate_post_by_id(post_id, regenerate_reason=None, max_retries=2):
                 )
             msg = str(e)
             if "너무 짧음" in msg or "너무 긺" in msg or "character" in msg:
-                regenerate_reason = "The script's length was out of bounds. Please revise the story so the script targets 1400 to 1800 characters and stays under 2000 characters, without sacrificing natural flow or emotional build-up."
+                regenerate_reason = "The script's length was out of bounds. Please revise it to 850 to 1250 characters and under 1400 characters, with a fast first-sentence hook and no filler."
             elif "필수 키 누락" in msg or "script는 문자열 리스트" in msg:
                 regenerate_reason = "The script did not follow the required JSON structure. Please strictly follow the JSON example format."
             else:
@@ -252,6 +258,20 @@ def regenerate_post_by_id(post_id, regenerate_reason=None, max_retries=2):
 
     print(f"🚫 최종 실패 (postId={post_id})")
     return None
+
+
+def _clean_visual_keywords(keywords: list[str]) -> list[str]:
+    cleaned = []
+    blocked = {"nature", "background", "landscape"}
+    for keyword in keywords:
+        normalized = " ".join(str(keyword or "").lower().split())
+        if not normalized or normalized in blocked:
+            continue
+        if normalized not in cleaned:
+            cleaned.append(normalized)
+        if len(cleaned) >= 8:
+            break
+    return cleaned[:8] or ["phone texting", "person thinking", "city street", "apartment hallway", "people talking"]
 
 
 if __name__ == "__main__":

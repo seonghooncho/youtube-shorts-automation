@@ -25,6 +25,7 @@ data/
 output/
 assets/tmp/
 assets/output/
+assets/bg_parts/
 temp/
 .tmp/
 
