@@ -11,10 +11,11 @@ ECR repository: ytshorts-app
 CodeBuild project: ytshorts-image-build
 Batch compute environment: ytshorts-fargate
 Batch queue: ytshorts-pipeline
-Batch job definition: ytshorts-stage
+Batch job definitions: ytshorts-stage, ytshorts-script, ytshorts-render
 Step Functions state machine: ytshorts-pipeline
 Publisher Lambda: ytshorts-publisher
-Generate schedule: ytshorts-generate-14day
+Budget/alert Lambda: ytshorts-budget-notifier
+Generate schedule: ytshorts-generate-refill
 Upload schedule: ytshorts-upload-daily
 ```
 
@@ -26,20 +27,23 @@ Upload schedule: ytshorts-upload-daily
 - DynamoDB: 콘텐츠 상태, 예약 시각, 업로드 결과 저장
 - ECR: Batch 컨테이너 이미지 저장
 - CodeBuild: S3 source bundle을 Docker image로 빌드 후 ECR push
-- AWS Batch/Fargate: 생성 단계별 컨테이너 실행
+- AWS Batch/Fargate: 생성 단계별 컨테이너 실행, 렌더링은 array job으로 병렬화
 - Step Functions: 생성/업로드 workflow 오케스트레이션
-- EventBridge Scheduler: 주간 생성, 일간 업로드 트리거
+- EventBridge Scheduler: 월 2회 재고 보충, 일간 업로드 트리거
 - Lambda: YouTube upload API 호출
+- SNS/Budgets/EventBridge: 비용 예산, Step Functions 실패, Batch 실패 Slack 알림
 - IAM: Batch, CodeBuild, Step Functions, Scheduler, Publisher 권한
 
 ## Schedules
 
 ```text
-ytshorts-generate-14day: cron(0 2 ? * MON *) Asia/Seoul
+ytshorts-generate-refill: cron(0 2 1,15 * ? *) Asia/Seoul
 ytshorts-upload-daily:  cron(0 8 * * ? *) Asia/Seoul
 ```
 
-생성 workflow는 `days` 입력을 `GENERATION_BATCH_DAYS`로 Batch stage에 주입합니다. 운영 스케줄은 14일치를 전달하고, 수동 smoke는 `days: 1`처럼 줄여 실행할 수 있습니다. Reddit 후보 수집량은 생성 일수와 분리해 `reddit_max_posts=30`, `reddit_min_needed=15`를 기본값으로 둡니다.
+생성 workflow는 `days` 입력을 `GENERATION_BATCH_DAYS`로 Batch stage에 주입합니다. 이 값은 “무조건 생성 개수”가 아니라 목표 재고일수입니다. 현재 publish-ready 미업로드 재고를 세고 `GENERATION_BATCH_DAYS + GENERATION_BUFFER_DAYS`에 모자란 만큼만 새로 생성합니다. 기본값은 목표 14일, 버퍼 3일, 신규 생성 cap 21개입니다. Reddit 후보 수집량은 생성 일수와 분리해 `reddit_max_posts=60`, `reddit_min_needed=30`을 기본값으로 둡니다.
+
+14개를 요청해도 모든 단계가 14개를 보장하지는 않습니다. Reddit 후보 부족, GPT 검증 실패, Polly/TTS 길이 검증 실패, Pixabay/ffmpeg 렌더 실패가 있으면 실제 publish-ready 개수는 줄 수 있습니다. 버퍼는 이 실패분을 흡수하기 위한 것이고, 다음 refill에서 부족분을 다시 채웁니다.
 
 ## 시크릿 관리
 
@@ -52,12 +56,15 @@ ytshorts-upload-daily:  cron(0 8 * * ? *) Asia/Seoul
 /ytshorts/HF_TOKEN
 /ytshorts/PIXABAY_API_KEY
 /ytshorts/SLACK_WEBHOOK_URL
-/ytshorts/S3_BUCKET_NAME
 /ytshorts/YOUTUBE_CLIENT_ID
 /ytshorts/YOUTUBE_CLIENT_SECRET
 /ytshorts/YOUTUBE_REFRESH_TOKEN
 /ytshorts/YOUTUBE_TOKEN_URI
 ```
+
+S3와 Polly는 전용 정적 access key를 사용하지 않습니다. Batch/Lambda runtime은 IAM role과 AWS SDK 기본 credential chain을 사용합니다. 외부에 노출된 기존 정적 키는 각 발급처에서 폐기/재발급해야 합니다.
+
+정리된 legacy SSM 파라미터: 전용 S3 access key, 전용 Polly access key, YouTube API key, Google credential path. Polly 전용 IAM access key는 비활성화했고, S3 전용 access key는 현재 권한으로 비활성화가 거부되어 SSM에서는 제거했습니다.
 
 선택 파라미터:
 

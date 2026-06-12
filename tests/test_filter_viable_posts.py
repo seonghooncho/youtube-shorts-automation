@@ -33,3 +33,10 @@ def test_ask_yes_no_omits_reasoning_for_non_gpt5_models():
 
     assert _ask_yes_no(client, "Is this viable?", "gpt-4.1-mini") == "YES"
     assert "reasoning" not in client.responses.kwargs
+
+
+def test_ask_yes_no_omits_legacy_reasoning_for_gpt54_models():
+    client = _Client()
+
+    assert _ask_yes_no(client, "Is this viable?", "gpt-5.4-nano") == "YES"
+    assert "reasoning" not in client.responses.kwargs

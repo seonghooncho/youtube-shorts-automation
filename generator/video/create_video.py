@@ -293,10 +293,13 @@ def _escape_filter_path(path: Path) -> str:
     return str(path).replace("\\", "\\\\").replace("'", "\\'")
 
 
-def batch_render_all_videos():
+def batch_render_all_videos(target_ids: list[str] | None = None):
     with open(TTS_RESULT_JSON, "r", encoding="utf-8") as f:
         data = json.load(f)
     filenames = [entry["filename"] for entry in data]
+    if target_ids:
+        target_set = set(target_ids)
+        filenames = [filename for filename in filenames if filename in target_set]
 
     for filename in filenames:
         try:

@@ -40,11 +40,11 @@ def call_gpt_generate_script(title, content, regenerate_reason=None):
         "- Write in a **casual, conversational tone**, as if you're sharing a story with a friend.",
         "- Avoid formal or stiff language. Use expressions and tones that are commonly seen in successful YouTube Shorts.",
         "- Structure the story in **paragraph-style script**.",
-        "- The entire script must be between 900 and 1100 characters (with an absolute minimum of 750 characters, and must NOT exceed 1200 characters).",
+        "- The entire script should target 1400 to 1800 characters and must NOT exceed 2000 characters.",
         "- **However, do NOT sacrifice the natural story flow, emotional build-up, or essential details just to fit the character count.**",
         "- If you cannot meet the character requirement *without harming the story’s quality or flow*, always prioritize a complete, immersive, and logically satisfying script—even if it means being slightly outside the target range.",
         "- The script should never feel stretched, repetitive, or abruptly shortened; the most important thing is that it feels engaging, natural, and well-paced.",
-        "- The entire script should be at least 1500 characters long, but don't just stretch it — instead, feel free to expand the story naturally, adding background, emotions, or dialogue to help the viewer stay engaged.",
+        "- If the source story is too short, expand it naturally with plausible background, emotions, or dialogue to help the viewer stay engaged.",
         "- If the original story lacks enough detail, you're encouraged to creatively fill in the gaps to make it feel complete and immersive.",
         "- End the script with a question or prompt to encourage **viewer engagement**, such as:",
         '  - "So, what do you think?"',
@@ -159,7 +159,7 @@ def generate_scripts_from_filtered():
 
                 # 에러 사유별 재생성 가이드 유지
                 if "너무 짧음" in msg or "너무 긺" in msg or "character" in msg:
-                    regenerate_reason = "The script's length was out of bounds. Please revise the story so the script is between 900 and 1100 characters, but do not sacrifice natural flow or emotional build-up."
+                    regenerate_reason = "The script's length was out of bounds. Please revise the story so the script targets 1400 to 1800 characters and stays under 2000 characters, without sacrificing natural flow or emotional build-up."
                 elif "필수 키 누락" in msg or "script는 문자열 리스트" in msg:
                     regenerate_reason = "The script did not follow the required JSON structure. Please strictly follow the JSON example format."
                 else:
@@ -243,7 +243,7 @@ def regenerate_post_by_id(post_id, regenerate_reason=None, max_retries=2):
                 )
             msg = str(e)
             if "너무 짧음" in msg or "너무 긺" in msg or "character" in msg:
-                regenerate_reason = "The script's length was out of bounds. Please revise the story so the script is between 900 and 1100 characters, but do not sacrifice natural flow or emotional build-up."
+                regenerate_reason = "The script's length was out of bounds. Please revise the story so the script targets 1400 to 1800 characters and stays under 2000 characters, without sacrificing natural flow or emotional build-up."
             elif "필수 키 누락" in msg or "script는 문자열 리스트" in msg:
                 regenerate_reason = "The script did not follow the required JSON structure. Please strictly follow the JSON example format."
             else:

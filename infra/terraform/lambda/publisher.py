@@ -4,7 +4,9 @@ import tempfile
 import time
 import urllib.parse
 import urllib.request
+from datetime import datetime, time as dt_time, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import boto3
 from botocore.exceptions import ClientError
@@ -21,12 +23,19 @@ LEGACY_METADATA_KEY = os.getenv("LEGACY_METADATA_KEY", "shorts/state/final_metad
 SSM_PREFIX = os.getenv("SSM_PARAMETER_PREFIX", "/ytshorts")
 PRIVACY_STATUS = os.getenv("YOUTUBE_PRIVACY_STATUS", "private")
 CATEGORY_ID = os.getenv("YOUTUBE_CATEGORY_ID", "22")
+PUBLISH_HOUR_LOCAL = int(os.getenv("PUBLISH_HOUR_LOCAL", "8"))
+PUBLISH_MINUTE_LOCAL = int(os.getenv("PUBLISH_MINUTE_LOCAL", "0"))
+SCHEDULE_TIMEZONE = os.getenv("SCHEDULE_TIMEZONE", "Asia/Seoul")
+PUBLISH_REBASE_STALE_DAYS = int(os.getenv("PUBLISH_REBASE_STALE_DAYS", "3"))
 
 
 def handler(event, context):
     metadata, metadata_key = _load_metadata()
     if not metadata:
         return {"status": "noop", "reason": "metadata_not_found"}
+
+    if _rebase_stale_queue(metadata):
+        _save_metadata(metadata, metadata_key)
 
     target = _next_due_item(metadata)
     if not target:
@@ -101,6 +110,41 @@ def _next_due_item(metadata: list[dict[str, Any]]) -> dict[str, Any] | None:
             continue
         return item
     return None
+
+
+def _rebase_stale_queue(metadata: list[dict[str, Any]]) -> bool:
+    if PUBLISH_REBASE_STALE_DAYS <= 0:
+        return False
+
+    now = int(time.time())
+    threshold_seconds = PUBLISH_REBASE_STALE_DAYS * 86400
+    queue = [
+        item
+        for item in metadata
+        if not item.get("uploaded") and item.get("upload_status") in (None, "", "PUBLISH_READY")
+    ]
+    queue.sort(key=lambda item: int(item.get("scheduled_publish_at") or 0))
+    if not queue:
+        return False
+
+    oldest = int(queue[0].get("scheduled_publish_at") or 0)
+    if not oldest or oldest >= now - threshold_seconds:
+        return False
+
+    timezone = ZoneInfo(SCHEDULE_TIMEZONE)
+    now_dt = datetime.fromtimestamp(now, timezone)
+    for index, item in enumerate(queue):
+        if index == 0:
+            scheduled_dt = now_dt
+        else:
+            scheduled_dt = datetime.combine(
+                now_dt.date() + timedelta(days=index),
+                dt_time(hour=PUBLISH_HOUR_LOCAL, minute=PUBLISH_MINUTE_LOCAL),
+                tzinfo=timezone,
+            )
+        item["scheduled_publish_at"] = int(scheduled_dt.timestamp())
+        item["scheduled_publish_date"] = scheduled_dt.date().isoformat()
+    return True
 
 
 def _download_video(video_key: str, content_id: str, local_path: str) -> str:

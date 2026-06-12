@@ -96,7 +96,7 @@ def _ask_yes_no(client: openai.OpenAI, prompt: str, model: str) -> str:
                 "input": messages,
                 "max_output_tokens": 128,
             }
-            if model.startswith("gpt-5"):
+            if _uses_legacy_gpt5_reasoning(model):
                 kwargs["reasoning"] = {"effort": "minimal"}
             resp = client.responses.create(**kwargs)
             raw = (resp.output_text or "").strip()
@@ -109,12 +109,16 @@ def _ask_yes_no(client: openai.OpenAI, prompt: str, model: str) -> str:
     return ""  # 불명
 
 
+def _uses_legacy_gpt5_reasoning(model: str) -> bool:
+    return model.startswith("gpt-5") and not model.startswith("gpt-5.4")
+
+
 # -----------------------------
 # Main
 # -----------------------------
 def filter_viable_posts():
     client = _get_client()
-    model = os.getenv("FILTER_MODEL") or os.getenv("OPENAI_MODEL", "gpt-5-mini")
+    model = os.getenv("FILTER_MODEL") or os.getenv("OPENAI_MODEL", "gpt-5.4-nano")
 
     if not RAW_POSTS_FILE.exists():
         print("❌ raw_posts.json이 없습니다.")

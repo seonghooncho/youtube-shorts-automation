@@ -15,11 +15,6 @@ MALE_VOICES = ["Matthew", "Justin", "Joey", "Kevin", "Stephen"]
 FEMALE_VOICES = ["Joanna", "Kendra", "Kimberly", "Salli"]
 # AWS Polly 설정
 _polly_kwargs = {"region_name": os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION") or "ap-northeast-2"}
-if os.getenv("AWS_POLLY_ACCESS_KEY_ID") and os.getenv("AWS_POLLY_SECRET_ACCESS_KEY"):
-    _polly_kwargs.update(
-        aws_access_key_id=os.getenv("AWS_POLLY_ACCESS_KEY_ID"),
-        aws_secret_access_key=os.getenv("AWS_POLLY_SECRET_ACCESS_KEY"),
-    )
 polly = boto3.client("polly", **_polly_kwargs)
 
 def generate_tts_with_timestamps(text, filename, voice_id):

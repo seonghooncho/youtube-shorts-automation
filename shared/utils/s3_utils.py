@@ -71,9 +71,14 @@ def update_metadata_after_video_creation():
         new_data = json.load(f)
     
     # 3. 병합 (새로운 데이터가 기존 데이터를 덮어쓰도록 ID 기준 중복 제거)
-    new_ids = {item["id"] for item in new_data}
+    if not isinstance(old_data, list):
+        old_data = []
+    if not isinstance(new_data, list):
+        new_data = []
+    new_ids = {item["id"] for item in new_data if item.get("id")}
     filtered_old = [item for item in old_data if item.get("id") not in new_ids]
     merged_data = filtered_old + new_data
+    merged_data.sort(key=lambda item: int(item.get("scheduled_publish_at") or 0))
     
     # 4. 병합된 메타데이터를 최종 경로에 저장
     with open(merged_output_path, "w", encoding="utf-8") as f:

@@ -66,7 +66,6 @@
 #             # (선택) GCP 키 필요시
 #             if [ ! -z "${{ secrets.GCP_SA_JSON }}" ]; then
 #               echo "${{ secrets.GCP_SA_JSON }}" > google-key.json
-#               export GOOGLE_APPLICATION_CREDENTIALS="$PWD/google-key.json"
 #             fi
 
 #             # 공통
@@ -79,7 +78,6 @@
 #             export TARGET_PLATFORMS="${{ vars.TARGET_PLATFORMS || 'youtube,instagram,tiktok' }}"
 
 #             # YouTube (현재 레거시 브리지 사용)
-#             export YOUTUBE_API_KEY="${{ secrets.YOUTUBE_API_KEY }}"
 
 #             # Instagram (스킵 해제하려면 ENABLE=1 세팅)
 #             export INSTAGRAM_UPLOAD_ENABLED="${{ vars.INSTAGRAM_UPLOAD_ENABLED || '0' }}"

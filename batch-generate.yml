@@ -1,8 +1,7 @@
 name: Batch Generate YouTube Shorts
 
 on:
-  schedule:
-    - cron: "0 16 */14 * *" # UTC (KST 01시)
+  # Legacy EC2 launcher workflow. AWS EventBridge Scheduler is the production path.
   workflow_dispatch:
 
 env:

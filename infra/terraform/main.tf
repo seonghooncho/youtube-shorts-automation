@@ -44,9 +44,14 @@ locals {
     { name = "REDDIT_MIN_NEEDED", value = tostring(var.reddit_min_needed) },
     { name = "REDDIT_FALLBACK_PROVIDER", value = "pullpush" },
     { name = "GENERATION_BATCH_DAYS", value = tostring(var.generation_batch_days) },
+    { name = "GENERATION_BUFFER_DAYS", value = tostring(var.generation_buffer_days) },
+    { name = "GENERATION_MAX_NEW_ITEMS", value = tostring(var.generation_max_new_items) },
     { name = "SCHEDULE_TIMEZONE", value = var.schedule_timezone },
     { name = "PUBLISH_HOUR_LOCAL", value = tostring(var.publish_hour_local) },
     { name = "PUBLISH_MINUTE_LOCAL", value = tostring(var.publish_minute_local) },
+    { name = "PUBLISH_REBASE_STALE_DAYS", value = tostring(var.publish_rebase_stale_days) },
+    { name = "FILTER_MODEL", value = var.openai_filter_model },
+    { name = "SCRIPT_MODEL", value = var.openai_script_model },
   ]
 }
 
@@ -78,6 +83,112 @@ resource "aws_s3_bucket_versioning" "artifacts" {
   bucket = aws_s3_bucket.artifacts.id
   versioning_configuration {
     status = "Enabled"
+  }
+}
+
+resource "aws_s3_bucket_lifecycle_configuration" "artifacts" {
+  bucket = aws_s3_bucket.artifacts.id
+
+  rule {
+    id     = "expire-raw-artifacts"
+    status = "Enabled"
+
+    filter {
+      prefix = "raw/"
+    }
+
+    expiration {
+      days = 30
+    }
+
+    noncurrent_version_expiration {
+      noncurrent_days = 30
+    }
+  }
+
+  rule {
+    id     = "expire-script-artifacts"
+    status = "Enabled"
+
+    filter {
+      prefix = "scripts/"
+    }
+
+    expiration {
+      days = 30
+    }
+
+    noncurrent_version_expiration {
+      noncurrent_days = 30
+    }
+  }
+
+  rule {
+    id     = "expire-audio-artifacts"
+    status = "Enabled"
+
+    filter {
+      prefix = "audio/"
+    }
+
+    expiration {
+      days = 30
+    }
+
+    noncurrent_version_expiration {
+      noncurrent_days = 30
+    }
+  }
+
+  rule {
+    id     = "expire-video-source-artifacts"
+    status = "Enabled"
+
+    filter {
+      prefix = "videos/sources/"
+    }
+
+    expiration {
+      days = 30
+    }
+
+    noncurrent_version_expiration {
+      noncurrent_days = 30
+    }
+  }
+
+  rule {
+    id     = "expire-old-final-videos"
+    status = "Enabled"
+
+    filter {
+      prefix = "videos/final/"
+    }
+
+    expiration {
+      days = 180
+    }
+
+    noncurrent_version_expiration {
+      noncurrent_days = 30
+    }
+  }
+
+  rule {
+    id     = "abort-incomplete-multipart"
+    status = "Enabled"
+
+    filter {
+      prefix = ""
+    }
+
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 7
+    }
+
+    noncurrent_version_expiration {
+      noncurrent_days = 30
+    }
   }
 }
 
@@ -136,11 +247,11 @@ resource "aws_ecr_lifecycle_policy" "app" {
     rules = [
       {
         rulePriority = 1
-        description  = "Keep the latest 20 images"
+        description  = "Keep the latest 5 images"
         selection = {
           tagStatus   = "any"
           countType   = "imageCountMoreThan"
-          countNumber = 20
+          countNumber = 5
         }
         action = {
           type = "expire"
@@ -165,6 +276,30 @@ resource "aws_vpc_security_group_egress_rule" "job_all" {
 
 resource "aws_cloudwatch_log_group" "batch" {
   name              = "/aws/batch/${var.project_name}"
+  retention_in_days = 30
+  tags              = local.tags
+}
+
+resource "aws_cloudwatch_log_group" "codebuild" {
+  name              = "/aws/codebuild/${var.project_name}-image-build"
+  retention_in_days = 30
+  tags              = local.tags
+}
+
+resource "aws_cloudwatch_log_group" "publisher" {
+  name              = "/aws/lambda/${var.project_name}-publisher"
+  retention_in_days = 30
+  tags              = local.tags
+}
+
+resource "aws_cloudwatch_log_group" "legacy_launcher" {
+  name              = "/aws/lambda/${var.project_name}-launcher"
+  retention_in_days = 30
+  tags              = local.tags
+}
+
+resource "aws_cloudwatch_log_group" "budget_notifier" {
+  name              = "/aws/lambda/${var.project_name}-budget-notifier"
   retention_in_days = 30
   tags              = local.tags
 }
@@ -264,6 +399,13 @@ resource "aws_codebuild_project" "image" {
     type      = "S3"
     location  = "${aws_s3_bucket.artifacts.bucket}/${var.source_bundle_key}"
     buildspec = "buildspec.yml"
+  }
+
+  logs_config {
+    cloudwatch_logs {
+      group_name = aws_cloudwatch_log_group.codebuild.name
+      status     = "ENABLED"
+    }
   }
 }
 
@@ -461,8 +603,8 @@ resource "aws_batch_job_definition" "stage" {
     environment      = local.batch_environment
     secrets          = local.batch_secrets
     resourceRequirements = [
-      { type = "VCPU", value = var.batch_vcpu },
-      { type = "MEMORY", value = var.batch_memory_mib }
+      { type = "VCPU", value = var.batch_light_vcpu },
+      { type = "MEMORY", value = var.batch_light_memory_mib }
     ]
     logConfiguration = {
       logDriver = "awslogs"
@@ -470,6 +612,86 @@ resource "aws_batch_job_definition" "stage" {
         awslogs-group         = aws_cloudwatch_log_group.batch.name
         awslogs-region        = var.aws_region
         awslogs-stream-prefix = "stage"
+      }
+    }
+    networkConfiguration = {
+      assignPublicIp = "ENABLED"
+    }
+  })
+
+  retry_strategy {
+    attempts = 1
+  }
+
+  timeout {
+    attempt_duration_seconds = var.batch_timeout_seconds
+  }
+
+  tags = local.tags
+}
+
+resource "aws_batch_job_definition" "script" {
+  name                  = "${var.project_name}-script"
+  type                  = "container"
+  platform_capabilities = ["FARGATE"]
+
+  container_properties = jsonencode({
+    image            = "${aws_ecr_repository.app.repository_url}:latest"
+    command          = ["python", "runner.py"]
+    executionRoleArn = aws_iam_role.batch_execution.arn
+    jobRoleArn       = aws_iam_role.batch_job.arn
+    environment      = local.batch_environment
+    secrets          = local.batch_secrets
+    resourceRequirements = [
+      { type = "VCPU", value = var.batch_script_vcpu },
+      { type = "MEMORY", value = var.batch_script_memory_mib }
+    ]
+    logConfiguration = {
+      logDriver = "awslogs"
+      options = {
+        awslogs-group         = aws_cloudwatch_log_group.batch.name
+        awslogs-region        = var.aws_region
+        awslogs-stream-prefix = "script"
+      }
+    }
+    networkConfiguration = {
+      assignPublicIp = "ENABLED"
+    }
+  })
+
+  retry_strategy {
+    attempts = 1
+  }
+
+  timeout {
+    attempt_duration_seconds = var.batch_timeout_seconds
+  }
+
+  tags = local.tags
+}
+
+resource "aws_batch_job_definition" "render" {
+  name                  = "${var.project_name}-render"
+  type                  = "container"
+  platform_capabilities = ["FARGATE"]
+
+  container_properties = jsonencode({
+    image            = "${aws_ecr_repository.app.repository_url}:latest"
+    command          = ["python", "runner.py"]
+    executionRoleArn = aws_iam_role.batch_execution.arn
+    jobRoleArn       = aws_iam_role.batch_job.arn
+    environment      = local.batch_environment
+    secrets          = local.batch_secrets
+    resourceRequirements = [
+      { type = "VCPU", value = var.batch_render_vcpu },
+      { type = "MEMORY", value = var.batch_render_memory_mib }
+    ]
+    logConfiguration = {
+      logDriver = "awslogs"
+      options = {
+        awslogs-group         = aws_cloudwatch_log_group.batch.name
+        awslogs-region        = var.aws_region
+        awslogs-stream-prefix = "render"
       }
     }
     networkConfiguration = {
@@ -583,14 +805,158 @@ resource "aws_lambda_function" "publisher" {
 
   environment {
     variables = {
-      BUCKET_NAME            = aws_s3_bucket.artifacts.bucket
-      CONTENT_TABLE_NAME     = aws_dynamodb_table.content.name
-      SSM_PARAMETER_PREFIX   = local.ssm_parameter_prefix
-      YOUTUBE_PRIVACY_STATUS = var.youtube_privacy_status
+      BUCKET_NAME               = aws_s3_bucket.artifacts.bucket
+      CONTENT_TABLE_NAME        = aws_dynamodb_table.content.name
+      SSM_PARAMETER_PREFIX      = local.ssm_parameter_prefix
+      YOUTUBE_PRIVACY_STATUS    = var.youtube_privacy_status
+      SCHEDULE_TIMEZONE         = var.schedule_timezone
+      PUBLISH_HOUR_LOCAL        = tostring(var.publish_hour_local)
+      PUBLISH_MINUTE_LOCAL      = tostring(var.publish_minute_local)
+      PUBLISH_REBASE_STALE_DAYS = tostring(var.publish_rebase_stale_days)
     }
   }
 
+  depends_on = [aws_cloudwatch_log_group.publisher]
+
   tags = local.tags
+}
+
+resource "aws_sns_topic" "alerts" {
+  name = "${var.project_name}-alerts"
+  tags = local.tags
+}
+
+resource "aws_sns_topic_policy" "alerts" {
+  arn = aws_sns_topic.alerts.arn
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Principal = {
+          Service = [
+            "events.amazonaws.com",
+            "budgets.amazonaws.com"
+          ]
+        }
+        Action   = "sns:Publish"
+        Resource = aws_sns_topic.alerts.arn
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role" "budget_notifier" {
+  name = "${var.project_name}-budget-notifier-role"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = "sts:AssumeRole"
+      Principal = {
+        Service = "lambda.amazonaws.com"
+      }
+    }]
+  })
+  tags = local.tags
+}
+
+resource "aws_iam_role_policy_attachment" "budget_notifier_basic" {
+  role       = aws_iam_role.budget_notifier.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+}
+
+resource "aws_iam_role_policy" "budget_notifier" {
+  name = "${var.project_name}-budget-notifier-policy"
+  role = aws_iam_role.budget_notifier.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "ssm:GetParameter"
+        ]
+        Resource = "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter${local.ssm_parameter_prefix}/SLACK_WEBHOOK_URL"
+      },
+      {
+        Effect   = "Allow"
+        Action   = "kms:Decrypt"
+        Resource = "*"
+        Condition = {
+          StringEquals = {
+            "kms:ViaService" = "ssm.${var.aws_region}.amazonaws.com"
+          }
+        }
+      }
+    ]
+  })
+}
+
+data "archive_file" "budget_notifier" {
+  type        = "zip"
+  source_file = "${path.module}/lambda/budget_notifier.py"
+  output_path = "${path.module}/.build/budget_notifier.zip"
+}
+
+resource "aws_lambda_function" "budget_notifier" {
+  function_name    = "${var.project_name}-budget-notifier"
+  role             = aws_iam_role.budget_notifier.arn
+  handler          = "budget_notifier.handler"
+  runtime          = "python3.12"
+  filename         = data.archive_file.budget_notifier.output_path
+  source_code_hash = data.archive_file.budget_notifier.output_base64sha256
+  timeout          = 30
+  memory_size      = 128
+
+  environment {
+    variables = {
+      SSM_PARAMETER_PREFIX = local.ssm_parameter_prefix
+    }
+  }
+
+  depends_on = [aws_cloudwatch_log_group.budget_notifier]
+  tags       = local.tags
+}
+
+resource "aws_sns_topic_subscription" "alerts_to_budget_notifier" {
+  topic_arn = aws_sns_topic.alerts.arn
+  protocol  = "lambda"
+  endpoint  = aws_lambda_function.budget_notifier.arn
+}
+
+resource "aws_lambda_permission" "allow_sns_alerts" {
+  statement_id  = "AllowExecutionFromSnsAlerts"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.budget_notifier.function_name
+  principal     = "sns.amazonaws.com"
+  source_arn    = aws_sns_topic.alerts.arn
+}
+
+resource "aws_budgets_budget" "monthly" {
+  name         = "${var.project_name}-monthly-budget"
+  budget_type  = "COST"
+  limit_amount = tostring(var.monthly_budget_limit_usd)
+  limit_unit   = "USD"
+  time_unit    = "MONTHLY"
+
+  notification {
+    comparison_operator       = "GREATER_THAN"
+    threshold                 = 80
+    threshold_type            = "PERCENTAGE"
+    notification_type         = "ACTUAL"
+    subscriber_sns_topic_arns = [aws_sns_topic.alerts.arn]
+  }
+
+  notification {
+    comparison_operator       = "GREATER_THAN"
+    threshold                 = 100
+    threshold_type            = "PERCENTAGE"
+    notification_type         = "FORECASTED"
+    subscriber_sns_topic_arns = [aws_sns_topic.alerts.arn]
+  }
+
+  depends_on = [aws_sns_topic_policy.alerts]
 }
 
 resource "aws_iam_role" "step_functions" {
@@ -621,7 +987,9 @@ resource "aws_iam_role_policy" "step_functions" {
         ]
         Resource = [
           aws_batch_job_queue.pipeline.arn,
-          aws_batch_job_definition.stage.arn
+          aws_batch_job_definition.stage.arn,
+          aws_batch_job_definition.script.arn,
+          aws_batch_job_definition.render.arn
         ]
       },
       {
@@ -732,7 +1100,7 @@ resource "aws_sfn_state_machine" "pipeline" {
         Parameters = {
           JobName       = "${var.project_name}-script"
           JobQueue      = aws_batch_job_queue.pipeline.arn
-          JobDefinition = aws_batch_job_definition.stage.arn
+          JobDefinition = aws_batch_job_definition.script.arn
           ContainerOverrides = {
             Environment = [
               { Name = "STAGE", Value = "script" },
@@ -783,10 +1151,31 @@ resource "aws_sfn_state_machine" "pipeline" {
         Parameters = {
           JobName       = "${var.project_name}-render"
           JobQueue      = aws_batch_job_queue.pipeline.arn
-          JobDefinition = aws_batch_job_definition.stage.arn
+          JobDefinition = aws_batch_job_definition.render.arn
+          ArrayProperties = {
+            Size = var.render_array_size
+          }
           ContainerOverrides = {
             Environment = [
               { Name = "STAGE", Value = "render" },
+              { Name = "GENERATION_BATCH_DAYS", "Value.$" = "States.Format('{}', $.days)" },
+              { Name = "RENDER_SHARD_MODE", Value = "array" }
+            ]
+          }
+        }
+        Next = "Finalize"
+      }
+      Finalize = {
+        Type       = "Task"
+        Resource   = "arn:aws:states:::batch:submitJob.sync"
+        ResultPath = null
+        Parameters = {
+          JobName       = "${var.project_name}-finalize"
+          JobQueue      = aws_batch_job_queue.pipeline.arn
+          JobDefinition = aws_batch_job_definition.stage.arn
+          ContainerOverrides = {
+            Environment = [
+              { Name = "STAGE", Value = "finalize" },
               { Name = "GENERATION_BATCH_DAYS", "Value.$" = "States.Format('{}', $.days)" }
             ]
           }
@@ -843,8 +1232,8 @@ resource "aws_iam_role_policy" "scheduler" {
 }
 
 resource "aws_scheduler_schedule" "generate" {
-  name                         = "${var.project_name}-generate-14day"
-  description                  = "Weekly generation workflow for the next 14 publish days"
+  name                         = "${var.project_name}-generate-refill"
+  description                  = "Twice-monthly generation refill workflow for publish-ready inventory"
   schedule_expression          = var.generate_schedule_expression
   schedule_expression_timezone = var.schedule_timezone
   state                        = var.enable_schedules ? "ENABLED" : "DISABLED"
@@ -881,4 +1270,44 @@ resource "aws_scheduler_schedule" "upload" {
     })
     role_arn = aws_iam_role.scheduler.arn
   }
+}
+
+resource "aws_cloudwatch_event_rule" "step_functions_failed" {
+  name        = "${var.project_name}-sfn-failed"
+  description = "Alert when the generation/upload state machine fails"
+  event_pattern = jsonencode({
+    source        = ["aws.states"]
+    "detail-type" = ["Step Functions Execution Status Change"]
+    detail = {
+      status          = ["FAILED", "TIMED_OUT", "ABORTED"]
+      stateMachineArn = [aws_sfn_state_machine.pipeline.arn]
+    }
+  })
+  tags = local.tags
+}
+
+resource "aws_cloudwatch_event_target" "step_functions_failed" {
+  rule      = aws_cloudwatch_event_rule.step_functions_failed.name
+  target_id = "sns-alerts"
+  arn       = aws_sns_topic.alerts.arn
+}
+
+resource "aws_cloudwatch_event_rule" "batch_failed" {
+  name        = "${var.project_name}-batch-failed"
+  description = "Alert when a Batch job in the pipeline queue fails"
+  event_pattern = jsonencode({
+    source        = ["aws.batch"]
+    "detail-type" = ["Batch Job State Change"]
+    detail = {
+      status   = ["FAILED"]
+      jobQueue = [aws_batch_job_queue.pipeline.arn]
+    }
+  })
+  tags = local.tags
+}
+
+resource "aws_cloudwatch_event_target" "batch_failed" {
+  rule      = aws_cloudwatch_event_rule.batch_failed.name
+  target_id = "sns-alerts"
+  arn       = aws_sns_topic.alerts.arn
 }
