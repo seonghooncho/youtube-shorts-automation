@@ -11,7 +11,7 @@ Generated Shorts should be fast enough for the Shorts feed, visually varied, and
 - Filter model: `gpt-5.4-nano` by default for low-cost viability classification.
 - TTS speed: 1.06x-1.24x based on original duration.
 - Target final narration: 35-82 seconds, with normal output expected around 45-75 seconds.
-- Background clips: 2.8-4.2 second deterministic cuts.
+- Background clips: 3.4-5.6 second deterministic cuts by default, expanded to 4.0-6.6 seconds for longer narration.
 - Final video: 1080x1920, 30 fps, H.264 CRF 19, `+faststart`.
 - Final audio: AAC, 48 kHz, stereo, 128k target, loudness normalized to `I=-16:TP=-1.5:LRA=11`.
 
@@ -26,6 +26,27 @@ GPT now returns `visual_keywords` with each script. The render stage uses those 
 - `person thinking`
 
 Generic queries like `nature`, `background`, and `landscape` are ignored unless explicitly reintroduced in code.
+
+When story-specific clips are not enough, the Pixabay search falls back to muted ASMR-style visual queries such as:
+
+- `hands typing keyboard close up`
+- `phone screen close up`
+- `writing notebook close up`
+- `coffee pouring close up`
+- `rain window`
+- `candle flame close up`
+
+These are visual-only background clips. Their audio is removed before final rendering so they do not compete with narration.
+
+Pixabay candidates are sorted and filtered before download:
+
+- query/tag overlap is preferred
+- concrete tags such as phone, hands, typing, coffee, hallway, office, or conversation are preferred
+- higher-resolution Pixabay variants are selected by long edge, not by label order
+- generic low-signal landscape, sky, drone, and sunset results are rejected unless they match the query
+- green screen, abstract, template, animation, game, logo, VFX, slideshow, intro, and outro clips are rejected
+
+If fresh Pixabay IDs are exhausted, the renderer can reuse older IDs as a fallback (`PIXABAY_ALLOW_USED_ID_FALLBACK=1`) rather than failing a whole batch because of inventory scarcity.
 
 ## Script Quality Gate
 
@@ -96,6 +117,14 @@ The render stage also logs non-blocking quality warnings when output is outside 
 - `TTS_MAX_FINAL_SECONDS`
 - `SHORTS_BG_MIN_CLIP_SECONDS`
 - `SHORTS_BG_MAX_CLIP_SECONDS`
+- `PIXABAY_ENABLE_ASMR_FALLBACK`
+- `PIXABAY_ASMR_FALLBACK_QUERIES`
+- `PIXABAY_ALLOW_USED_ID_FALLBACK`
+- `PIXABAY_PRIMARY_FALLBACK_QUERIES`
+- `PIXABAY_MAX_PAGES_PER_QUERY`
+- `PIXABAY_MIN_DOWNLOAD_BYTES`
+- `PIXABAY_MIN_SOURCE_LONG_EDGE`
+- `PIXABAY_ALLOW_LOW_RES_FALLBACK`
 - `SHORTS_RENDER_FPS`
 - `FINAL_RENDER_CRF`
 - `FINAL_AUDIO_BITRATE`
