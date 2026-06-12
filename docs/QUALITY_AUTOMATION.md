@@ -6,7 +6,9 @@ Generated Shorts should be fast enough for the Shorts feed, visually varied, and
 
 ## Current Defaults
 
-- Script length: 850-1250 characters, hard limit 750-1400 characters.
+- Script length: 800-1150 preferred characters, hard limit 750-1400 characters.
+- Script model: `gpt-5.5` by default for source-faithful adaptation quality.
+- Filter model: `gpt-5.4-nano` by default for low-cost viability classification.
 - TTS speed: 1.06x-1.24x based on original duration.
 - Target final narration: 35-82 seconds, with normal output expected around 45-75 seconds.
 - Background clips: 2.8-4.2 second deterministic cuts.
@@ -24,6 +26,42 @@ GPT now returns `visual_keywords` with each script. The render stage uses those 
 - `person thinking`
 
 Generic queries like `nature`, `background`, and `landscape` are ignored unless explicitly reintroduced in code.
+
+## Script Quality Gate
+
+Script generation uses Structured Outputs with these required fields:
+
+- `source_summary`: concise summary of the original conflict
+- `story_beats`: 4-7 source-grounded beats
+- `visual_keywords`: 5-8 concrete stock-video search phrases
+- `script`: first-person narration paragraphs
+
+The local validator rejects scripts before TTS when any hard failure is detected:
+
+- source content is too thin or likely truncated
+- script is outside the 750-1400 character hard bounds
+- first sentence hook is missing, too long, or starts with slow setup
+- final beats do not include a direct engagement question
+- narration contains meta language such as JSON/script/AI references
+- source summary or story beats are missing
+- visual keywords are too sparse after cleanup
+- lexical overlap with the original story is too low, which usually means the adaptation drifted from the source
+
+Non-blocking warnings are stored in `quality_warnings` for valid scripts that are outside the preferred 800-1150 character target or show repetitive paragraph starts.
+
+## Source Integrity
+
+Reddit collection stores source diagnostics with each raw post:
+
+- `content_char_count`
+- `content_word_count`
+- `content_hash`
+- `source_is_truncated`
+- `source_truncation_reason`
+- `source_detail_checked`
+- `source_detail_improved`
+
+The Reddit API collector re-checks accepted posts through the post detail endpoint by default (`REDDIT_FETCH_POST_DETAILS=1`) and keeps the longer body when the detail response improves the listing body. PullPush fallback uses `selftext`, then `body`, then `text` so archived bodies are not missed.
 
 ## Pixabay Filtering
 
@@ -63,3 +101,8 @@ The render stage also logs non-blocking quality warnings when output is outside 
 - `FINAL_AUDIO_BITRATE`
 - `FINAL_AUDIO_LOUDNORM`
 - `PIXABAY_MAX_QUERIES_PER_ITEM`
+- `REDDIT_FETCH_POST_DETAILS`
+- `REDDIT_DETAIL_REQUEST_DELAY_SECONDS`
+- `FILTER_REASONING_EFFORT`
+- `FILTER_MODEL`
+- `SCRIPT_MODEL`

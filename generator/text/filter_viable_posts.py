@@ -6,6 +6,7 @@ import re
 from typing import List
 from dotenv import load_dotenv, find_dotenv
 import openai
+from generator.text.script_quality import build_source_profile
 from shared.utils.config import RAW_POSTS_FILE, VIABLE_POSTS_FILE
 
 
@@ -96,8 +97,7 @@ def _ask_yes_no(client: openai.OpenAI, prompt: str, model: str) -> str:
                 "input": messages,
                 "max_output_tokens": 128,
             }
-            if _uses_legacy_gpt5_reasoning(model):
-                kwargs["reasoning"] = {"effort": "minimal"}
+            kwargs.update(_reasoning_kwargs_for_model(model))
             resp = client.responses.create(**kwargs)
             raw = (resp.output_text or "").strip()
             verdict = _normalize_yes_no(raw)
@@ -109,8 +109,24 @@ def _ask_yes_no(client: openai.OpenAI, prompt: str, model: str) -> str:
     return ""  # 불명
 
 
-def _uses_legacy_gpt5_reasoning(model: str) -> bool:
-    return model.startswith("gpt-5") and not model.startswith("gpt-5.4")
+def _reasoning_kwargs_for_model(model: str) -> dict:
+    configured_effort = os.getenv("FILTER_REASONING_EFFORT", "").strip()
+    if configured_effort:
+        return {"reasoning": {"effort": configured_effort}}
+    if model == "gpt-5.5" or model.startswith("gpt-5.5-"):
+        return {"reasoning": {"effort": "low"}}
+    if model.startswith("gpt-5") and not model.startswith("gpt-5.4"):
+        return {"reasoning": {"effort": "minimal"}}
+    return {}
+
+
+def _local_precheck(post: dict) -> str:
+    source = build_source_profile(post)
+    if source.is_truncated:
+        return f"source may be truncated: {source.truncation_reason or 'unknown reason'}"
+    if source.char_count < 550 or source.word_count < 90:
+        return f"source too thin ({source.char_count} chars, {source.word_count} words)"
+    return ""
 
 
 # -----------------------------
@@ -131,12 +147,32 @@ def filter_viable_posts():
 
     for post in raw_posts:
         title, content = post.get("title", ""), post.get("content", "")
+        local_reject_reason = _local_precheck(post)
+        if local_reject_reason:
+            print(f"⏭️ 로컬 precheck 실패로 스킵: {post.get('id', 'unknown')} - {local_reject_reason}")
+            continue
 
         prompt = f"""
-        제목: {title}
-        내용: {content}
+        Evaluate whether this source can become a high-quality 45-75 second YouTube Shorts story.
 
-        위 이야기가 유튜브 쇼츠 영상으로 적절한지 평가해줘. 너무 짧거나, 지루하거나, 부적절하면 'NO'로, 가능하면 'YES'로만 답해.
+        Answer YES only if all conditions are true:
+        - The story is complete enough to adapt without inventing major facts.
+        - There is a clear first-person conflict, decision, consequence, or moral dilemma.
+        - The story has enough concrete detail for 4-7 fast narration beats.
+        - The content can be made broadly safe for YouTube Shorts.
+        - The likely narration will not need filler to reach 45 seconds.
+
+        Answer NO if the source is mostly contextless, a question without a story, rage bait without events,
+        graphic/sexual content involving minors, explicit hate or slurs, or a post that requires major fabrication.
+
+        Title: {title}
+        Source metadata:
+        - chars: {post.get('content_char_count', len(content))}
+        - words: {post.get('content_word_count', len(content.split()))}
+        - provider: {post.get('source_provider', 'unknown')}
+
+        Content:
+        {content}
         """
 
         try:

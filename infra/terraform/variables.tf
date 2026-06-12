@@ -160,7 +160,7 @@ variable "openai_filter_model" {
 
 variable "openai_script_model" {
   type    = string
-  default = "gpt-5.4-mini"
+  default = "gpt-5.5"
 }
 
 variable "monthly_budget_limit_usd" {

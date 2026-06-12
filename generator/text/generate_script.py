@@ -2,7 +2,7 @@ import os
 from typing import List, Literal, Optional
 from dotenv import load_dotenv, find_dotenv
 import openai
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 # --- ENV & Client ---
 def _get_client() -> openai.OpenAI:
@@ -14,7 +14,7 @@ def _get_client() -> openai.OpenAI:
     return openai.OpenAI(api_key=api_key)
 
 def _default_model() -> str:
-    return os.getenv("SCRIPT_MODEL") or os.getenv("OPENAI_MODEL", "gpt-5.4-mini")
+    return os.getenv("SCRIPT_MODEL") or os.getenv("OPENAI_MODEL", "gpt-5.5")
 
 # --- Schema ---
 class ReturnScript(BaseModel):
@@ -23,6 +23,8 @@ class ReturnScript(BaseModel):
     tags: List[str]
     voice: Literal["male", "female", "neutral"]
     visual_keywords: List[str]
+    source_summary: str = Field(..., description="One or two sentences summarizing the source conflict.")
+    story_beats: List[str] = Field(..., min_length=4, max_length=7)
     script: List[str]
 
 def _assert_no_nulls(rs: ReturnScript) -> None:
@@ -64,7 +66,7 @@ def _try_structured(client: openai.OpenAI, prompt: str, max_output_tokens: int) 
         ],
         text_format=ReturnScript,
         max_output_tokens=max_output_tokens,
-        text={"verbosity": "medium"},
+        text={"verbosity": "low"},
     )
     parsed: ReturnScript = resp.output_parsed
     if parsed is None:
@@ -91,7 +93,7 @@ def _fallback_json_mode(client: openai.OpenAI, prompt: str, max_output_tokens: i
               )},
             {"role": "user", "content": prompt},
         ],
-        text={"format": {"type": "json_object"}, "verbosity": "medium"},
+        text={"format": {"type": "json_object"}, "verbosity": "low"},
         max_output_tokens=max_output_tokens,
     )
     raw = (resp.output_text or "").strip()

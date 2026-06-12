@@ -61,4 +61,5 @@ terraform apply
 - [전체 구조](docs/ARCHITECTURE.md)
 - [AWS Terraform 설계](docs/INFRASTRUCTURE.md)
 - [운영 문서](docs/OPERATIONS.md)
+- [품질 자동화](docs/QUALITY_AUTOMATION.md)
 - [완료 체크리스트](docs/IMPLEMENTATION_CHECKLIST.md)

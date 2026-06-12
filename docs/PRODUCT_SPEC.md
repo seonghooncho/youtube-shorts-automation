@@ -15,8 +15,8 @@ Reddit의 긴 사연형 게시물을 짧은 세로 영상으로 재가공해 You
 ## 콘텐츠 흐름
 
 1. Reddit 또는 PullPush에서 사연형 게시물 수집
-2. OpenAI로 쇼츠 적합성 필터링
-3. OpenAI로 1인칭 영어 내레이션 대본과 메타데이터 생성
+2. 원문 길이/단어 수/잘림 여부를 기록하고, OpenAI로 쇼츠 적합성 필터링
+3. OpenAI Structured Outputs로 원문 요약, 이야기 비트, 1인칭 영어 내레이션 대본과 메타데이터 생성
 4. planner Lambda가 기존 publish-ready 재고를 확인하고 부족분을 계산
 5. 부족분이 있으면 신규 항목에 예약일 부여
 6. AWS Polly로 음성 및 speech marks 생성
@@ -33,5 +33,8 @@ Reddit의 긴 사연형 게시물을 짧은 세로 영상으로 재가공해 You
 - 긴 ffmpeg 렌더링은 AWS Batch/Fargate로 실행합니다.
 - 시크릿은 SSM Parameter Store SecureString으로 관리합니다.
 - Reddit 수집은 DOM 크롤링 대신 API-first/fallback 구조로 운영합니다.
+- Reddit 수집 결과에는 content hash, 길이, detail 재조회 여부를 저장해 원문 누락을 추적합니다.
+- 대본은 프롬프트 결과를 그대로 신뢰하지 않고 로컬 품질검증을 통과해야 TTS로 넘어갑니다.
+- 필터링은 저비용 모델을 쓰고, 실제 대본 각색은 품질 우선 모델을 사용합니다.
 - 14일 목표 재고는 보장 목표이며, 실제 생성 실패분은 버퍼와 다음 refill에서 보정합니다.
 - 너무 작거나 스트림이 깨진 MP4는 publish-ready 또는 YouTube 업로드로 승격하지 않습니다.
