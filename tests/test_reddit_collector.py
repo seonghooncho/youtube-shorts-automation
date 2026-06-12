@@ -22,6 +22,8 @@ def test_post_from_child_accepts_self_post():
 
     assert post["id"] == "abc123"
     assert post["source_url"].endswith("/abc123/test/")
+    assert post["content_char_count"] == len("This is long enough for a useful story.")
+    assert post["source_detail_checked"] is False
 
 
 def test_post_from_child_rejects_external_link():
@@ -52,3 +54,21 @@ def test_post_from_pullpush_item_accepts_story():
 
     assert post["id"] == "def456"
     assert post["source_provider"] == "pullpush"
+
+
+def test_post_from_pullpush_item_uses_body_fallback():
+    config = RedditScrapeConfig(min_chars=10)
+    item = {
+        "id": "ghi789",
+        "title": "AITA for fallback body?",
+        "selftext": "[removed]",
+        "body": "This archived body field has enough text for collection.",
+        "permalink": "/r/AmItheAsshole/comments/ghi789/fallback/",
+        "subreddit": "AmItheAsshole",
+    }
+
+    post = _post_from_pullpush_item(item, config)
+
+    assert post["content"] == "This archived body field has enough text for collection."
+    assert post["content_word_count"] == 9
+    assert post["source_is_truncated"] is False

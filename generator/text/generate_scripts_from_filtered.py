@@ -3,6 +3,13 @@
 import json
 from typing import Any, Dict
 from generator.text.generate_script import generate_script, ReturnScript
+from generator.text.script_quality import (
+    build_source_profile,
+    hard_quality_errors,
+    quality_issues_to_regenerate_reason,
+    script_text,
+    validate_script_quality,
+)
 from shared.utils.config import VIABLE_POSTS_FILE, FINAL_METADATA_FILE, FAILED_POSTS_FILE
 EXAMPLE_JSON = """
 {
@@ -11,6 +18,14 @@ EXAMPLE_JSON = """
         "tags": ["storytime", "neighborhood", "drama", "reddit", "beachhouse"],
         "voice": "male",
         "visual_keywords": ["suburban driveway", "security camera", "kids playing", "angry neighbor", "rental house", "phone messages"],
+        "source_summary": "The narrator owns a townhouse near a short-term rental and has repeated problems with renters' kids using his driveway and yard without permission.",
+        "story_beats": [
+                "Neighboring rental guests start cutting through the narrator's property.",
+                "Security camera alerts show kids using the driveway as a play area.",
+                "The narrator tells them to leave through the camera speaker.",
+                "The next-door owner dismisses the complaint instead of apologizing.",
+                "The narrator sets a firm boundary and asks if that was too strict."
+        ],
         "script": [
                 "A dozen kids turned my driveway into their playground, and their parents acted like I was the problem.",
                 "I own a small townhouse near the beach, and the unit next door is a short-term rental. At first, the guests were just cutting across my yard. Annoying, but whatever.",
@@ -23,31 +38,33 @@ EXAMPLE_JSON = """
 }
 """.strip()
 
-def call_gpt_generate_script(title, content, regenerate_reason=None):
+def call_gpt_generate_script(title, content, post=None, regenerate_reason=None):
+    source = build_source_profile(post or {"title": title, "content": content})
     # 2) f-string은 치환이 필요한 부분(제목/본문)만 사용
     parts = [
-        "You're helping me create a short video script for social media.",
-        "This script should be written **in first-person**, like I'm telling my own story to a friend.",
-        "Here is a story originally posted on Reddit.",
-        f"\nTitle: {title}\n",
-        f"\nContent:\n{content}\n",
-        "Based on this story, create a **video script in JSON format** that would feel natural and engaging for an English-speaking audience.",
+        "You are adapting a Reddit story into a YouTube Shorts narration.",
+        "Outcome: produce a fast, source-faithful, first-person script that can be narrated naturally by TTS.",
+        "Audience: English-speaking Shorts viewers who decide in the first 2 seconds whether to keep watching.",
         "\n[Instructions]",
-        "- Return the response in the **exact same JSON structure** shown in the example below.",
+        "- Return the response in the exact same JSON structure shown in the example below.",
         '- **Detect the main character\'s gender** from the original story. Add a new key `"voice"` to the output JSON, whose value is either `"male"` or `"female"`, based on the main character’s gender for TTS selection. If gender is ambiguous, return `"neutral"`.',
-        "- The story should be rewritten with natural flow and clarity, including just enough context **before and after the main event** so the viewer can immediately understand the conflict.",
-        "- If the original story lacks detail, you’re encouraged to **creatively expand the scenario** with logical background, emotions, or interactions.",
-        "- You may modify, rewrite, or dramatize the story to make it more **relatable and engaging**.",
+        "- The source text is authoritative. Preserve the core conflict, timeline, relationship, decision, consequence, and ending.",
+        "- You may compress, reorder, and dramatize wording for clarity, but do not invent a new betrayal, relationship, legal threat, revenge, confession, or outcome that is not supported by the source.",
+        "- If the source lacks small connective details, add only light emotional context or transitions that do not change the facts.",
+        "- Fill `source_summary` with the original story's core conflict, not the rewritten script.",
+        "- Fill `story_beats` with 4 to 7 source-grounded beats: setup, escalation, decision, consequence, and final dilemma.",
         "- Write in a **casual, conversational tone**, as if you're sharing a story with a friend.",
         "- Avoid formal or stiff language. Use expressions and tones that are commonly seen in successful YouTube Shorts.",
         "- The first sentence must be a strong hook: start with the conflict, consequence, or most surprising detail. Do not start with slow setup like 'So, get this' or 'A little backstory'.",
         "- Keep the pacing fast. Remove filler, repeated setup, and slow explanations. The narration should still be understandable after a moderate speed-up.",
-        "- Structure the story in **paragraph-style script**.",
-        "- The entire script should target 850 to 1250 characters and must NOT exceed 1400 characters.",
+        "- Structure the story in a `script` array of 5 to 7 short paragraphs. Never use more than 9 paragraphs.",
+        "- The entire script should target 800 to 1150 characters, with an ideal landing point around 950 characters.",
+        "- Keep the script under 1300 characters whenever possible. Anything over 1400 characters is invalid.",
         "- The target final narration length is roughly 45 to 75 seconds after a moderate speed-up. Prefer concise sentences over long paragraphs.",
         "- The script should never feel stretched, repetitive, or abruptly shortened; keep only the setup, escalation, decision, and question.",
         "- Add a `visual_keywords` array with 5 to 8 short English stock-video search phrases that match the story's setting and emotion.",
         "- Visual keywords should be concrete and searchable, such as 'phone texting', 'couple argument', 'apartment hallway', 'office conversation', 'security camera', or 'angry neighbor'. Avoid generic terms like 'nature', 'background', or 'landscape' unless the story truly needs them.",
+        "- Do not mention Reddit, JSON, scripts, AI, viewers, or instructions inside the narration.",
         "- End the script with a question or prompt to encourage **viewer engagement**, such as:",
         '  - "So, what do you think?"',
         '  - "Would you have done the same?"',
@@ -57,6 +74,14 @@ def call_gpt_generate_script(title, content, regenerate_reason=None):
         "- The response **must strictly follow the JSON structure** shown above with no missing keys.",
         "- Any syntax or formatting error in the returned JSON will be considered a failure.",
         "- **If the script contains fewer than 750 characters or more than 1400 characters, it's considered invalid.**",
+        "\n[Source metadata]",
+        f"- Source provider: {source.provider or 'unknown'}",
+        f"- Source URL: {source.source_url or 'unknown'}",
+        f"- Source length: {source.char_count} chars, {source.word_count} words",
+        f"- Source truncation flag: {source.is_truncated} {source.truncation_reason}".strip(),
+        "\n[Original source]",
+        f"Title: {title}",
+        f"\nContent:\n{content}",
     ]
     prompt = "\n".join(parts)
 
@@ -80,8 +105,17 @@ def validate_and_parse_metadata(result: ReturnScript, idx, post) -> Dict[str, An
         # Pydantic → dict
         metadata: Dict[str, Any] = result.model_dump()
 
-        # 기존 검증 스펙 유지
-        required_keys = ["title", "description", "tags", "visual_keywords", "script"]
+        # 기존 검증 스펙에 원문 충실도 검증용 필드를 추가한다.
+        required_keys = [
+            "title",
+            "description",
+            "tags",
+            "voice",
+            "visual_keywords",
+            "source_summary",
+            "story_beats",
+            "script",
+        ]
         if not all(k in metadata for k in required_keys):
             raise ValueError("❌ 필수 키 누락")
 
@@ -89,18 +123,60 @@ def validate_and_parse_metadata(result: ReturnScript, idx, post) -> Dict[str, An
             raise ValueError("❌ script는 문자열 리스트여야 함")
         if not isinstance(metadata["visual_keywords"], list) or not all(isinstance(keyword, str) for keyword in metadata["visual_keywords"]):
             raise ValueError("❌ visual_keywords는 문자열 리스트여야 함")
+        if not isinstance(metadata["story_beats"], list) or not all(isinstance(beat, str) for beat in metadata["story_beats"]):
+            raise ValueError("❌ story_beats는 문자열 리스트여야 함")
 
-        script_length = sum(len(line) for line in metadata["script"])
+        metadata["script"] = [line.strip() for line in metadata["script"] if line.strip()]
+        metadata["story_beats"] = [beat.strip() for beat in metadata["story_beats"] if beat.strip()]
+
+        script_length = len(script_text(metadata))
         if script_length < 750:
             raise ValueError(f"❌ script가 너무 짧음 (현재 {script_length}자)")
         if script_length > 1400:
             raise ValueError(f"❌ script가 너무 긺 (현재 {script_length}자)")
 
         metadata["visual_keywords"] = _clean_visual_keywords(metadata["visual_keywords"])
+        metadata["script_char_count"] = script_length
+
+        if post and post.get("content"):
+            quality_issues = validate_script_quality(metadata, post)
+            hard_errors = hard_quality_errors(quality_issues)
+            if hard_errors:
+                raise ValueError(f"❌ 품질검증 실패: {quality_issues_to_regenerate_reason(hard_errors)}")
+            metadata["quality_warnings"] = [
+                {"code": issue.code, "message": issue.message}
+                for issue in quality_issues
+                if not issue.hard
+            ]
 
         return metadata
     except Exception as e:
         raise ValueError(f"post {idx} 오류: {e}")
+
+
+def _source_preflight_error(post: Dict[str, Any]) -> str:
+    source = build_source_profile(post)
+    if source.is_truncated:
+        return f"source content may be truncated: {source.truncation_reason or 'unknown reason'}"
+    if source.char_count < 550 or source.word_count < 90:
+        return f"source is too thin for faithful adaptation ({source.char_count} chars, {source.word_count} words)"
+    return ""
+
+
+def _regenerate_reason_from_error(message: str) -> str:
+    if "너무 짧음" in message or "너무 긺" in message or "character" in message:
+        return (
+            "The script's length was out of bounds. Please revise it to 800 to 1150 "
+            "characters, ideally around 950 characters, with a fast first-sentence hook and no filler."
+        )
+    if "품질검증 실패" in message:
+        return (
+            "The previous script failed local quality validation. Fix these issues exactly: "
+            f"{message}"
+        )
+    if "필수 키 누락" in message or "script는 문자열 리스트" in message or "story_beats" in message:
+        return "The response did not follow the required JSON structure. Please strictly follow the JSON example format."
+    return f"Other error: {message}"
 
 
 def generate_scripts_from_filtered():
@@ -121,16 +197,22 @@ def generate_scripts_from_filtered():
         regenerate_reason = None
         try_count = 0
         max_retries = 2  # 최대 2회까지 재생성 (기존 유지)
+        preflight_error = _source_preflight_error(post)
+        if preflight_error:
+            failed_items.append({"idx": idx, "id": origin_id, "title": title, "error": preflight_error})
+            print(f"🚫 원문 품질 미달로 스킵 (post {idx}): {preflight_error}")
+            continue
 
         while try_count <= max_retries:
             result = None
             try:
                 if try_count == 0:
-                    result: ReturnScript = call_gpt_generate_script(title, content)
+                    result: ReturnScript = call_gpt_generate_script(title, content, post=post)
                 else:
                     result: ReturnScript = call_gpt_generate_script(
                         title,
                         content,
+                        post=post,
                         regenerate_reason=regenerate_reason or "The previous script did not meet character length or structure requirements. Please revise accordingly."
                     )
 
@@ -162,18 +244,11 @@ def generate_scripts_from_filtered():
                         f"{json.dumps(result.model_dump(), ensure_ascii=False, indent=2)}\n"
                     )
                 msg = str(e)
-
-                # 에러 사유별 재생성 가이드 유지
-                if "너무 짧음" in msg or "너무 긺" in msg or "character" in msg:
-                    regenerate_reason = "The script's length was out of bounds. Please revise it to 850 to 1250 characters and under 1400 characters, with a fast first-sentence hook and no filler."
-                elif "필수 키 누락" in msg or "script는 문자열 리스트" in msg:
-                    regenerate_reason = "The script did not follow the required JSON structure. Please strictly follow the JSON example format."
-                else:
-                    regenerate_reason = f"Other error: {msg}"
+                regenerate_reason = _regenerate_reason_from_error(msg)
 
                 try_count += 1
                 if try_count > max_retries:
-                    failed_items.append({"idx": idx, "title": title, "error": msg})
+                    failed_items.append({"idx": idx, "id": origin_id, "title": title, "error": msg})
                     print(f"🚫 최종 실패 (post {idx}): {msg}")
 
     with open(FINAL_METADATA_FILE, "w", encoding="utf-8") as f:
@@ -211,15 +286,20 @@ def regenerate_post_by_id(post_id, regenerate_reason=None, max_retries=2):
     content = target_post.get("content", "")
     origin_id = target_post.get("id")
     try_count = 0
+    preflight_error = _source_preflight_error(target_post)
+    if preflight_error:
+        print(f"🚫 원문 품질 미달로 재생성 불가 (postId={post_id}): {preflight_error}")
+        return None
 
     while try_count <= max_retries:
         try:
             if try_count == 0:
-                result: ReturnScript = call_gpt_generate_script(title, content)
+                result: ReturnScript = call_gpt_generate_script(title, content, post=target_post)
             else:
                 result: ReturnScript = call_gpt_generate_script(
                     title,
                     content,
+                    post=target_post,
                     regenerate_reason=regenerate_reason or "The previous script did not meet character length or structure requirements. Please revise accordingly."
                 )
 
@@ -248,12 +328,7 @@ def regenerate_post_by_id(post_id, regenerate_reason=None, max_retries=2):
                     f"{json.dumps(result.model_dump(), ensure_ascii=False, indent=2)}\n"
                 )
             msg = str(e)
-            if "너무 짧음" in msg or "너무 긺" in msg or "character" in msg:
-                regenerate_reason = "The script's length was out of bounds. Please revise it to 850 to 1250 characters and under 1400 characters, with a fast first-sentence hook and no filler."
-            elif "필수 키 누락" in msg or "script는 문자열 리스트" in msg:
-                regenerate_reason = "The script did not follow the required JSON structure. Please strictly follow the JSON example format."
-            else:
-                regenerate_reason = f"Other error: {msg}"
+            regenerate_reason = _regenerate_reason_from_error(msg)
             try_count += 1
 
     print(f"🚫 최종 실패 (postId={post_id})")

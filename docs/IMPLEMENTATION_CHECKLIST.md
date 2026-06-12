@@ -16,7 +16,14 @@
 - [x] 생성 일수와 Reddit 후보 수집량 분리
 - [x] GPT 대본 생성은 publish-ready 재고 부족분만큼만 수행하도록 제한
 - [x] OpenAI 필터 모델과 대본 모델 분리
-- [x] `gpt-5.4-*` Responses API reasoning 파라미터 호환성 반영
+- [x] `gpt-5.4-*`/`gpt-5.5` Responses API reasoning 파라미터 호환성 반영
+- [x] 대본 생성 기본 모델을 품질 우선 `gpt-5.5`로 상향
+- [x] 대본 Structured Outputs 스키마에 `source_summary`, `story_beats` 추가
+- [x] 대본 로컬 품질검증 추가: 훅, 길이, 결말 질문, 원문 overlap, 메타 표현, visual keyword
+- [x] Reddit 원문 integrity metadata 추가: 길이, 단어 수, hash, truncation flag
+- [x] Reddit accepted post detail 재조회로 listing body 누락/축약 방지
+- [x] PullPush fallback에서 `selftext` 외 `body`/`text` 원문 fallback 추가
+- [x] 원문이 너무 얇거나 잘림 의심이면 필터/대본 생성 전 스킵
 - [x] publish-ready 버퍼/백필 정책 추가
 - [x] 오래 밀린 업로드 큐 예약일 rebase 보정 추가
 - [x] 렌더링 stage를 Batch array job으로 병렬화
