@@ -90,4 +90,4 @@ publisher Lambda는 업로드 직전 `YOUTUBE_MIN_UPLOAD_BYTES`보다 작은 MP4
 
 현재 SSM에 저장된 refresh token은 `youtube.upload` scope만 갖고 있어 `videos.list`, `processingDetails`, `videos.delete` 호출이 모두 `ACCESS_TOKEN_SCOPE_INSUFFICIENT`로 거부됩니다. 이 scope로는 업로드는 가능하지만 기존 업로드의 처리 상태 확인이나 삭제는 API로 수행할 수 없습니다.
 
-재발 방지는 코드로 반영되어 있습니다. 같은 유형의 작은 smoke MP4는 이제 publisher에서 업로드 전 차단됩니다. 기존 YouTube 처리중 건을 API로 조회/삭제하려면 `scripts/youtube_oauth_setup.py`를 다시 실행해 `youtube.force-ssl` scope가 포함된 refresh token을 발급하고 `/ytshorts/YOUTUBE_REFRESH_TOKEN`을 갱신해야 합니다.
+재발 방지는 코드로 반영되어 있습니다. 같은 유형의 작은 smoke MP4는 이제 publisher에서 업로드 전 차단됩니다. 로컬 uploader는 현재처럼 업로드 전용 refresh token만 있는 경우 `youtube.upload` scope로 fallback해 업로드를 계속 수행합니다. 기존 YouTube 처리중 건을 API로 조회/삭제하려면 `scripts/youtube_oauth_setup.py`를 다시 실행해 `youtube.force-ssl` scope가 포함된 refresh token을 발급하고 `/ytshorts/YOUTUBE_REFRESH_TOKEN`을 갱신해야 합니다.

@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Optional
 
 from google.auth.transport.requests import Request
+from google.auth.exceptions import RefreshError
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 
@@ -12,6 +13,7 @@ SCOPES = [
     "https://www.googleapis.com/auth/youtube.upload",
     "https://www.googleapis.com/auth/youtube.force-ssl",
 ]
+UPLOAD_ONLY_SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
 
 
 def token_file() -> Optional[Path]:
@@ -19,7 +21,7 @@ def token_file() -> Optional[Path]:
     return Path(path) if path else None
 
 
-def load_credentials_from_env() -> Optional[Credentials]:
+def load_credentials_from_env(scopes: Optional[list[str]] = SCOPES) -> Optional[Credentials]:
     refresh_token = os.getenv("YOUTUBE_REFRESH_TOKEN")
     client_id = os.getenv("YOUTUBE_CLIENT_ID")
     client_secret = os.getenv("YOUTUBE_CLIENT_SECRET")
@@ -32,7 +34,7 @@ def load_credentials_from_env() -> Optional[Credentials]:
         token_uri=os.getenv("YOUTUBE_TOKEN_URI", "https://oauth2.googleapis.com/token"),
         client_id=client_id,
         client_secret=_normalize_public_client_secret(client_secret),
-        scopes=SCOPES,
+        scopes=scopes,
     )
 
 
@@ -56,7 +58,14 @@ def build_youtube_credentials(interactive: Optional[bool] = None) -> Credentials
     if creds and creds.refresh_token and os.getenv("YOUTUBE_DEFER_TOKEN_REFRESH", "0") == "1":
         return creds
     if creds and not creds.valid and creds.refresh_token:
-        creds.refresh(Request())
+        try:
+            creds.refresh(Request())
+        except RefreshError as exc:
+            fallback = _upload_only_fallback_credentials(exc)
+            if fallback is None:
+                raise
+            fallback.refresh(Request())
+            creds = fallback
         save_credentials(creds)
     if creds and creds.valid:
         return creds
@@ -90,3 +99,11 @@ def _normalize_public_client_secret(value: Optional[str]) -> Optional[str]:
     if not value or value.strip().upper() in {"PENDING", "PUBLIC_CLIENT"}:
         return None
     return value
+
+
+def _upload_only_fallback_credentials(exc: RefreshError) -> Optional[Credentials]:
+    if os.getenv("YOUTUBE_DISABLE_UPLOAD_SCOPE_FALLBACK", "0") == "1":
+        return None
+    if "invalid_scope" not in str(exc):
+        return None
+    return load_credentials_from_env(scopes=UPLOAD_ONLY_SCOPES)
