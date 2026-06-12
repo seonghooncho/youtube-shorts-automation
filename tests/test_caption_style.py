@@ -1,5 +1,7 @@
+import generator.video.create_video as create_video
 from generator.video.create_video import (
     _build_centered_caption_events,
+    _ensure_ffmpeg_font_dir,
     _format_centered_caption_text,
     _write_centered_caption_ass,
 )
@@ -79,3 +81,12 @@ def test_write_centered_caption_ass_sets_center_position_and_style(tmp_path, mon
     assert r"{\an5\pos(540,960)\fad(30,30)}" in content
     assert "Dialogue: 0,0:00:01.00,0:00:01.50,Caption" in content
     assert r"OKAY {\c&H00FFFF&}QUICK{\c&HFFFFFF&}" in content
+
+
+def test_ensure_ffmpeg_font_dir_allows_missing_font(tmp_path, monkeypatch):
+    monkeypatch.setattr(create_video, "FINAL_DIR", tmp_path / "final")
+
+    font_dir = _ensure_ffmpeg_font_dir(tmp_path / "missing.ttf")
+
+    assert font_dir == tmp_path / "final" / "_fonts"
+    assert font_dir.exists()
