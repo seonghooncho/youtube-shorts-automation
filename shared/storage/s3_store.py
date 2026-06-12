@@ -15,10 +15,6 @@ class S3Store:
 
     def _build_client(self):
         kwargs = {"region_name": self.settings.region}
-        access_key = os.getenv("AWS_S3_ACCESS_KEY")
-        secret_key = os.getenv("AWS_S3_SECRET_ACCESS_KEY")
-        if access_key and secret_key:
-            kwargs.update(aws_access_key_id=access_key, aws_secret_access_key=secret_key)
         try:
             return boto3.client("s3", **kwargs)
         except (NoCredentialsError, ClientError) as e:
@@ -58,6 +54,17 @@ class S3Store:
         for page in paginator.paginate(Bucket=self.bucket_name, Prefix=prefix):
             keys.extend(item["Key"] for item in page.get("Contents", []))
         return keys
+
+    def object_exists(self, key: str) -> bool:
+        if not self.client:
+            raise RuntimeError("S3 클라이언트가 초기화되지 않았습니다.")
+        try:
+            self.client.head_object(Bucket=self.bucket_name, Key=key)
+            return True
+        except ClientError as e:
+            if e.response["Error"]["Code"] in ("404", "NoSuchKey", "NotFound"):
+                return False
+            raise
 
     def upload_files(self, files: Iterable[tuple[Path, str]]) -> list[str]:
         uploaded: list[str] = []

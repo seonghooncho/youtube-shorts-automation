@@ -17,14 +17,15 @@
 
 ```text
 EventBridge Scheduler
-  ├─ weekly generate input: {"mode":"generate","days":14}
+  ├─ twice-monthly refill input: {"mode":"generate","days":14}
   │   -> Step Functions ytshorts-pipeline
   │      -> Batch stage: collect
   │      -> Batch stage: filter
   │      -> Batch stage: script
   │      -> Batch stage: tts
   │      -> Batch stage: subtitles
-  │      -> Batch stage: render
+  │      -> Batch array stage: render per content_id
+  │      -> Batch stage: finalize
   │      -> S3 publish-ready + DynamoDB PUBLISH_READY
   └─ daily upload input: {"mode":"upload"}
       -> Step Functions ytshorts-pipeline
@@ -63,6 +64,18 @@ infra/bootstrap       Terraform remote state bootstrap
 docs                  기획, 구조, 운영 문서
 tests                 Reddit parser와 YouTube credential 테스트
 ```
+
+## 생성 재고 정책
+
+생성 스케줄은 매월 1일/15일 02:00 KST에 실행됩니다. `days=14`는 새 영상 14개를 무조건 만들라는 뜻이 아니라 daily upload를 14일 동안 유지할 목표 재고입니다.
+
+실제 신규 생성 수는 다음과 같이 결정합니다.
+
+```text
+needed = min(max_new_items, max(0, target_days + buffer_days - current_publish_ready_count))
+```
+
+기본값은 `target_days=14`, `buffer_days=3`, `max_new_items=21`입니다. Reddit 후보 부족, GPT 검증 실패, TTS 길이 실패, 렌더 실패가 있으면 publish-ready가 목표보다 적을 수 있고, 다음 refill에서 부족분을 다시 채웁니다. 업로드 큐가 오래 밀려 예약일이 과거로 누적되면 publisher Lambda가 미업로드 큐를 현재 시점부터 다시 일별 슬롯으로 정렬합니다.
 
 ## Reddit 수집
 

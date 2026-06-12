@@ -164,14 +164,17 @@ def _concat_segments(segment_paths: list[Path], output_path: Path) -> None:
     ]
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
-def batch_merge_videos_for_tts():
+def batch_merge_videos_for_tts(target_ids: list[str] | None = None):
     used_ids = load_used_ids()
+    target_set = set(target_ids or [])
     # pixabay_state = load_pixabay_state()
     # last_page = pixabay_state.get("last_page", 1)
     with open(TTS_RESULT_JSON, "r", encoding="utf-8") as f:
         tts_results = json.load(f)
     for entry in tts_results:
         tts_filename = entry["filename"]
+        if target_set and tts_filename not in target_set:
+            continue
         tts_basename = Path(tts_filename).stem
         tts_length = entry["final_duration"]
         output_video_path = get_video_source(f"{tts_basename}.mp4")

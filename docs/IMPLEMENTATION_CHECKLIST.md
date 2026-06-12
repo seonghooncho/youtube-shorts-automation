@@ -14,7 +14,12 @@
 - [x] Reddit OAuth/public JSON/PullPush fallback 수집기 구현
 - [x] Batch stage runner 추가: `collect`, `filter`, `script`, `tts`, `subtitles`, `render`
 - [x] 생성 일수와 Reddit 후보 수집량 분리
-- [x] GPT 대본 생성은 요청된 생성 일수만큼만 수행하도록 제한
+- [x] GPT 대본 생성은 publish-ready 재고 부족분만큼만 수행하도록 제한
+- [x] OpenAI 필터 모델과 대본 모델 분리
+- [x] `gpt-5.4-*` Responses API reasoning 파라미터 호환성 반영
+- [x] publish-ready 버퍼/백필 정책 추가
+- [x] 오래 밀린 업로드 큐 예약일 rebase 보정 추가
+- [x] 렌더링 stage를 Batch array job으로 병렬화
 - [x] 빈 산출물을 성공으로 넘기지 않도록 stage artifact 검증 추가
 - [x] S3Store upload/download/list/prefix sync 추상화
 - [x] YouTube OAuth refresh token 기반 uploader 구현
@@ -29,10 +34,12 @@
 - [x] artifact S3 bucket Terraform 관리
 - [x] ECR repository 생성
 - [x] CodeBuild image build project 생성
-- [x] Batch/Fargate compute environment, queue, job definition 생성
+- [x] Batch/Fargate compute environment, queue, stage/script/render job definition 생성
 - [x] Step Functions state machine 생성
-- [x] EventBridge Scheduler weekly/daily 생성
+- [x] EventBridge Scheduler twice-monthly refill/daily upload 생성
 - [x] Publisher Lambda 생성
+- [x] Budget/Batch/Step Functions 실패 Slack 알림 경로 생성
+- [x] S3 lifecycle, ECR lifecycle, CloudWatch log retention 설정
 - [x] 기존 EventBridge Rule/Lambda launcher/EC2 role 제거
 - [x] 제공된 credential을 SSM Parameter Store SecureString에 저장
 

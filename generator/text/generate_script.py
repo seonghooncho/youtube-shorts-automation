@@ -14,7 +14,7 @@ def _get_client() -> openai.OpenAI:
     return openai.OpenAI(api_key=api_key)
 
 def _default_model() -> str:
-    return os.getenv("OPENAI_MODEL", "gpt-5-mini")
+    return os.getenv("SCRIPT_MODEL") or os.getenv("OPENAI_MODEL", "gpt-5.4-mini")
 
 # --- Schema ---
 class ReturnScript(BaseModel):
