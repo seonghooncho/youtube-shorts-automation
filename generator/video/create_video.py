@@ -101,6 +101,8 @@ def _ensure_ffmpeg_font_dir(font_path: Path) -> Path:
     """Keep FFmpeg's ASS font scan limited to actual font files."""
     font_dir = FINAL_DIR / "_fonts"
     font_dir.mkdir(parents=True, exist_ok=True)
+    if not font_path.exists():
+        return font_dir
     target = font_dir / font_path.name
     if not target.exists() or target.stat().st_size != font_path.stat().st_size:
         shutil.copy2(font_path, target)
