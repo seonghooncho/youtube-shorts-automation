@@ -57,6 +57,7 @@ def handler(event, context):
         resolved_key = _download_video(video_key, content_id, local_path)
         valid_upload, block_reason = _validate_upload_candidate(local_path)
         if not valid_upload:
+            target["status"] = "UPLOAD_BLOCKED"
             target["upload_status"] = "UPLOAD_BLOCKED"
             target["upload_error"] = block_reason
             target["video_key"] = resolved_key
@@ -75,6 +76,7 @@ def handler(event, context):
         youtube_id = _upload_youtube(local_path, target, youtube_config)
 
     target["uploaded"] = True
+    target["status"] = "UPLOADED"
     target["upload_status"] = "UPLOADED"
     target["uploaded_at"] = int(time.time())
     target["video_key"] = resolved_key
