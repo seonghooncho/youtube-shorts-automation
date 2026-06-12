@@ -32,6 +32,7 @@ from shared.utils.config import (
     get_video_source,
 )
 from shared.utils.s3_utils import update_metadata_after_video_creation
+from shared.utils.video_validation import validate_video_file
 
 
 store = S3Store()
@@ -39,6 +40,7 @@ content_repo = ContentRepository()
 
 PUBLISH_METADATA_KEY = "publish-ready/final_metadata.json"
 LEGACY_METADATA_KEY = "shorts/state/final_metadata.json"
+RENDER_USED_PIXABAY_PREFIX = "state/render-used-pixabay"
 
 
 def run_generate_stage(stage: str) -> None:
@@ -158,6 +160,7 @@ def render_stage() -> None:
     batch_merge_videos_for_tts(target_ids=target_ids)
     batch_render_all_videos(target_ids=target_ids)
     rendered_files = _rendered_final_files(target_ids)
+    rendered_files = _validated_rendered_files(rendered_files)
     if not rendered_files:
         raise RuntimeError("Video rendering produced no final MP4 files.")
     _attach_video_keys_from_local()
@@ -165,8 +168,7 @@ def render_stage() -> None:
     store.upload_directory(FINAL_DIR, "videos/final")
     store.upload_directory(OUTPUT_DIR / "video-sources", "videos/sources")
     if os.getenv("RENDER_SHARD_MODE", "").lower().strip() == "array":
-        if USED_PIXABAY_IDS_FILE.exists():
-            store.upload_file(USED_PIXABAY_IDS_FILE, "state/used_pixabay_ids.json")
+        _upload_render_shard_pixabay_usage(target_ids)
         return
 
     _finalize_publish_ready()
@@ -185,6 +187,7 @@ def finalize_stage() -> None:
 
 
 def _finalize_publish_ready() -> None:
+    _merge_render_shard_pixabay_usage()
     update_metadata_after_video_creation()
     store.upload_file(FINAL_METADATA_FILE, "publish-ready/final_metadata.json")
     store.upload_file(FINAL_METADATA_FILE, "state/final_metadata.json")
@@ -314,7 +317,51 @@ def _rendered_final_files(target_ids: list[str] | None) -> list:
     return [FINAL_DIR / f"{content_id}.mp4" for content_id in target_ids if (FINAL_DIR / f"{content_id}.mp4").exists()]
 
 
+def _validated_rendered_files(files: list) -> list:
+    valid_files = []
+    for video_path in files:
+        valid, reason, details = validate_video_file(video_path)
+        if valid:
+            valid_files.append(video_path)
+            continue
+        print(f"⚠️ invalid rendered video skipped: {video_path} reason={reason} details={details}")
+        try:
+            video_path.unlink(missing_ok=True)
+        except OSError as exc:
+            print(f"⚠️ invalid video cleanup failed: {video_path}: {exc}")
+    return valid_files
+
+
+def _upload_render_shard_pixabay_usage(target_ids: list[str] | None) -> None:
+    if not USED_PIXABAY_IDS_FILE.exists():
+        return
+    shard_id = "all"
+    if target_ids:
+        shard_id = "-".join(str(item) for item in target_ids[:3])
+    store.upload_file(USED_PIXABAY_IDS_FILE, f"{RENDER_USED_PIXABAY_PREFIX}/{shard_id}.json")
+
+
+def _merge_render_shard_pixabay_usage() -> None:
+    used_ids = set(_read_json_file(USED_PIXABAY_IDS_FILE))
+    existing_used_path = get_temp_file("existing_used_pixabay_ids.json")
+    if _download_file("state/used_pixabay_ids.json", existing_used_path):
+        used_ids.update(_read_json_file(existing_used_path))
+    shard_dir = get_temp_file("render-used-pixabay")
+    downloaded = store.download_prefix(RENDER_USED_PIXABAY_PREFIX, shard_dir)
+    for path in downloaded:
+        try:
+            used_ids.update(_read_json_file(path))
+        except Exception as exc:
+            print(f"⚠️ render shard Pixabay usage merge failed: {path}: {exc}")
+    if downloaded or used_ids:
+        _write_json_file(USED_PIXABAY_IDS_FILE, sorted(used_ids, key=str))
+
+
 def _desired_new_count() -> int:
+    target_new_items = os.getenv("GENERATION_TARGET_NEW_ITEMS")
+    if target_new_items is not None and target_new_items.strip() != "":
+        return max(0, _safe_int(target_new_items, 0))
+
     target_days = int(os.getenv("GENERATION_BATCH_DAYS", "14"))
     buffer_days = int(os.getenv("GENERATION_BUFFER_DAYS", "3"))
     max_new_items = int(os.getenv("GENERATION_MAX_NEW_ITEMS", str(target_days + buffer_days)))
@@ -364,6 +411,13 @@ def _load_existing_publish_metadata() -> list[dict]:
             print(f"⚠️ 기존 publish metadata 로드 실패: {key}: {e}")
             return []
     return []
+
+
+def _safe_int(value, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _read_metadata() -> list[dict]:

@@ -28,7 +28,7 @@ aws stepfunctions start-execution \
   --region ap-northeast-2
 ```
 
-`days`는 목표 재고일수입니다. workflow는 현재 publish-ready 미업로드 재고를 보고 `days + buffer`에 부족한 만큼만 생성합니다. 생성 smoke는 같은 workflow에 `{"mode":"generate","days":1}`을 전달할 수 있지만, 이미 충분한 publish-ready 재고가 있으면 collect 이후 단계가 no-op으로 종료될 수 있습니다. 후보 수집량은 Terraform의 `reddit_max_posts`, `reddit_min_needed`로 별도 관리됩니다.
+`days`는 목표 재고일수입니다. workflow는 먼저 planner Lambda에서 현재 publish-ready 미업로드 재고를 보고 `days + buffer_days`에 부족한 만큼만 생성합니다. 부족분이 0이면 Batch job을 하나도 시작하지 않고 성공 종료합니다. 생성 smoke는 `{"mode":"generate","days":0,"buffer_days":0,"max_new_items":0}` 입력으로 planner skip path를 확인하는 방식이 가장 저렴합니다. 후보 수집량은 Terraform의 `reddit_max_posts`, `reddit_min_needed`로 별도 관리됩니다.
 
 업로드 workflow:
 
@@ -66,6 +66,7 @@ aws codebuild start-build \
 ## 로그 위치
 
 - Batch logs: CloudWatch Logs `/aws/batch/ytshorts`
+- Planner Lambda logs: CloudWatch Logs `/aws/lambda/ytshorts-planner`
 - Publisher Lambda logs: CloudWatch Logs `/aws/lambda/ytshorts-publisher`
 - Budget/alert Lambda logs: CloudWatch Logs `/aws/lambda/ytshorts-budget-notifier`
 - Step Functions executions: `ytshorts-pipeline`
@@ -80,3 +81,13 @@ aws codebuild start-build \
 YouTube upload에는 API key가 아니라 OAuth refresh token이 필요합니다. OAuth 값은 `/ytshorts/YOUTUBE_CLIENT_ID`, `/ytshorts/YOUTUBE_CLIENT_SECRET`, `/ytshorts/YOUTUBE_REFRESH_TOKEN`, `/ytshorts/YOUTUBE_TOKEN_URI`에 저장되어 있습니다. 해당 값이 `PENDING`이면 업로드 workflow는 안전하게 blocked 상태로 종료합니다.
 
 publisher Lambda는 `PUBLISH_REBASE_STALE_DAYS`보다 오래 밀린 미업로드 큐를 발견하면 예약일을 현재 시점부터 다시 일별 슬롯으로 정렬합니다. 오래된 예약일이 계속 누적되어 과거 스케줄만 업로드되는 상황을 줄이기 위한 보정입니다.
+
+publisher Lambda는 업로드 직전 `YOUTUBE_MIN_UPLOAD_BYTES`보다 작은 MP4를 `UPLOAD_BLOCKED`로 막습니다. Batch 렌더 단계는 이보다 앞서 `ffprobe`로 최종 MP4의 길이, 해상도, 오디오/비디오 스트림을 검증합니다.
+
+## YouTube 처리중 상태 진단
+
+2026-06-12에 확인한 `Ra2dUfPJmJE` 업로드는 `videos/final/smoke-1781205580.mp4`에서 올라간 2초/9KB smoke MP4였습니다. 파일 자체는 MP4 컨테이너로 열리지만 정상 Shorts 산출물로 보기에는 지나치게 짧고 낮은 비트레이트라 YouTube 처리 지연 또는 실패 상태에 머물 가능성이 큽니다.
+
+현재 SSM에 저장된 refresh token은 `youtube.upload` scope만 갖고 있어 `videos.list`, `processingDetails`, `videos.delete` 호출이 모두 `ACCESS_TOKEN_SCOPE_INSUFFICIENT`로 거부됩니다. 이 scope로는 업로드는 가능하지만 기존 업로드의 처리 상태 확인이나 삭제는 API로 수행할 수 없습니다.
+
+재발 방지는 코드로 반영되어 있습니다. 같은 유형의 작은 smoke MP4는 이제 publisher에서 업로드 전 차단됩니다. 기존 YouTube 처리중 건을 API로 조회/삭제하려면 `scripts/youtube_oauth_setup.py`를 다시 실행해 `youtube.force-ssl` scope가 포함된 refresh token을 발급하고 `/ytshorts/YOUTUBE_REFRESH_TOKEN`을 갱신해야 합니다.

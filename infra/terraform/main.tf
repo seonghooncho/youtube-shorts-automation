@@ -158,6 +158,23 @@ resource "aws_s3_bucket_lifecycle_configuration" "artifacts" {
   }
 
   rule {
+    id     = "expire-render-used-pixabay-shards"
+    status = "Enabled"
+
+    filter {
+      prefix = "state/render-used-pixabay/"
+    }
+
+    expiration {
+      days = 30
+    }
+
+    noncurrent_version_expiration {
+      noncurrent_days = 30
+    }
+  }
+
+  rule {
     id     = "expire-old-final-videos"
     status = "Enabled"
 
@@ -288,6 +305,12 @@ resource "aws_cloudwatch_log_group" "codebuild" {
 
 resource "aws_cloudwatch_log_group" "publisher" {
   name              = "/aws/lambda/${var.project_name}-publisher"
+  retention_in_days = 30
+  tags              = local.tags
+}
+
+resource "aws_cloudwatch_log_group" "planner" {
+  name              = "/aws/lambda/${var.project_name}-planner"
   retention_in_days = 30
   tags              = local.tags
 }
@@ -813,10 +836,82 @@ resource "aws_lambda_function" "publisher" {
       PUBLISH_HOUR_LOCAL        = tostring(var.publish_hour_local)
       PUBLISH_MINUTE_LOCAL      = tostring(var.publish_minute_local)
       PUBLISH_REBASE_STALE_DAYS = tostring(var.publish_rebase_stale_days)
+      YOUTUBE_MIN_UPLOAD_BYTES  = tostring(var.youtube_min_upload_bytes)
     }
   }
 
   depends_on = [aws_cloudwatch_log_group.publisher]
+
+  tags = local.tags
+}
+
+resource "aws_iam_role" "planner" {
+  name = "${var.project_name}-planner-role"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = "sts:AssumeRole"
+      Principal = {
+        Service = "lambda.amazonaws.com"
+      }
+    }]
+  })
+  tags = local.tags
+}
+
+resource "aws_iam_role_policy_attachment" "planner_basic" {
+  role       = aws_iam_role.planner.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+}
+
+resource "aws_iam_role_policy" "planner" {
+  name = "${var.project_name}-planner-policy"
+  role = aws_iam_role.planner.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:ListBucket"
+        ]
+        Resource = [
+          aws_s3_bucket.artifacts.arn,
+          "${aws_s3_bucket.artifacts.arn}/*"
+        ]
+      }
+    ]
+  })
+}
+
+data "archive_file" "planner" {
+  type        = "zip"
+  source_file = "${path.module}/lambda/planner.py"
+  output_path = "${path.module}/.build/planner.zip"
+}
+
+resource "aws_lambda_function" "planner" {
+  function_name    = "${var.project_name}-planner"
+  role             = aws_iam_role.planner.arn
+  handler          = "planner.handler"
+  runtime          = "python3.12"
+  filename         = data.archive_file.planner.output_path
+  source_code_hash = data.archive_file.planner.output_base64sha256
+  timeout          = 30
+  memory_size      = 256
+
+  environment {
+    variables = {
+      BUCKET_NAME              = aws_s3_bucket.artifacts.bucket
+      GENERATION_BATCH_DAYS    = tostring(var.generation_batch_days)
+      GENERATION_BUFFER_DAYS   = tostring(var.generation_buffer_days)
+      GENERATION_MAX_NEW_ITEMS = tostring(var.generation_max_new_items)
+    }
+  }
+
+  depends_on = [aws_cloudwatch_log_group.planner]
 
   tags = local.tags
 }
@@ -1020,9 +1115,14 @@ resource "aws_iam_role_policy" "step_functions" {
         ]
       },
       {
-        Effect   = "Allow"
-        Action   = "lambda:InvokeFunction"
-        Resource = [aws_lambda_function.publisher.arn, "${aws_lambda_function.publisher.arn}:*"]
+        Effect = "Allow"
+        Action = "lambda:InvokeFunction"
+        Resource = [
+          aws_lambda_function.publisher.arn,
+          "${aws_lambda_function.publisher.arn}:*",
+          aws_lambda_function.planner.arn,
+          "${aws_lambda_function.planner.arn}:*"
+        ]
       }
     ]
   })
@@ -1044,20 +1144,33 @@ resource "aws_sfn_state_machine" "pipeline" {
             Variable     = "$.mode"
             StringEquals = "upload"
             Next         = "PublishReady"
-          },
-          {
-            Variable           = "$.days"
-            NumericGreaterThan = 0
-            Next               = "Collect"
           }
         ]
-        Default = "SetDefaultGenerationDays"
+        Default = "PlanGeneration"
       }
-      SetDefaultGenerationDays = {
-        Type       = "Pass"
-        Result     = var.generation_batch_days
-        ResultPath = "$.days"
-        Next       = "Collect"
+      PlanGeneration = {
+        Type     = "Task"
+        Resource = "arn:aws:states:::lambda:invoke"
+        Parameters = {
+          FunctionName = aws_lambda_function.planner.arn
+          "Payload.$"  = "$"
+        }
+        OutputPath = "$.Payload"
+        Next       = "ShouldGenerate"
+      }
+      ShouldGenerate = {
+        Type = "Choice"
+        Choices = [
+          {
+            Variable      = "$.should_generate"
+            BooleanEquals = true
+            Next          = "Collect"
+          }
+        ]
+        Default = "GenerateSkipped"
+      }
+      GenerateSkipped = {
+        Type = "Succeed"
       }
       Collect = {
         Type       = "Task"
@@ -1070,7 +1183,10 @@ resource "aws_sfn_state_machine" "pipeline" {
           ContainerOverrides = {
             Environment = [
               { Name = "STAGE", Value = "collect" },
-              { Name = "GENERATION_BATCH_DAYS", "Value.$" = "States.Format('{}', $.days)" }
+              { Name = "GENERATION_BATCH_DAYS", "Value.$" = "States.Format('{}', $.days)" },
+              { Name = "GENERATION_BUFFER_DAYS", "Value.$" = "States.Format('{}', $.buffer_days)" },
+              { Name = "GENERATION_MAX_NEW_ITEMS", "Value.$" = "States.Format('{}', $.max_new_items)" },
+              { Name = "GENERATION_TARGET_NEW_ITEMS", "Value.$" = "States.Format('{}', $.needed_new_items)" }
             ]
           }
         }
@@ -1087,7 +1203,10 @@ resource "aws_sfn_state_machine" "pipeline" {
           ContainerOverrides = {
             Environment = [
               { Name = "STAGE", Value = "filter" },
-              { Name = "GENERATION_BATCH_DAYS", "Value.$" = "States.Format('{}', $.days)" }
+              { Name = "GENERATION_BATCH_DAYS", "Value.$" = "States.Format('{}', $.days)" },
+              { Name = "GENERATION_BUFFER_DAYS", "Value.$" = "States.Format('{}', $.buffer_days)" },
+              { Name = "GENERATION_MAX_NEW_ITEMS", "Value.$" = "States.Format('{}', $.max_new_items)" },
+              { Name = "GENERATION_TARGET_NEW_ITEMS", "Value.$" = "States.Format('{}', $.needed_new_items)" }
             ]
           }
         }
@@ -1104,7 +1223,10 @@ resource "aws_sfn_state_machine" "pipeline" {
           ContainerOverrides = {
             Environment = [
               { Name = "STAGE", Value = "script" },
-              { Name = "GENERATION_BATCH_DAYS", "Value.$" = "States.Format('{}', $.days)" }
+              { Name = "GENERATION_BATCH_DAYS", "Value.$" = "States.Format('{}', $.days)" },
+              { Name = "GENERATION_BUFFER_DAYS", "Value.$" = "States.Format('{}', $.buffer_days)" },
+              { Name = "GENERATION_MAX_NEW_ITEMS", "Value.$" = "States.Format('{}', $.max_new_items)" },
+              { Name = "GENERATION_TARGET_NEW_ITEMS", "Value.$" = "States.Format('{}', $.needed_new_items)" }
             ]
           }
         }
@@ -1121,7 +1243,10 @@ resource "aws_sfn_state_machine" "pipeline" {
           ContainerOverrides = {
             Environment = [
               { Name = "STAGE", Value = "tts" },
-              { Name = "GENERATION_BATCH_DAYS", "Value.$" = "States.Format('{}', $.days)" }
+              { Name = "GENERATION_BATCH_DAYS", "Value.$" = "States.Format('{}', $.days)" },
+              { Name = "GENERATION_BUFFER_DAYS", "Value.$" = "States.Format('{}', $.buffer_days)" },
+              { Name = "GENERATION_MAX_NEW_ITEMS", "Value.$" = "States.Format('{}', $.max_new_items)" },
+              { Name = "GENERATION_TARGET_NEW_ITEMS", "Value.$" = "States.Format('{}', $.needed_new_items)" }
             ]
           }
         }
@@ -1138,13 +1263,27 @@ resource "aws_sfn_state_machine" "pipeline" {
           ContainerOverrides = {
             Environment = [
               { Name = "STAGE", Value = "subtitles" },
-              { Name = "GENERATION_BATCH_DAYS", "Value.$" = "States.Format('{}', $.days)" }
+              { Name = "GENERATION_BATCH_DAYS", "Value.$" = "States.Format('{}', $.days)" },
+              { Name = "GENERATION_BUFFER_DAYS", "Value.$" = "States.Format('{}', $.buffer_days)" },
+              { Name = "GENERATION_MAX_NEW_ITEMS", "Value.$" = "States.Format('{}', $.max_new_items)" },
+              { Name = "GENERATION_TARGET_NEW_ITEMS", "Value.$" = "States.Format('{}', $.needed_new_items)" }
             ]
           }
         }
-        Next = "Render"
+        Next = "RenderDispatch"
       }
-      Render = {
+      RenderDispatch = {
+        Type = "Choice"
+        Choices = [
+          {
+            Variable           = "$.needed_new_items"
+            NumericGreaterThan = 1
+            Next               = "RenderArray"
+          }
+        ]
+        Default = "RenderSingle"
+      }
+      RenderArray = {
         Type       = "Task"
         Resource   = "arn:aws:states:::batch:submitJob.sync"
         ResultPath = null
@@ -1153,13 +1292,36 @@ resource "aws_sfn_state_machine" "pipeline" {
           JobQueue      = aws_batch_job_queue.pipeline.arn
           JobDefinition = aws_batch_job_definition.render.arn
           ArrayProperties = {
-            Size = var.render_array_size
+            "Size.$" = "$.needed_new_items"
           }
           ContainerOverrides = {
             Environment = [
               { Name = "STAGE", Value = "render" },
               { Name = "GENERATION_BATCH_DAYS", "Value.$" = "States.Format('{}', $.days)" },
+              { Name = "GENERATION_BUFFER_DAYS", "Value.$" = "States.Format('{}', $.buffer_days)" },
+              { Name = "GENERATION_MAX_NEW_ITEMS", "Value.$" = "States.Format('{}', $.max_new_items)" },
+              { Name = "GENERATION_TARGET_NEW_ITEMS", "Value.$" = "States.Format('{}', $.needed_new_items)" },
               { Name = "RENDER_SHARD_MODE", Value = "array" }
+            ]
+          }
+        }
+        Next = "Finalize"
+      }
+      RenderSingle = {
+        Type       = "Task"
+        Resource   = "arn:aws:states:::batch:submitJob.sync"
+        ResultPath = null
+        Parameters = {
+          JobName       = "${var.project_name}-render"
+          JobQueue      = aws_batch_job_queue.pipeline.arn
+          JobDefinition = aws_batch_job_definition.render.arn
+          ContainerOverrides = {
+            Environment = [
+              { Name = "STAGE", Value = "render" },
+              { Name = "GENERATION_BATCH_DAYS", "Value.$" = "States.Format('{}', $.days)" },
+              { Name = "GENERATION_BUFFER_DAYS", "Value.$" = "States.Format('{}', $.buffer_days)" },
+              { Name = "GENERATION_MAX_NEW_ITEMS", "Value.$" = "States.Format('{}', $.max_new_items)" },
+              { Name = "GENERATION_TARGET_NEW_ITEMS", "Value.$" = "States.Format('{}', $.needed_new_items)" }
             ]
           }
         }
@@ -1176,7 +1338,10 @@ resource "aws_sfn_state_machine" "pipeline" {
           ContainerOverrides = {
             Environment = [
               { Name = "STAGE", Value = "finalize" },
-              { Name = "GENERATION_BATCH_DAYS", "Value.$" = "States.Format('{}', $.days)" }
+              { Name = "GENERATION_BATCH_DAYS", "Value.$" = "States.Format('{}', $.days)" },
+              { Name = "GENERATION_BUFFER_DAYS", "Value.$" = "States.Format('{}', $.buffer_days)" },
+              { Name = "GENERATION_MAX_NEW_ITEMS", "Value.$" = "States.Format('{}', $.max_new_items)" },
+              { Name = "GENERATION_TARGET_NEW_ITEMS", "Value.$" = "States.Format('{}', $.needed_new_items)" }
             ]
           }
         }
@@ -1246,8 +1411,10 @@ resource "aws_scheduler_schedule" "generate" {
     arn      = aws_sfn_state_machine.pipeline.arn
     role_arn = aws_iam_role.scheduler.arn
     input = jsonencode({
-      mode = "generate"
-      days = var.generation_batch_days
+      mode          = "generate"
+      days          = var.generation_batch_days
+      buffer_days   = var.generation_buffer_days
+      max_new_items = var.generation_max_new_items
     })
   }
 }
