@@ -32,7 +32,7 @@ from shared.utils.config import (
     get_video_source,
 )
 from shared.utils.s3_utils import update_metadata_after_video_creation
-from shared.utils.video_validation import validate_video_file
+from shared.utils.video_validation import quality_warnings, validate_video_file
 
 
 store = S3Store()
@@ -322,6 +322,9 @@ def _validated_rendered_files(files: list) -> list:
     for video_path in files:
         valid, reason, details = validate_video_file(video_path)
         if valid:
+            warnings = quality_warnings(video_path)
+            if warnings:
+                print(f"⚠️ rendered video quality warnings: {video_path} warnings={warnings} details={details}")
             valid_files.append(video_path)
             continue
         print(f"⚠️ invalid rendered video skipped: {video_path} reason={reason} details={details}")

@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 from moviepy.editor import AudioFileClip
 from tqdm import tqdm
+from generator.tts.speed_policy import adjusted_tts_duration, target_tts_speed
 from shared.utils.config import AUDIO_DIR, get_output_file
 
 def analyze_all_tts():
@@ -18,13 +19,8 @@ def analyze_all_tts():
         audio = AudioFileClip(str(mp3_path))
         ori_duration = audio.duration
 
-        # 배속 결정
-        speed = 1.0
-        if ori_duration > 65:
-            speed = 1.2
-        elif ori_duration > 59:
-            speed = 1.1
-        final_duration = ori_duration / speed
+        speed = target_tts_speed(ori_duration)
+        final_duration = adjusted_tts_duration(ori_duration)
 
         # 기록(여기서는 set도 가능, 하지만 json으로 저장하려면 list of dict가 더 나음)
         entry = (filename, speed, final_duration)

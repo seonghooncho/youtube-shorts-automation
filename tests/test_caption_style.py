@@ -1,5 +1,6 @@
 import generator.video.create_video as create_video
 from generator.video.create_video import (
+    _audio_merge_filter,
     _build_centered_caption_events,
     _ensure_ffmpeg_font_dir,
     _format_centered_caption_text,
@@ -90,3 +91,11 @@ def test_ensure_ffmpeg_font_dir_allows_missing_font(tmp_path, monkeypatch):
 
     assert font_dir == tmp_path / "final" / "_fonts"
     assert font_dir.exists()
+
+
+def test_audio_merge_filter_normalizes_loudness_and_sample_rate():
+    audio_filter = _audio_merge_filter(1.16)
+
+    assert "atempo=1.1600" in audio_filter
+    assert "loudnorm=I=-16:TP=-1.5:LRA=11" in audio_filter
+    assert "aformat=sample_rates=48000:channel_layouts=stereo" in audio_filter

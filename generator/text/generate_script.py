@@ -22,6 +22,7 @@ class ReturnScript(BaseModel):
     description: str
     tags: List[str]
     voice: Literal["male", "female", "neutral"]
+    visual_keywords: List[str]
     script: List[str]
 
 def _assert_no_nulls(rs: ReturnScript) -> None:

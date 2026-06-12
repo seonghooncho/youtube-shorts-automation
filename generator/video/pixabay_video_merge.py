@@ -9,7 +9,7 @@ from PIL import Image
 from imageio_ffmpeg import get_ffmpeg_exe
 from moviepy.editor import VideoFileClip
 from shared.utils.slack_notify import send_slack_message
-from shared.utils.config import  USED_PIXABAY_IDS_FILE, get_data_file, get_output_file, get_assets_file, get_video_source
+from shared.utils.config import FINAL_METADATA_FILE, USED_PIXABAY_IDS_FILE, get_data_file, get_output_file, get_assets_file, get_video_source
 
 if not hasattr(Image, "ANTIALIAS"):
     Image.ANTIALIAS = Image.Resampling.LANCZOS
@@ -20,8 +20,16 @@ TTS_RESULT_JSON = get_output_file("tts_check_result.json")
 BG_PARTS_DIR = get_assets_file("bg_parts")
 
 VIDEO_QUERY_CANDIDATES = [
-    "nature", "landscape", "travel", "forest", "sky",
-    "ocean", "background", "village", "tree", "clouds"
+    "phone texting",
+    "couple argument",
+    "people talking",
+    "person thinking",
+    "apartment hallway",
+    "coffee shop",
+    "city street",
+    "office conversation",
+    "angry woman",
+    "stressed man",
 ]
 
 def load_used_ids():
@@ -54,7 +62,7 @@ def save_pixabay_state(state):
     with open(STATE_PATH, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)'''
 
-def fetch_pixabay_video_urls(query="nature", min_sec=10, max_sec=30, count=10, exclude_ids=None, page=1):
+def fetch_pixabay_video_urls(query="phone texting", min_sec=4, max_sec=30, count=10, exclude_ids=None, page=1):
     url = "https://pixabay.com/api/videos/"
     params = {
         "key": PIXABAY_API_KEY,
@@ -63,15 +71,17 @@ def fetch_pixabay_video_urls(query="nature", min_sec=10, max_sec=30, count=10, e
         "page": page,
         "safesearch": "true",
     }
-    response = requests.get(url, params=params)
+    response = requests.get(url, params=params, timeout=20)
+    response.raise_for_status()
     data = response.json()
     results = []
     for hit in data.get("hits", []):
+        if _is_blocked_pixabay_hit(hit):
+            continue
         video_id = hit.get("id")
         duration = hit.get("duration", 0)
         if min_sec <= duration <= max_sec and (exclude_ids is None or video_id not in exclude_ids):
-            videos = hit["videos"]
-            mp4_url = videos.get("large", {}).get("url") or videos.get("medium", {}).get("url")
+            mp4_url = _select_pixabay_video_url(hit.get("videos") or {})
             if mp4_url:
                 results.append((video_id, mp4_url, duration))
     return results
@@ -105,16 +115,18 @@ def prepare_bg_videos_for_tts(video_paths: list, tts_length: float, output_video
                 print(f"⚠️ 잘못된 클립 무시 (duration={video.duration}): {vid_path}")
                 continue
 
-            clip_duration = min(video.duration, remain)
+            segment_duration = _segment_duration_for_source(Path(vid_path), video.duration)
+            clip_duration = min(segment_duration, video.duration, remain)
+            start_time = _segment_start_for_source(Path(vid_path), video.duration, clip_duration)
         finally:
             video.close()
 
-        if clip_duration < 0.1:
+        if clip_duration < 0.5:
             print(f"⚠️ remain 너무 짧아 생략: {clip_duration:.2f}s")
             continue
 
         segment_path = segment_dir / f"segment_{len(segment_paths):03}.mp4"
-        _write_vertical_segment(Path(vid_path), segment_path, clip_duration)
+        _write_vertical_segment(Path(vid_path), segment_path, clip_duration, start_time=start_time)
         segment_paths.append(segment_path)
         cur_len += clip_duration
 
@@ -131,11 +143,21 @@ def _ffmpeg_bin() -> str:
     return shutil.which("ffmpeg") or get_ffmpeg_exe()
 
 
-def _write_vertical_segment(input_path: Path, output_path: Path, duration: float) -> None:
-    video_filter = "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fps=24,setsar=1"
+def _write_vertical_segment(input_path: Path, output_path: Path, duration: float, start_time: float = 0.0) -> None:
+    fps = _int_env("SHORTS_RENDER_FPS", 30)
+    video_filter = (
+        "scale=1080:1920:force_original_aspect_ratio=increase,"
+        "crop=1080:1920,"
+        "eq=contrast=1.06:saturation=1.12:brightness=0.01,"
+        f"fps={fps},setsar=1"
+    )
     cmd = [
         _ffmpeg_bin(),
         "-y",
+    ]
+    if start_time > 0:
+        cmd.extend(["-ss", f"{start_time:.3f}"])
+    cmd.extend([
         "-i",
         str(input_path),
         "-t",
@@ -147,10 +169,12 @@ def _write_vertical_segment(input_path: Path, output_path: Path, duration: float
         "libx264",
         "-preset",
         "veryfast",
+        "-crf",
+        os.getenv("BG_SEGMENT_CRF", "20"),
         "-pix_fmt",
         "yuv420p",
         str(output_path),
-    ]
+    ])
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
 
@@ -182,11 +206,13 @@ def batch_merge_videos_for_tts(target_ids: list[str] | None = None):
     # last_page = pixabay_state.get("last_page", 1)
     with open(TTS_RESULT_JSON, "r", encoding="utf-8") as f:
         tts_results = json.load(f)
+    metadata_by_id = _metadata_by_id()
     for entry in tts_results:
         tts_filename = entry["filename"]
         if target_set and tts_filename not in target_set:
             continue
         tts_basename = Path(tts_filename).stem
+        story_metadata = metadata_by_id.get(tts_basename, {})
         tts_length = entry["final_duration"]
         output_video_path = get_video_source(f"{tts_basename}.mp4")
 
@@ -197,12 +223,12 @@ def batch_merge_videos_for_tts(target_ids: list[str] | None = None):
 
         print(f"\n🎬 [ {tts_basename} ] 영상 병합 시작: 목표 {tts_length + margin:.1f}초")
 
-        for query in VIDEO_QUERY_CANDIDATES:
+        for query in _queries_for_entry({**story_metadata, **entry}):
             print(f"🔍 [{tts_basename}] 쿼리 '{query}'로 영상 시도 중...")
             page = _start_page_for_content(tts_basename, query)
             while total_duration < tts_length + margin:
                 candidates = fetch_pixabay_video_urls(
-                    query=query, min_sec=10, max_sec=30, count=50,
+                    query=query, min_sec=4, max_sec=30, count=50,
                     exclude_ids=used_ids | selected_ids, page=page
                 )
                 if not candidates:
@@ -214,7 +240,7 @@ def batch_merge_videos_for_tts(target_ids: list[str] | None = None):
                     download_video_to_ebs(video_url, part_path)
                     video_paths.append(str(part_path))
                     selected_ids.add(video_id)
-                    total_duration += vid_duration
+                    total_duration += _segment_duration_for_source(part_path, vid_duration)
                     if total_duration >= tts_length + margin:
                         break
                 page += 1
@@ -238,6 +264,120 @@ def batch_merge_videos_for_tts(target_ids: list[str] | None = None):
         used_ids.update(selected_ids)
         save_used_ids(used_ids)
         print(f"✅ used_pixabay_ids.json 갱신됨 (총 {len(used_ids)}개)")
+
+def _select_pixabay_video_url(videos: dict) -> str | None:
+    for quality in ("large", "medium", "small"):
+        candidate = videos.get(quality) or {}
+        url = candidate.get("url")
+        width = int(candidate.get("width") or 0)
+        height = int(candidate.get("height") or 0)
+        if url and max(width, height) >= 720:
+            return url
+    for candidate in videos.values():
+        if isinstance(candidate, dict) and candidate.get("url"):
+            return candidate["url"]
+    return None
+
+
+def _is_blocked_pixabay_hit(hit: dict) -> bool:
+    tags = str(hit.get("tags") or "").lower()
+    blocked_terms = {
+        "green screen",
+        "greenscreen",
+        "chroma",
+        "chroma key",
+        "abstract",
+        "animation",
+        "animated",
+        "anime",
+        "cartoon",
+        "game",
+        "gaming",
+        "logo",
+        "vfx",
+        "visual effect",
+    }
+    return any(term in tags for term in blocked_terms)
+
+
+def _queries_for_entry(entry: dict) -> list[str]:
+    queries = []
+    for keyword in entry.get("visual_keywords") or []:
+        normalized = _clean_query(keyword)
+        if normalized and normalized not in queries:
+            queries.append(normalized)
+    for query in VIDEO_QUERY_CANDIDATES:
+        normalized = _clean_query(query)
+        if normalized and normalized not in queries:
+            queries.append(normalized)
+    return queries[:_int_env("PIXABAY_MAX_QUERIES_PER_ITEM", 10)]
+
+
+def _metadata_by_id() -> dict[str, dict]:
+    if not FINAL_METADATA_FILE.exists():
+        return {}
+    try:
+        with open(FINAL_METADATA_FILE, "r", encoding="utf-8") as f:
+            items = json.load(f)
+    except Exception as exc:
+        print(f"⚠️ final metadata load failed for visual keywords: {exc}")
+        return {}
+    return {
+        str(item.get("id")): item
+        for item in items
+        if item.get("id")
+    }
+
+
+def _clean_query(query: str) -> str:
+    normalized = " ".join(str(query or "").lower().split())
+    if normalized in {"nature", "background", "landscape"}:
+        return ""
+    return normalized[:60]
+
+
+def _segment_duration_for_source(path: Path, source_duration: float) -> float:
+    min_seconds = _min_segment_seconds()
+    max_seconds = min(_max_segment_seconds(), max(min_seconds, source_duration))
+    if max_seconds <= min_seconds:
+        return max_seconds
+    return _deterministic_float(f"{path.stem}:duration", min_seconds, max_seconds)
+
+
+def _segment_start_for_source(path: Path, source_duration: float, segment_duration: float) -> float:
+    max_start = max(0.0, source_duration - segment_duration - 0.25)
+    if max_start <= 0:
+        return 0.0
+    return _deterministic_float(f"{path.stem}:start", 0.0, max_start)
+
+
+def _deterministic_float(seed: str, minimum: float, maximum: float) -> float:
+    digest = hashlib.sha256(seed.encode("utf-8")).digest()
+    ratio = int.from_bytes(digest[:4], "big") / 0xFFFFFFFF
+    return minimum + (maximum - minimum) * ratio
+
+
+def _min_segment_seconds() -> float:
+    return _float_env("SHORTS_BG_MIN_CLIP_SECONDS", 2.8)
+
+
+def _max_segment_seconds() -> float:
+    return max(_min_segment_seconds(), _float_env("SHORTS_BG_MAX_CLIP_SECONDS", 4.2))
+
+
+def _int_env(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
+def _float_env(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
 
 if __name__ == "__main__":
     batch_merge_videos_for_tts()

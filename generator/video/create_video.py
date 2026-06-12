@@ -264,8 +264,7 @@ def render_video_with_ffmpeg(filename: str):
     )
     filter_complex = (
         f"[0:v]{subtitle_filter}[v];"
-        f"[2:a]{_atempo_filter(speed)}[a1];"
-        "[1:a][a1][3:a]concat=n=3:v=0:a=1[a]"
+        f"{_audio_merge_filter(speed)}"
     )
 
     ffmpeg_cmd = [
@@ -280,8 +279,13 @@ def render_video_with_ffmpeg(filename: str):
         "-map", "[a]",
         "-c:v", "libx264",
         "-preset", "veryfast",
+        "-crf", os.getenv("FINAL_RENDER_CRF", "19"),
+        "-r", str(_env_int("SHORTS_RENDER_FPS", 30, minimum=24)),
         "-pix_fmt", "yuv420p",
         "-c:a", "aac",
+        "-b:a", os.getenv("FINAL_AUDIO_BITRATE", "128k"),
+        "-ar", "48000",
+        "-movflags", "+faststart",
         "-shortest",
         str(output_path),
     ]
@@ -302,6 +306,17 @@ def _atempo_filter(speed: float) -> str:
         remaining_speed /= 0.5
     atempo_filters.append(f"atempo={remaining_speed:.4f}")
     return ",".join(atempo_filters)
+
+
+def _audio_merge_filter(speed: float) -> str:
+    loudnorm = os.getenv("FINAL_AUDIO_LOUDNORM", "loudnorm=I=-16:TP=-1.5:LRA=11")
+    audio_format = "aformat=sample_rates=48000:channel_layouts=stereo"
+    return (
+        f"[1:a]{audio_format}[s0];"
+        f"[2:a]{_atempo_filter(speed)},{loudnorm},{audio_format}[a1];"
+        f"[3:a]{audio_format}[s1];"
+        "[s0][a1][s1]concat=n=3:v=0:a=1[a]"
+    )
 
 
 def _write_adjusted_srt(adjusted_subs, path: Path, offset_seconds: float) -> None:
