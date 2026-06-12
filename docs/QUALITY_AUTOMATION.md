@@ -6,7 +6,7 @@ Generated Shorts should be fast enough for the Shorts feed, visually varied, and
 
 ## Current Defaults
 
-- Script length: 800-1150 preferred characters, hard limit 750-1400 characters.
+- Script length: 780-1080 preferred characters, hard limit 750-1150 characters.
 - Script model: `gpt-5.5` by default for source-faithful adaptation quality.
 - Filter model: `gpt-5.4-nano` by default for low-cost viability classification.
 - TTS speed: 1.06x-1.24x based on original duration.
@@ -54,21 +54,29 @@ Script generation uses Structured Outputs with these required fields:
 
 - `source_summary`: concise summary of the original conflict
 - `story_beats`: 4-7 source-grounded beats
+- `adaptation_strategy`: what was compressed or plausibly dramatized
+- `retention_angle`: why the story should hold viewers after the opening hook
+- `viewer_question`: the final comment prompt
+- `marketability_score`: model self-audit from 1 to 5
 - `visual_keywords`: 5-8 concrete stock-video search phrases
 - `script`: first-person narration paragraphs
+
+The source is treated as a seed story rather than a transcript. The writer may compress repeated events, add plausible small dialogue, sharpen stakes, and choose a more relatable angle, but must keep the same core conflict, relationship type, narrator action, consequence, and final moral question. The writer must not invent new crimes, lawsuits, police, violence, sexual content, cheating, medical emergencies, revenge plans, pregnancy, minors, or job loss unless the source clearly supports them.
 
 The local validator rejects scripts before TTS when any hard failure is detected:
 
 - source content is too thin or likely truncated
-- script is outside the 750-1400 character hard bounds
-- first sentence hook is missing, too long, or starts with slow setup
+- source involves minors or teen/high-school context in romantic or sexual conflict
+- script is outside the 750-1150 character hard bounds
+- first sentence hook is missing, too long, starts with slow setup, or lacks a concrete crossed line
 - final beats do not include a direct engagement question
 - narration contains meta language such as JSON/script/AI references
-- source summary or story beats are missing
+- source summary, story beats, adaptation strategy, retention angle, viewer question, or marketability score are missing or weak
 - visual keywords are too sparse after cleanup
+- script invents unsupported high-stakes facts such as police/legal threats, violence, cheating, pregnancy, medical emergencies, minors, or job loss
 - lexical overlap with the original story is too low, which usually means the adaptation drifted from the source
 
-Non-blocking warnings are stored in `quality_warnings` for valid scripts that are outside the preferred 800-1150 character target or show repetitive paragraph starts.
+Non-blocking warnings are stored in `quality_warnings` for valid scripts that are outside the preferred 780-1080 character target or show repetitive paragraph starts.
 
 ## Source Integrity
 

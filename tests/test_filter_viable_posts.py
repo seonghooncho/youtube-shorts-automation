@@ -1,4 +1,4 @@
-from generator.text.filter_viable_posts import _ask_yes_no
+from generator.text.filter_viable_posts import _ask_yes_no, _local_precheck
 
 
 class _Response:
@@ -47,3 +47,19 @@ def test_ask_yes_no_uses_low_reasoning_for_gpt55():
 
     assert _ask_yes_no(client, "Is this viable?", "gpt-5.5") == "YES"
     assert client.responses.kwargs["reasoning"] == {"effort": "low"}
+
+
+def test_local_precheck_rejects_minor_romance_source():
+    reason = _local_precheck(
+        {
+            "title": "AITA for asking my girlfriend to be public?",
+            "content": (
+                "I am 18 and my girlfriend is 17. We were dating for months, but she kept saying "
+                "she was single in public. I asked her to treat me like her boyfriend around friends, "
+                "and she said I was being dramatic. The relationship argument went in circles until "
+                "friends started taking sides."
+            ),
+        }
+    )
+
+    assert "minors" in reason

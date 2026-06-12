@@ -20,6 +20,10 @@
 - [x] 대본 생성 기본 모델을 품질 우선 `gpt-5.5`로 상향
 - [x] 대본 Structured Outputs 스키마에 `source_summary`, `story_beats` 추가
 - [x] 대본 로컬 품질검증 추가: 훅, 길이, 결말 질문, 원문 overlap, 메타 표현, visual keyword
+- [x] 공감형 각색 스키마 추가: `adaptation_strategy`, `retention_angle`, `viewer_question`, `marketability_score`
+- [x] 원문을 seed story로 활용하되 핵심 갈등/관계/결말 질문을 유지하는 각색 프롬프트 추가
+- [x] 미성년/teen/high-school 연애·성적 갈등 소스 precheck 차단
+- [x] 쇼츠 대본 목표 길이를 780-1080자, hard limit 1150자로 조정
 - [x] Reddit 원문 integrity metadata 추가: 길이, 단어 수, hash, truncation flag
 - [x] Reddit accepted post detail 재조회로 listing body 누락/축약 방지
 - [x] PullPush fallback에서 `selftext` 외 `body`/`text` 원문 fallback 추가
