@@ -78,6 +78,17 @@ The local validator rejects scripts before TTS when any hard failure is detected
 
 Non-blocking warnings are stored in `quality_warnings` for valid scripts that are outside the preferred 780-1080 character target or show repetitive paragraph starts.
 
+## YouTube Metadata Style
+
+Upload metadata follows the current reference Shorts pattern:
+
+- title starts with a concrete conflict sentence and ends with `#shorts #story #reddit #viral`
+- title is capped at YouTube's 100-character limit after hashtag packaging
+- description contains the generated description, the sharper viewer question, and the same hashtag line
+- tags preserve source-specific tags first, then add stable discovery tags such as `shorts`, `story`, `reddit`, `viral`, `storytime`, and `reddit story`
+
+GPT is instructed not to add hashtags directly. The local metadata post-processor applies the channel style only after script quality validation succeeds.
+
 ## Source Integrity
 
 Reddit collection stores source diagnostics with each raw post:

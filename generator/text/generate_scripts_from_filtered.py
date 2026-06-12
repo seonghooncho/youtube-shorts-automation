@@ -11,6 +11,7 @@ from generator.text.script_quality import (
     source_reject_reason_for_marketability,
     validate_script_quality,
 )
+from generator.text.youtube_metadata import apply_youtube_metadata_style
 from shared.utils.config import VIABLE_POSTS_FILE, FINAL_METADATA_FILE, FAILED_POSTS_FILE
 EXAMPLE_JSON = """
 {
@@ -64,7 +65,7 @@ def call_gpt_generate_script(title, content, post=None, regenerate_reason=None):
         "- Fill `retention_angle` with the specific reason this story is clickable and watchable: boundary crossed, unfair accusation, betrayal, public embarrassment, money/property conflict, workplace/family pressure, or a hard moral split.",
         "- Fill `viewer_question` with the exact final comment-bait question. It must be a real question and should not be generic if the source supports a sharper one.",
         "- Fill `marketability_score` from 1 to 5. Use 4 or 5 only when the story has a concrete unfair action, clear stakes, and a debatable final decision.",
-        "- Use a title that names the concrete conflict. Avoid generic titles like 'Did I Overreact?' unless paired with the specific action.",
+        "- Use a title that names the concrete conflict. Avoid generic titles like 'Did I Overreact?' unless paired with the specific action. Do not add hashtags; the uploader adds the channel hashtag style.",
         "- Write in a **casual, conversational tone**, as if you're sharing a story with a friend.",
         "- Avoid formal or stiff language. Use expressions and tones that are commonly seen in successful YouTube Shorts.",
         "- The first sentence must be a strong hook with a concrete crossed line. Start with what someone did wrong, what it cost, or why the narrator looked like the villain. Do not start with age, backstory, relationship length, 'So, get this', or 'A little backstory'.",
@@ -179,6 +180,7 @@ def validate_and_parse_metadata(result: ReturnScript, idx, post) -> Dict[str, An
                 if not issue.hard
             ]
 
+        apply_youtube_metadata_style(metadata)
         return metadata
     except Exception as e:
         raise ValueError(f"post {idx} 오류: {e}")
