@@ -3,12 +3,16 @@ from pathlib import Path
 
 import generator.video.pixabay_video_merge as pixabay_video_merge
 from generator.video.pixabay_video_merge import (
+    _fetch_pixabay_video_urls_safe,
     _is_blocked_pixabay_hit,
+    _is_low_signal_pixabay_hit,
     _metadata_by_id,
     _queries_for_entry,
+    _score_pixabay_hit,
     _segment_duration_for_source,
     _segment_start_for_source,
     _select_pixabay_video_url,
+    fetch_pixabay_video_urls,
 )
 
 
@@ -29,18 +33,46 @@ def test_queries_for_entry_prefers_story_visual_keywords(monkeypatch):
     assert "nature" not in queries
 
 
+def test_queries_for_entry_includes_asmr_visual_fallback(monkeypatch):
+    monkeypatch.setenv("PIXABAY_MAX_QUERIES_PER_ITEM", "12")
+    queries = _queries_for_entry(
+        {
+            "visual_keywords": [
+                "phone texting",
+                "apartment hallway",
+                "office conversation",
+                "angry neighbor",
+                "security camera",
+                "rental house",
+            ]
+        }
+    )
+
+    assert "hands typing keyboard close up" in queries
+    assert queries.index("hands typing keyboard close up") > queries.index("phone texting")
+
+
 def test_segment_duration_stays_in_shorts_cut_range(monkeypatch):
-    monkeypatch.setenv("SHORTS_BG_MIN_CLIP_SECONDS", "2.8")
-    monkeypatch.setenv("SHORTS_BG_MAX_CLIP_SECONDS", "4.2")
+    monkeypatch.delenv("SHORTS_BG_MIN_CLIP_SECONDS", raising=False)
+    monkeypatch.delenv("SHORTS_BG_MAX_CLIP_SECONDS", raising=False)
 
     duration = _segment_duration_for_source(Path("clip-1.mp4"), 20.0)
 
-    assert 2.8 <= duration <= 4.2
+    assert 3.4 <= duration <= 5.6
+
+
+def test_segment_duration_breathes_more_for_longer_narration(monkeypatch):
+    monkeypatch.delenv("SHORTS_BG_MIN_CLIP_SECONDS", raising=False)
+    monkeypatch.delenv("SHORTS_BG_MAX_CLIP_SECONDS", raising=False)
+
+    duration = _segment_duration_for_source(Path("clip-1.mp4"), 20.0, target_length=80.0)
+
+    assert 4.0 <= duration <= 6.6
 
 
 def test_segment_duration_is_deterministic_for_candidate_accounting(monkeypatch):
-    monkeypatch.setenv("SHORTS_BG_MIN_CLIP_SECONDS", "2.8")
-    monkeypatch.setenv("SHORTS_BG_MAX_CLIP_SECONDS", "4.2")
+    monkeypatch.setenv("SHORTS_BG_MIN_CLIP_SECONDS", "3.4")
+    monkeypatch.setenv("SHORTS_BG_MAX_CLIP_SECONDS", "5.6")
     path = Path("clip-1.mp4")
 
     assert _segment_duration_for_source(path, 20.0) == _segment_duration_for_source(path, 20.0)
@@ -56,7 +88,7 @@ def test_segment_start_is_inside_source_duration():
 def test_select_pixabay_video_url_prefers_large_enough_variant():
     url = _select_pixabay_video_url(
         {
-            "large": {"url": "https://example.com/large.mp4", "width": 1920, "height": 1080},
+            "large": {"url": "https://example.com/large.mp4", "width": 1280, "height": 720},
             "medium": {"url": "https://example.com/medium.mp4", "width": 640, "height": 360},
         }
     )
@@ -64,10 +96,83 @@ def test_select_pixabay_video_url_prefers_large_enough_variant():
     assert url == "https://example.com/large.mp4"
 
 
+def test_select_pixabay_video_url_prefers_highest_resolution_regardless_of_label():
+    url = _select_pixabay_video_url(
+        {
+            "large": {"url": "https://example.com/large.mp4", "width": 1280, "height": 720},
+            "medium": {"url": "https://example.com/medium.mp4", "width": 1920, "height": 1080},
+        }
+    )
+
+    assert url == "https://example.com/medium.mp4"
+
+
+def test_select_pixabay_video_url_rejects_low_res_by_default(monkeypatch):
+    monkeypatch.delenv("PIXABAY_ALLOW_LOW_RES_FALLBACK", raising=False)
+    url = _select_pixabay_video_url(
+        {
+            "small": {"url": "https://example.com/small.mp4", "width": 480, "height": 270},
+        }
+    )
+
+    assert url is None
+
+
 def test_blocked_pixabay_hit_rejects_green_screen_and_abstract():
     assert _is_blocked_pixabay_hit({"tags": "phone, green screen, texting"}) is True
     assert _is_blocked_pixabay_hit({"tags": "abstract, background, spiral"}) is True
     assert _is_blocked_pixabay_hit({"tags": "phone, texting, woman"}) is False
+
+
+def test_low_signal_pixabay_hit_rejects_generic_landscape_without_overlap():
+    assert _is_low_signal_pixabay_hit({"tags": "nature, landscape, sunset, sky"}, "phone texting") is True
+    assert _is_low_signal_pixabay_hit({"tags": "phone, woman, texting"}, "phone texting") is False
+
+
+def test_pixabay_hit_score_prefers_query_overlap():
+    matching = _score_pixabay_hit({"tags": "phone, texting, woman", "duration": 10, "likes": 100}, "phone texting")
+    generic = _score_pixabay_hit({"tags": "nature, landscape, sky", "duration": 10, "likes": 100}, "phone texting")
+
+    assert matching > generic
+
+
+def test_fetch_pixabay_video_urls_sorts_by_score(monkeypatch):
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "hits": [
+                    {
+                        "id": 1,
+                        "tags": "nature, landscape, sky",
+                        "duration": 10,
+                        "videos": {"large": {"url": "https://example.com/1.mp4", "width": 1920, "height": 1080}},
+                    },
+                    {
+                        "id": 2,
+                        "tags": "phone, texting, woman",
+                        "duration": 10,
+                        "videos": {"large": {"url": "https://example.com/2.mp4", "width": 1920, "height": 1080}},
+                    },
+                ]
+            }
+
+    monkeypatch.setattr(pixabay_video_merge.requests, "get", lambda *args, **kwargs: _Response())
+
+    results = fetch_pixabay_video_urls(query="phone texting", min_sec=4, max_sec=30)
+
+    assert results == [(2, "https://example.com/2.mp4", 10.0)]
+
+
+def test_fetch_pixabay_video_urls_safe_returns_empty_on_error(monkeypatch):
+    def _raise(*args, **kwargs):
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(pixabay_video_merge, "fetch_pixabay_video_urls", _raise)
+
+    assert _fetch_pixabay_video_urls_safe(query="phone texting") == []
 
 
 def test_metadata_by_id_loads_visual_keywords(tmp_path, monkeypatch):

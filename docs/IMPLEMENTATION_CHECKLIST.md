@@ -35,6 +35,12 @@
 - [x] publisher Lambda 업로드 전 최소 파일 크기 차단 추가
 - [x] Pixabay used-id array shard 경합 완화 및 finalize 병합 추가
 - [x] Pixabay page offset을 content/query 기준으로 분산해 동시 shard 중복 선택 완화
+- [x] Pixabay 후보 scoring 추가: query/tag overlap, concrete visual tag 우선
+- [x] 루즈한 generic stock footage 차단: landscape/sky/drone 등 low-signal tag 필터
+- [x] ASMR-style muted visual fallback 추가: hands/typing/coffee/rain/window close-up 계열
+- [x] 배경 segment 기본 길이 3.4-5.6초로 조정, 긴 narration은 4.0-6.6초로 완화
+- [x] Pixabay 조회/다운로드/세그먼트 변환 예외를 후보 단위로 격리
+- [x] Pixabay used-id 부족 시 재사용 fallback 추가
 - [x] S3Store upload/download/list/prefix sync 추상화
 - [x] YouTube OAuth refresh token 기반 uploader 구현
 - [x] YouTube OAuth scope를 상태조회/삭제 가능한 `youtube.force-ssl` 포함으로 확장
