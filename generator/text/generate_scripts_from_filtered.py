@@ -8,6 +8,7 @@ from generator.text.script_quality import (
     hard_quality_errors,
     quality_issues_to_regenerate_reason,
     script_text,
+    source_reject_reason_for_marketability,
     validate_script_quality,
 )
 from shared.utils.config import VIABLE_POSTS_FILE, FINAL_METADATA_FILE, FAILED_POSTS_FILE
@@ -26,6 +27,10 @@ EXAMPLE_JSON = """
                 "The next-door owner dismisses the complaint instead of apologizing.",
                 "The narrator sets a firm boundary and asks if that was too strict."
         ],
+        "adaptation_strategy": "Compressed repeated property issues into one escalating driveway incident, sharpened the neighbor's dismissive response, and kept the same boundary dispute and final dilemma.",
+        "retention_angle": "The story has a clear property boundary violation, an unreasonable neighbor response, and a final moral split about whether the narrator was too strict.",
+        "viewer_question": "Would you have shut it down too?",
+        "marketability_score": 5,
         "script": [
                 "A dozen kids turned my driveway into their playground, and their parents acted like I was the problem.",
                 "I own a small townhouse near the beach, and the unit next door is a short-term rental. At first, the guests were just cutting across my yard. Annoying, but whatever.",
@@ -43,27 +48,37 @@ def call_gpt_generate_script(title, content, post=None, regenerate_reason=None):
     # 2) f-string은 치환이 필요한 부분(제목/본문)만 사용
     parts = [
         "You are adapting a Reddit story into a YouTube Shorts narration.",
-        "Outcome: produce a fast, source-faithful, first-person script that can be narrated naturally by TTS.",
+        "Outcome: produce a fast, source-faithful, first-person script with strong Shorts retention.",
         "Audience: English-speaking Shorts viewers who decide in the first 2 seconds whether to keep watching.",
         "\n[Instructions]",
         "- Return the response in the exact same JSON structure shown in the example below.",
         '- **Detect the main character\'s gender** from the original story. Add a new key `"voice"` to the output JSON, whose value is either `"male"` or `"female"`, based on the main character’s gender for TTS selection. If gender is ambiguous, return `"neutral"`.',
-        "- The source text is authoritative. Preserve the core conflict, timeline, relationship, decision, consequence, and ending.",
-        "- You may compress, reorder, and dramatize wording for clarity, but do not invent a new betrayal, relationship, legal threat, revenge, confession, or outcome that is not supported by the source.",
-        "- If the source lacks small connective details, add only light emotional context or transitions that do not change the facts.",
+        "- Treat the source as a seed story, not a transcript. Preserve the core conflict, relationship type, narrator's decision, consequence, and final moral question.",
+        "- You may adapt the source into a more relatable, realistic Shorts story: compress repeated events into one clear scene, add plausible small dialogue, clarify motives, sharpen embarrassment or stakes, and make the conflict feel like something that could happen to a normal person.",
+        "- You may improve weak source material by choosing the most relatable angle and making the narrator's dilemma more concrete, as long as the adapted story still belongs to the same conflict archetype.",
+        "- Do not invent major unsafe or high-stakes facts: no new crimes, lawsuits, police, violence, sexual content, cheating, medical emergencies, revenge plans, pregnancy, minors, or job loss unless the source clearly supports them.",
+        "- Do not change who was in conflict, the broad setting, the narrator's main action, or the final side-taking question.",
         "- Fill `source_summary` with the original story's core conflict, not the rewritten script.",
         "- Fill `story_beats` with 4 to 7 source-grounded beats: setup, escalation, decision, consequence, and final dilemma.",
+        "- Fill `adaptation_strategy` with a transparent note about what you compressed or plausibly dramatized to make the story more watchable.",
+        "- Fill `retention_angle` with the specific reason this story is clickable and watchable: boundary crossed, unfair accusation, betrayal, public embarrassment, money/property conflict, workplace/family pressure, or a hard moral split.",
+        "- Fill `viewer_question` with the exact final comment-bait question. It must be a real question and should not be generic if the source supports a sharper one.",
+        "- Fill `marketability_score` from 1 to 5. Use 4 or 5 only when the story has a concrete unfair action, clear stakes, and a debatable final decision.",
+        "- Use a title that names the concrete conflict. Avoid generic titles like 'Did I Overreact?' unless paired with the specific action.",
         "- Write in a **casual, conversational tone**, as if you're sharing a story with a friend.",
         "- Avoid formal or stiff language. Use expressions and tones that are commonly seen in successful YouTube Shorts.",
-        "- The first sentence must be a strong hook: start with the conflict, consequence, or most surprising detail. Do not start with slow setup like 'So, get this' or 'A little backstory'.",
+        "- The first sentence must be a strong hook with a concrete crossed line. Start with what someone did wrong, what it cost, or why the narrator looked like the villain. Do not start with age, backstory, relationship length, 'So, get this', or 'A little backstory'.",
+        "- The first 3 paragraphs must create an open loop: hook, quick context, then escalation. Do not explain every detail chronologically.",
+        "- Every paragraph should either add a new problem, raise the stakes, or move toward the final decision. Cut neutral reflection.",
         "- Keep the pacing fast. Remove filler, repeated setup, and slow explanations. The narration should still be understandable after a moderate speed-up.",
         "- Structure the story in a `script` array of 5 to 7 short paragraphs. Never use more than 9 paragraphs.",
-        "- The entire script should target 800 to 1150 characters, with an ideal landing point around 950 characters.",
-        "- Keep the script under 1300 characters whenever possible. Anything over 1400 characters is invalid.",
+        "- The entire script should target 780 to 1080 characters, with an ideal landing point around 900 characters.",
+        "- Anything over 1150 characters is invalid. Cut harder instead of explaining more.",
         "- The target final narration length is roughly 45 to 75 seconds after a moderate speed-up. Prefer concise sentences over long paragraphs.",
         "- The script should never feel stretched, repetitive, or abruptly shortened; keep only the setup, escalation, decision, and question.",
         "- Add a `visual_keywords` array with 5 to 8 short English stock-video search phrases that match the story's setting and emotion.",
         "- Visual keywords should be concrete and searchable, such as 'phone texting', 'couple argument', 'apartment hallway', 'office conversation', 'security camera', or 'angry neighbor'. Avoid generic terms like 'nature', 'background', or 'landscape' unless the story truly needs them.",
+        "- Avoid visual keywords that imply minors, teenagers, school romance, sexual content, or anything that would make stock footage unsafe.",
         "- Do not mention Reddit, JSON, scripts, AI, viewers, or instructions inside the narration.",
         "- End the script with a question or prompt to encourage **viewer engagement**, such as:",
         '  - "So, what do you think?"',
@@ -73,7 +88,7 @@ def call_gpt_generate_script(title, content, post=None, regenerate_reason=None):
         "\n[IMPORTANT]",
         "- The response **must strictly follow the JSON structure** shown above with no missing keys.",
         "- Any syntax or formatting error in the returned JSON will be considered a failure.",
-        "- **If the script contains fewer than 750 characters or more than 1400 characters, it's considered invalid.**",
+        "- **If the script contains fewer than 750 characters or more than 1150 characters, it's considered invalid.**",
         "\n[Source metadata]",
         f"- Source provider: {source.provider or 'unknown'}",
         f"- Source URL: {source.source_url or 'unknown'}",
@@ -114,6 +129,10 @@ def validate_and_parse_metadata(result: ReturnScript, idx, post) -> Dict[str, An
             "visual_keywords",
             "source_summary",
             "story_beats",
+            "adaptation_strategy",
+            "retention_angle",
+            "viewer_question",
+            "marketability_score",
             "script",
         ]
         if not all(k in metadata for k in required_keys):
@@ -125,15 +144,26 @@ def validate_and_parse_metadata(result: ReturnScript, idx, post) -> Dict[str, An
             raise ValueError("❌ visual_keywords는 문자열 리스트여야 함")
         if not isinstance(metadata["story_beats"], list) or not all(isinstance(beat, str) for beat in metadata["story_beats"]):
             raise ValueError("❌ story_beats는 문자열 리스트여야 함")
+        if not isinstance(metadata["viewer_question"], str) or not metadata["viewer_question"].strip():
+            raise ValueError("❌ viewer_question은 문자열이어야 함")
+        if not isinstance(metadata["retention_angle"], str) or not metadata["retention_angle"].strip():
+            raise ValueError("❌ retention_angle은 문자열이어야 함")
+        if not isinstance(metadata["adaptation_strategy"], str) or not metadata["adaptation_strategy"].strip():
+            raise ValueError("❌ adaptation_strategy는 문자열이어야 함")
 
         metadata["script"] = [line.strip() for line in metadata["script"] if line.strip()]
         metadata["story_beats"] = [beat.strip() for beat in metadata["story_beats"] if beat.strip()]
 
+        if post and post.get("content"):
+            marketability_reject = source_reject_reason_for_marketability(post)
+            if marketability_reject:
+                raise ValueError(f"❌ source_marketability_reject: {marketability_reject}")
+
         script_length = len(script_text(metadata))
         if script_length < 750:
             raise ValueError(f"❌ script가 너무 짧음 (현재 {script_length}자)")
-        if script_length > 1400:
-            raise ValueError(f"❌ script가 너무 긺 (현재 {script_length}자)")
+        if script_length > 1150:
+            raise ValueError(f"❌ script가 쇼츠 목표보다 너무 긺 (현재 {script_length}자)")
 
         metadata["visual_keywords"] = _clean_visual_keywords(metadata["visual_keywords"])
         metadata["script_char_count"] = script_length
@@ -158,6 +188,9 @@ def _source_preflight_error(post: Dict[str, Any]) -> str:
     source = build_source_profile(post)
     if source.is_truncated:
         return f"source content may be truncated: {source.truncation_reason or 'unknown reason'}"
+    marketability_reject = source_reject_reason_for_marketability(post)
+    if marketability_reject:
+        return marketability_reject
     if source.char_count < 550 or source.word_count < 90:
         return f"source is too thin for faithful adaptation ({source.char_count} chars, {source.word_count} words)"
     return ""
@@ -166,15 +199,22 @@ def _source_preflight_error(post: Dict[str, Any]) -> str:
 def _regenerate_reason_from_error(message: str) -> str:
     if "너무 짧음" in message or "너무 긺" in message or "character" in message:
         return (
-            "The script's length was out of bounds. Please revise it to 800 to 1150 "
-            "characters, ideally around 950 characters, with a fast first-sentence hook and no filler."
+            "The script's length was out of bounds. Please revise it to 780 to 1080 "
+            "characters, ideally around 900 characters, with a concrete conflict hook and no filler."
         )
     if "품질검증 실패" in message:
         return (
             "The previous script failed local quality validation. Fix these issues exactly: "
             f"{message}"
         )
-    if "필수 키 누락" in message or "script는 문자열 리스트" in message or "story_beats" in message:
+    if (
+        "필수 키 누락" in message
+        or "script는 문자열 리스트" in message
+        or "story_beats" in message
+        or "viewer_question" in message
+        or "retention_angle" in message
+        or "adaptation_strategy" in message
+    ):
         return "The response did not follow the required JSON structure. Please strictly follow the JSON example format."
     return f"Other error: {message}"
 

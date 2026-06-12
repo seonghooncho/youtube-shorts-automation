@@ -6,7 +6,7 @@ import re
 from typing import List
 from dotenv import load_dotenv, find_dotenv
 import openai
-from generator.text.script_quality import build_source_profile
+from generator.text.script_quality import build_source_profile, source_reject_reason_for_marketability
 from shared.utils.config import RAW_POSTS_FILE, VIABLE_POSTS_FILE
 
 
@@ -124,6 +124,9 @@ def _local_precheck(post: dict) -> str:
     source = build_source_profile(post)
     if source.is_truncated:
         return f"source may be truncated: {source.truncation_reason or 'unknown reason'}"
+    marketability_reject = source_reject_reason_for_marketability(post)
+    if marketability_reject:
+        return marketability_reject
     if source.char_count < 550 or source.word_count < 90:
         return f"source too thin ({source.char_count} chars, {source.word_count} words)"
     return ""
@@ -153,17 +156,21 @@ def filter_viable_posts():
             continue
 
         prompt = f"""
-        Evaluate whether this source can become a high-quality 45-75 second YouTube Shorts story.
+        Evaluate whether this source can become a high-retention 45-75 second YouTube Shorts story.
 
         Answer YES only if all conditions are true:
         - The story is complete enough to adapt without inventing major facts.
-        - There is a clear first-person conflict, decision, consequence, or moral dilemma.
+        - There is a clear first-person conflict with a concrete crossed line, unfair accusation,
+          betrayal, property/money pressure, family/workplace pressure, or public embarrassment.
         - The story has enough concrete detail for 4-7 fast narration beats.
         - The content can be made broadly safe for YouTube Shorts.
         - The likely narration will not need filler to reach 45 seconds.
+        - The ending naturally creates a comment debate where reasonable viewers could disagree.
+        - The story feels like a 4/5 or 5/5 retention candidate, not merely "understandable."
 
         Answer NO if the source is mostly contextless, a question without a story, rage bait without events,
-        graphic/sexual content involving minors, explicit hate or slurs, or a post that requires major fabrication.
+        low-stakes relationship ambiguity, graphic/sexual content involving minors, teen/high-school romance,
+        explicit hate or slurs, or a post that requires major fabrication.
 
         Title: {title}
         Source metadata:

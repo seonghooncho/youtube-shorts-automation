@@ -25,6 +25,10 @@ class ReturnScript(BaseModel):
     visual_keywords: List[str]
     source_summary: str = Field(..., description="One or two sentences summarizing the source conflict.")
     story_beats: List[str] = Field(..., min_length=4, max_length=7)
+    adaptation_strategy: str = Field(..., description="How the source was compressed or plausibly dramatized without changing the core conflict.")
+    retention_angle: str = Field(..., description="Why this story should hold Shorts viewers past the opening hook.")
+    viewer_question: str = Field(..., description="A concise final engagement question for comments.")
+    marketability_score: int = Field(..., ge=1, le=5)
     script: List[str]
 
 def _assert_no_nulls(rs: ReturnScript) -> None:
