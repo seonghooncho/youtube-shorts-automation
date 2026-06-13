@@ -1,4 +1,5 @@
 import importlib.util
+from io import BytesIO
 from pathlib import Path
 
 
@@ -131,6 +132,45 @@ def test_publisher_blocks_internal_upload_metadata(monkeypatch):
     )
 
     assert reason == "unsafe_metadata:title:pending"
+
+
+def test_publisher_blocks_dry_run_metadata(monkeypatch):
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "ap-northeast-2")
+    publisher = _load_module("publisher_dry_run_safety_test_module", "infra/terraform/lambda/publisher.py")
+
+    reason = publisher._metadata_safety_error({"dry_run": True})
+
+    assert reason == "unsafe_metadata:dry_run_item_not_allowed_downstream"
+
+
+def test_publisher_skips_legacy_metadata_in_production_by_default(monkeypatch):
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "ap-northeast-2")
+    monkeypatch.setenv("BUCKET_NAME", "test-bucket")
+    publisher = _load_module("publisher_legacy_metadata_safety_test_module", "infra/terraform/lambda/publisher.py")
+    requested_keys = []
+
+    class FakeS3:
+        def get_object(self, Bucket, Key):
+            requested_keys.append(Key)
+            if Key == publisher.PUBLISH_METADATA_KEY:
+                raise publisher.ClientError({"Error": {"Code": "NoSuchKey"}}, "GetObject")
+            return {"Body": BytesIO(b'[{"id": "legacy"}]')}
+
+    def fake_setting(name, default):
+        if name == "S3_BUCKET_NAME":
+            return "test-bucket"
+        if name in {"APP_ENV", "YT_ENV"}:
+            return "production"
+        return default
+
+    monkeypatch.setattr(publisher, "s3", FakeS3())
+    monkeypatch.setattr(publisher, "_setting", fake_setting)
+
+    metadata, key = publisher._load_metadata()
+
+    assert metadata == []
+    assert key == publisher.PUBLISH_METADATA_KEY
+    assert requested_keys == [publisher.PUBLISH_METADATA_KEY]
 
 
 def test_publisher_blocks_synthetic_and_local_template_by_default(monkeypatch):

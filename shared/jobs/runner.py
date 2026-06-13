@@ -2,12 +2,6 @@
 import os
 from shared.utils.slack_notify import send_slack_message
 
-# 배치 생성
-try:
-    from shared.jobs.batch_generate import run_batch_pipeline
-except Exception:
-    run_batch_pipeline = None
-
 # 업로드
 try:
     from shared.jobs.upload_scheduler import upload_batch_pipeline
@@ -21,11 +15,15 @@ except Exception:
 
 
 def _do_generate():
-    if not run_batch_pipeline:
-        raise RuntimeError("run_batch_pipeline() 로더 실패: shared.jobs.batch_generate 확인 필요")
-    send_slack_message("🎬 배치 생성 파이프라인 시작")
-    run_batch_pipeline()
-    send_slack_message("✅ 배치 생성 파이프라인 종료")
+    if not run_generate_stage:
+        raise RuntimeError("run_generate_stage() 로더 실패: shared.jobs.staged_generate 확인 필요")
+    stages = ["collect", "filter", "script", "tts", "subtitles", "render", "finalize"]
+    send_slack_message("🎬 staged 배치 생성 파이프라인 시작")
+    for stage_name in stages:
+        send_slack_message(f"🎬 생성 스테이지 시작: {stage_name}")
+        run_generate_stage(stage_name)
+        send_slack_message(f"✅ 생성 스테이지 종료: {stage_name}")
+    send_slack_message("✅ staged 배치 생성 파이프라인 종료")
 
 
 def _do_upload():
