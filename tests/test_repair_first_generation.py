@@ -392,6 +392,58 @@ def test_failed_generation_telemetry_is_counted_without_result(monkeypatch, tmp_
     assert summary["structured_failures"] == 1
 
 
+def test_two_failed_sources_keep_separate_exception_telemetry(monkeypatch, tmp_path):
+    viable = tmp_path / "viable_posts.json"
+    final = tmp_path / "final_metadata.json"
+    failed = tmp_path / "failed_posts.json"
+    first = _post() | {"id": "fail-one"}
+    second = _post() | {"id": "fail-two"}
+    viable.write_text(json.dumps([first, second]), encoding="utf-8")
+    telemetries = iter(
+        [
+            {
+                "structured_attempts": 1,
+                "json_fallback_attempts": 0,
+                "structured_failures": 1,
+                "json_fallback_failures": 0,
+                "estimated_output_token_budget_total": 1600,
+                "structured_retry_skipped_reason": "schema_validation_failure",
+            },
+            {
+                "structured_attempts": 2,
+                "json_fallback_attempts": 0,
+                "structured_failures": 2,
+                "json_fallback_failures": 0,
+                "estimated_output_token_budget_total": 3800,
+                "structured_retry_skipped_reason": "max_structured_attempts_reached",
+            },
+        ]
+    )
+
+    def fail_with_next_telemetry(*_args, **_kwargs):
+        telemetry = next(telemetries)
+        raise GenerateScriptError("schema failed", telemetry)
+
+    monkeypatch.setenv("SCRIPT_MAX_LLM_DRAFTS_PER_SOURCE", "1")
+    monkeypatch.setattr("generator.text.generate_scripts_from_filtered.VIABLE_POSTS_FILE", viable)
+    monkeypatch.setattr("generator.text.generate_scripts_from_filtered.FINAL_METADATA_FILE", final)
+    monkeypatch.setattr("generator.text.generate_scripts_from_filtered.FAILED_POSTS_FILE", failed)
+    monkeypatch.setattr("generator.text.generate_scripts_from_filtered._load_previous_accepted_metadata", lambda: [])
+    monkeypatch.setattr("generator.text.generate_scripts_from_filtered.call_gpt_generate_script", fail_with_next_telemetry)
+
+    generate_scripts_from_filtered()
+
+    rejected = json.loads(failed.read_text(encoding="utf-8"))
+    summary = json.loads((tmp_path / "generation_summary.json").read_text(encoding="utf-8"))
+    assert [item["id"] for item in rejected] == ["fail-one", "fail-two"]
+    assert rejected[0]["generation_telemetry"]["structured_attempts"] == 1
+    assert rejected[1]["generation_telemetry"]["structured_attempts"] == 2
+    assert rejected[0]["generation_telemetry"]["estimated_output_token_budget_total"] == 1600
+    assert rejected[1]["generation_telemetry"]["estimated_output_token_budget_total"] == 3800
+    assert summary["structured_attempts"] == 3
+    assert summary["estimated_output_token_budget_total"] >= 5400
+
+
 def test_dry_run_summary_prints_key_metrics(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("SCRIPT_DRY_RUN_SUMMARY_ONLY", "1")
     monkeypatch.setenv("SCRIPT_CRITIC_ENABLED", "0")
@@ -399,6 +451,12 @@ def test_dry_run_summary_prints_key_metrics(monkeypatch, tmp_path, capsys):
     _run_generation(monkeypatch, tmp_path, [_draft()])
 
     output = capsys.readouterr().out
-    assert "DRY_RUN_SUMMARY raw=1" in output
+    summary = json.loads((tmp_path / "generation_summary.json").read_text(encoding="utf-8"))
+    final_metadata = json.loads((tmp_path / "final_metadata.json").read_text(encoding="utf-8"))
+    assert "DRY RUN SUMMARY" in output
+    assert "raw=1" in output
     assert "draft_calls=1" in output
     assert "accepted=1" in output
+    assert "estimated_output_token_budget=" in output
+    assert summary["dry_run"] is True
+    assert final_metadata[0]["dry_run"] is True

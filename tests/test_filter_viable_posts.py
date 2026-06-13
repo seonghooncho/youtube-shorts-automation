@@ -220,6 +220,11 @@ def test_filter_prerank_caps_llm_source_scorecard_calls(monkeypatch, tmp_path):
     assert summary["prerank_skipped_examples"]
     assert summary["source_rejection_reason_counts"]["below_local_prerank_cutoff"] == 6
     assert summary["accepted_source_archetypes"]["roommate_money"] == 8
+    assert len(summary["accepted_examples"]) == 5
+    assert summary["accepted_examples"][0]["id"]
+    assert summary["accepted_examples"][0]["source_priority_score"] > 0
+    assert summary["accepted_examples"][0]["archetype"] == "roommate_money"
+    assert "Strong local conflict" in summary["accepted_examples"][0]["reason"]
 
 
 def test_filter_compacts_long_source_and_preserves_receipts_and_question():

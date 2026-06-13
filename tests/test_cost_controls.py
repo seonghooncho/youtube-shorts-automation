@@ -136,8 +136,20 @@ def test_end_to_end_cost_budget_controls(monkeypatch, tmp_path):
     assert calls["script"] <= len(viable) * 2
     assert summary["json_fallback_attempts"] == 0
     assert calls["critic"] == 0
+    assert summary["critic_skipped"] > 0
     assert summary["critic_skipped"] == summary["final_accepted"]
     assert summary["source_scorecard_calls"] == 8
     assert summary["source_scorecard_skipped_by_prerank"] == 6
-    assert "llm_call_estimate_total" in summary
-    assert "estimated_output_token_budget_total" in summary
+    assert summary["final_accepted"] > 0
+    assert summary["final_rejected"] == 0
+    for key in (
+        "llm_call_estimate_total",
+        "estimated_output_token_budget_total",
+        "source_scorecard_calls",
+        "source_scorecard_skipped_by_prerank",
+        "critic_skipped",
+        "final_accepted",
+        "final_rejected",
+    ):
+        assert key in summary
+    assert summary["operator_recommendation"].startswith("OK")
