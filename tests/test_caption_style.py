@@ -1,8 +1,10 @@
 import generator.video.create_video as create_video
 from generator.video.create_video import (
     _audio_merge_filter,
+    _build_chunk_caption_events,
     _build_centered_caption_events,
     _ensure_ffmpeg_font_dir,
+    _format_chunk_caption_text,
     _format_centered_caption_text,
     _video_filter_with_subtitles,
     _write_centered_caption_ass,
@@ -60,6 +62,7 @@ def test_format_centered_caption_text_uses_uppercase_and_focus_color(monkeypatch
 
 
 def test_write_centered_caption_ass_sets_center_position_and_style(tmp_path, monkeypatch):
+    monkeypatch.setenv("CAPTION_RENDER_MODE", "word_pop")
     monkeypatch.setenv("CAPTION_FONT_SIZE", "70")
     monkeypatch.setenv("CAPTION_CENTER_X", "540")
     monkeypatch.setenv("CAPTION_CENTER_Y", "960")
@@ -87,6 +90,8 @@ def test_write_centered_caption_ass_sets_center_position_and_style(tmp_path, mon
 
 
 def test_write_centered_caption_ass_uses_larger_crisp_defaults(tmp_path, monkeypatch):
+    monkeypatch.delenv("CAPTION_RENDER_MODE", raising=False)
+    monkeypatch.delenv("CAPTION_CHUNK_FONT_SIZE", raising=False)
     monkeypatch.delenv("CAPTION_FONT_SIZE", raising=False)
     monkeypatch.delenv("CAPTION_OUTLINE", raising=False)
     monkeypatch.delenv("CAPTION_SHADOW", raising=False)
@@ -96,9 +101,50 @@ def test_write_centered_caption_ass_uses_larger_crisp_defaults(tmp_path, monkeyp
     _write_centered_caption_ass([((0.0, 0.2), "blood")], ass_path, offset_seconds=0.0)
 
     content = ass_path.read_text(encoding="utf-8")
-    assert "Style: Caption,Anton,114" in content
+    assert "Style: Caption,Anton,92" in content
     assert ",1,7,0,5,70,70,0,1" in content
     assert r"\fad(" not in content or r"\fad(0,0)" in content
+
+
+def test_build_chunk_caption_events_preserves_phrase_and_question():
+    events = _build_chunk_caption_events(
+        [
+            ((0.0, 1.1), "His car sat there for six hours"),
+            ((1.1, 2.0), "Was I wrong to post the clip?"),
+        ]
+    )
+
+    assert events == [
+        (0.0, 1.1, "His car sat there for six hours"),
+        (1.1, 2.0, "Was I wrong to post the clip?"),
+    ]
+
+
+def test_format_chunk_caption_wraps_and_highlights_only_last_word(monkeypatch):
+    monkeypatch.setenv("CAPTION_CHUNK_LINE_CHARS", "16")
+    monkeypatch.delenv("CAPTION_UPPERCASE", raising=False)
+    monkeypatch.delenv("CAPTION_HIGHLIGHT_LAST_WORD", raising=False)
+
+    text = _format_chunk_caption_text("his car sat there for six hours")
+
+    assert r"\N" in text
+    assert r"{\c&H00FFFF&}HOURS{\c&HFFFFFF&}" in text
+    assert r"{\c&H00FFFF&}HIS" not in text
+
+
+def test_write_centered_caption_ass_chunk_mode_keeps_phrase_event(tmp_path, monkeypatch):
+    monkeypatch.delenv("CAPTION_RENDER_MODE", raising=False)
+    monkeypatch.setenv("CAPTION_CHUNK_FONT_SIZE", "40")
+    monkeypatch.setenv("CAPTION_CHUNK_LINE_CHARS", "50")
+
+    ass_path = tmp_path / "captions.ass"
+    _write_centered_caption_ass([((0.0, 1.0), "his car sat there for six hours")], ass_path, offset_seconds=0.0)
+
+    content = ass_path.read_text(encoding="utf-8")
+    assert content.count("Dialogue: 0,") == 1
+    assert "HIS CAR SAT THERE FOR SIX" in content
+    assert r"{\c&H00FFFF&}HOURS{\c&HFFFFFF&}" in content
+    assert r"{\c&H00FFFF&}HIS" not in content
 
 
 def test_ensure_ffmpeg_font_dir_allows_missing_font(tmp_path, monkeypatch):

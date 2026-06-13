@@ -39,6 +39,28 @@ def test_queries_for_entry_prefers_story_visual_keywords(monkeypatch):
     assert "nature" not in queries
 
 
+def test_queries_for_entry_uses_opening_visual_query_first(monkeypatch):
+    monkeypatch.setenv("PIXABAY_MAX_QUERIES_PER_ITEM", "6")
+
+    queries = _queries_for_entry(
+        {
+            "opening_visual_query": "door camera driveway car",
+            "visual_beat_queries": [
+                {"beat": "receipt", "query": "phone timestamp screenshot"},
+                {"beat": "decision", "query": "private parking sign"},
+            ],
+            "visual_keywords": ["phone texting", "suburban driveway"],
+        }
+    )
+
+    assert queries[:4] == [
+        "door camera driveway car",
+        "phone timestamp screenshot",
+        "private parking sign",
+        "phone texting",
+    ]
+
+
 def test_queries_for_entry_includes_asmr_visual_fallback(monkeypatch):
     monkeypatch.setenv("PIXABAY_MAX_QUERIES_PER_ITEM", "12")
     queries = _queries_for_entry(

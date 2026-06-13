@@ -1,4 +1,9 @@
-from generator.text.content_gate import evaluate_content_gate, normalize_narration_fields
+from generator.text.content_gate import (
+    caption_chunks_align_with_tts_text,
+    caption_quality_reason,
+    evaluate_content_gate,
+    normalize_narration_fields,
+)
 
 
 def _safe_item(**overrides):
@@ -22,9 +27,15 @@ def _safe_item(**overrides):
         "caption_chunks": [
             "He parked in my driveway",
             "The door camera showed his car",
-            "He blamed me in the building chat",
+            "He replied in the building chat",
             "I posted the timestamp",
             "Was I wrong to post the clip?",
+        ],
+        "first_frame_text": "HE PARKED IN MY DRIVEWAY",
+        "opening_visual_query": "parked car in driveway",
+        "visual_beat_queries": [
+            {"beat": "hook", "query": "parked car in driveway"},
+            {"beat": "receipt", "query": "door camera car timestamp"},
         ],
         "style_variant": "neighbor_dispute",
         "script_fingerprint": "safe-fingerprint",
@@ -165,3 +176,31 @@ def test_caption_retention_policy_rejects_generic_and_long_chunks():
     assert any(error.startswith("first_caption_hook") for error in result["hard_errors"])
     assert any(error.startswith("caption_chunk_too_long") for error in result["hard_errors"])
     assert any(error.startswith("generic_caption_chunk") for error in result["hard_errors"])
+
+
+def test_caption_chunks_must_align_with_tts_text():
+    exact = _safe_item(caption_chunks=["He parked in my driveway", "Was I wrong to post the clip?"])
+    paraphrase = _safe_item(caption_chunks=["His car stayed there all morning", "Was I wrong to post the clip?"])
+    final_question_mismatch = _safe_item(caption_chunks=["He parked in my driveway", "Would you call him out?"])
+
+    assert caption_chunks_align_with_tts_text(exact)[0] is True
+    assert caption_chunks_align_with_tts_text(paraphrase)[0] is False
+    result = evaluate_content_gate(final_question_mismatch)
+    assert any(error.startswith("caption_chunks_not_in_tts_text") for error in result["hard_errors"])
+
+
+def test_caption_quality_uses_caption_specific_rules():
+    assert caption_quality_reason("His car sat there for six hours", is_first=True) == ""
+    assert caption_quality_reason("The door camera showed his car", is_first=True) == ""
+    assert caption_quality_reason("Things got worse", is_first=True) == "generic_filler"
+    assert caption_quality_reason("The boundary was simple", is_first=True) == "generic_filler"
+
+
+def test_opening_visual_and_first_frame_are_required():
+    generic_query = evaluate_content_gate(_safe_item(opening_visual_query="story"))
+    long_frame = evaluate_content_gate(_safe_item(first_frame_text="THIS FIRST FRAME TEXT IS FAR TOO LONG FOR SHORTS"))
+    strong_frame = evaluate_content_gate(_safe_item(first_frame_text="12 DINNERS ON MY CARD", opening_visual_query="restaurant bill on credit card"))
+
+    assert "generic_opening_visual_query" in generic_query["hard_errors"]
+    assert "first_frame_text_too_long" in long_frame["hard_errors"]
+    assert strong_frame["ok"] is True

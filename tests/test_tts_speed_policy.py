@@ -73,9 +73,15 @@ def _tts_safe_item(content_id: str):
         "caption_chunks": [
             "He parked in my driveway",
             "The door camera showed his car",
-            "He blamed me in the building chat",
+            "He replied in the building chat",
             "I posted the timestamp",
             "Was I wrong to post the clip?",
+        ],
+        "first_frame_text": "HE PARKED IN MY DRIVEWAY",
+        "opening_visual_query": "parked car in driveway",
+        "visual_beat_queries": [
+            {"beat": "hook", "query": "parked car in driveway"},
+            {"beat": "receipt", "query": "door camera car timestamp"},
         ],
         "style_variant": "neighbor_dispute",
         "script_fingerprint": f"fingerprint-{content_id}",

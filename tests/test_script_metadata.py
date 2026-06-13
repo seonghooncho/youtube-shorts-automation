@@ -11,6 +11,13 @@ def _market_fields(**overrides):
         "retention_angle": "The story has a concrete unfair accusation, public embarrassment, and a final boundary decision that viewers can debate.",
         "hook_type": "unfair_accusation",
         "first_2_seconds": "Someone accused me after crossing a clear line",
+        "first_frame_text": "THE CHAT MADE ME LOOK BAD",
+        "opening_visual_query": "phone group chat accusation",
+        "visual_beat_queries": [
+            {"beat": "hook", "query": "phone group chat accusation"},
+            {"beat": "receipt", "query": "phone screenshot proof"},
+            {"beat": "decision", "query": "person texting reply"},
+        ],
         "turning_point": "The other person made the private conflict public instead of apologizing.",
         "payoff_line": "I corrected the story because they made me look unreasonable first.",
         "viewer_question": "Would you have corrected the lie too?",

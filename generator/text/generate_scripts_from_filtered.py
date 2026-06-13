@@ -39,6 +39,13 @@ EXAMPLE_JSON = """
         "tags": ["storytime", "neighborhood", "drama", "reddit", "beachhouse"],
         "voice": "male",
         "visual_keywords": ["suburban driveway", "security camera", "kids playing", "angry neighbor", "rental house", "phone messages"],
+        "first_frame_text": "KIDS TOOK OVER MY DRIVEWAY",
+        "opening_visual_query": "kids playing driveway security camera",
+        "visual_beat_queries": [
+                {"beat": "hook", "query": "kids playing driveway security camera"},
+                {"beat": "receipt", "query": "phone security camera alert"},
+                {"beat": "decision", "query": "private driveway parking sign"}
+        ],
         "hook_type": "crossed_boundary",
         "first_2_seconds": "A dozen kids turned my driveway into their playground",
         "source_summary": "The narrator owns a townhouse near a short-term rental and has repeated problems with renters' kids using his driveway and yard without permission.",
@@ -70,7 +77,7 @@ EXAMPLE_JSON = """
                 "Would you have shut it down too?"
         ],
         "tts_text": "A dozen kids turned my driveway into their playground. The unit next door is a short-term rental, so guests change every few days. One night my security camera kept pinging while I was trying to work. I opened the app and saw kids doing flips on my driveway. When one kid fell on the concrete, I used the camera speaker and told them to leave. The owner texted back that they were just enjoying the outdoors. I sent screenshots and said my driveway was not free supervision. Would you have shut it down too?",
-        "caption_chunks": ["Kids turned my driveway into a playground", "My security camera kept pinging", "I saw flips on the concrete", "The owner brushed it off", "Would you have shut it down too?"],
+        "caption_chunks": ["kids turned my driveway", "security camera kept pinging", "kids doing flips on my driveway", "The owner texted back", "Would you have shut it down too?"],
         "rewrite_notes": "Removed slow vacation-rental context and led with the crossed boundary.",
         "script": [
                 "A dozen kids turned my driveway into their playground.",
@@ -130,6 +137,7 @@ def call_gpt_generate_script(title, content, post=None, regenerate_reason=None):
         "- Structure the story in `voiceover_lines` as 7 to 10 complete short lines. Keep `script` identical to `voiceover_lines` for compatibility.",
         "- Fill `tts_text` as the complete narration joined from `voiceover_lines`, with natural punctuation pauses before the receipt/reveal and before the final question.",
         "- Fill `caption_chunks` as short retention captions: max 42 characters per chunk, final question as its own chunk, first caption clearly shows the conflict, and do not reveal the twist too early.",
+        "- `caption_chunks` must use exact words from `voiceover_lines`/`tts_text` in the same order. They are display chunks from the spoken narration, not summaries or paraphrases.",
         f"- The joined `script` narration must be {target_min_chars} to {target_max_chars} characters, including spaces.",
         f"- Anything over {MAX_SCRIPT_CHARS} characters is invalid. Cut harder instead of explaining more.",
         "- Line limits: first line under 120 characters, no voiceover line over 170 characters.",
@@ -139,6 +147,9 @@ def call_gpt_generate_script(title, content, post=None, regenerate_reason=None):
         "- The target final narration length is roughly 42 to 65 seconds after a moderate speed-up. Prefer concise sentences over long lines.",
         "- The script should never feel stretched, repetitive, or abruptly shortened; keep only the setup, escalation, decision, and question.",
         "- Keep the final line short. Do not pack new facts and the viewer question into one overloaded sentence.",
+        "- Add `first_frame_text` as max 38 characters of all-caps hook text that shows the core conflict immediately. Do not use generic text like Story, Drama, AITA, or Did I Overreact.",
+        "- Add `opening_visual_query` as the first background-video search query. It must match the first spoken line, not generic mood footage.",
+        "- Add `visual_beat_queries` as ordered objects with `beat` and `query` keys. The first beat should be hook; receipt/reveal beats should prefer camera, phone, receipt, bill, app, screenshot, timestamp, or group chat when the source supports them.",
         "- Add a `visual_keywords` array with 5 to 8 short English stock-video search phrases that match the story's setting and emotion.",
         "- Visual keywords should be concrete and searchable, such as 'phone texting', 'couple argument', 'apartment hallway', 'office conversation', 'security camera', or 'angry neighbor'. Avoid generic terms like 'nature', 'background', or 'landscape' unless the story truly needs them.",
         "- Avoid visual keywords that imply minors, teenagers, school romance, sexual content, or anything that would make stock footage unsafe.",
@@ -218,6 +229,9 @@ def validate_and_parse_metadata(result: ReturnScript, idx, post) -> Dict[str, An
             "tags",
             "voice",
             "visual_keywords",
+            "first_frame_text",
+            "opening_visual_query",
+            "visual_beat_queries",
             "hook_type",
             "first_2_seconds",
             "source_summary",
@@ -242,6 +256,14 @@ def validate_and_parse_metadata(result: ReturnScript, idx, post) -> Dict[str, An
             raise ValueError("❌ script는 문자열 리스트여야 함")
         if not isinstance(metadata["visual_keywords"], list) or not all(isinstance(keyword, str) for keyword in metadata["visual_keywords"]):
             raise ValueError("❌ visual_keywords는 문자열 리스트여야 함")
+        if not isinstance(metadata["first_frame_text"], str) or not metadata["first_frame_text"].strip():
+            raise ValueError("❌ first_frame_text는 문자열이어야 함")
+        if not isinstance(metadata["opening_visual_query"], str) or not metadata["opening_visual_query"].strip():
+            raise ValueError("❌ opening_visual_query는 문자열이어야 함")
+        if not isinstance(metadata["visual_beat_queries"], list) or not all(isinstance(beat, dict) for beat in metadata["visual_beat_queries"]):
+            raise ValueError("❌ visual_beat_queries는 객체 리스트여야 함")
+        if not all(isinstance(beat.get("beat"), str) and isinstance(beat.get("query"), str) for beat in metadata["visual_beat_queries"]):
+            raise ValueError("❌ visual_beat_queries 항목은 beat/query 문자열을 포함해야 함")
         if not isinstance(metadata["story_beats"], list) or not all(isinstance(beat, str) for beat in metadata["story_beats"]):
             raise ValueError("❌ story_beats는 문자열 리스트여야 함")
         if not isinstance(metadata["viewer_question"], str) or not metadata["viewer_question"].strip():
@@ -451,6 +473,13 @@ def _build_local_fallback_metadata(post: Dict[str, Any], reason: str = "") -> Di
         tags=["storytime", "boundaries", "redditstories", "aita", "familydrama"],
         voice="neutral",
         visual_keywords=visual_keywords,
+        first_frame_text=_clean_first_frame_text(first_two),
+        opening_visual_query=visual_keywords[0] if visual_keywords else "phone message receipt",
+        visual_beat_queries=[
+            {"beat": "hook", "query": visual_keywords[0] if visual_keywords else "phone message receipt"},
+            {"beat": "receipt", "query": visual_keywords[1] if len(visual_keywords) > 1 else "phone screenshot receipt"},
+            {"beat": "decision", "query": visual_keywords[2] if len(visual_keywords) > 2 else "person texting decision"},
+        ],
         hook_type=_fallback_hook_type(content),
         first_2_seconds=first_two,
         source_summary=source_summary,
@@ -682,6 +711,17 @@ def _clean_sentence(text: str, *, max_chars: int) -> str:
         truncated = truncated.rsplit(" ", 1)[0]
     truncated = _strip_dangling_tail(truncated)
     return f"{truncated.rstrip('.,;:')}."
+
+
+def _clean_first_frame_text(text: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9 $'&-]+", "", str(text or "")).upper()
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if len(cleaned) <= 38:
+        return cleaned
+    truncated = cleaned[:38].rstrip()
+    if " " in truncated:
+        truncated = truncated.rsplit(" ", 1)[0]
+    return truncated.strip()
 
 
 def _strip_dangling_tail(text: str) -> str:

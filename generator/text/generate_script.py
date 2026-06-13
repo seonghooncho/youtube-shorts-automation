@@ -44,6 +44,9 @@ class ReturnScript(BaseModel):
     tags: List[str]
     voice: Literal["male", "female", "neutral"]
     visual_keywords: List[str]
+    first_frame_text: str = Field("", description="Max 38 characters of on-screen hook text for the first frame.")
+    opening_visual_query: str = Field("", description="The first stock-video query, matched to the first spoken line.")
+    visual_beat_queries: List[Dict[str, str]] = Field(default_factory=list, description="Ordered beat/query pairs for hook, receipt/reveal, decision, and question visuals.")
     hook_type: str = Field("", description="The Shorts hook pattern used, such as unfair accusation, crossed boundary, cost, betrayal, or villain framing.")
     first_2_seconds: str = Field("", description="The exact opening phrase that should be compelling within the first two seconds.")
     source_summary: str = Field(..., description="One or two sentences summarizing the source conflict.")
