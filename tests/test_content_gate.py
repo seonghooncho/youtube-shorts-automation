@@ -122,6 +122,28 @@ def test_narration_fields_derive_from_script():
     assert normalized["caption_chunks"][-1].endswith("?")
 
 
+def test_narration_normalization_repairs_bad_generated_caption_chunks():
+    item = {
+        "script": [
+            "My dad gave my number to every single bank and neighbor he knows.",
+            "Now my phone never stops buzzing with his calls and other people’s problems.",
+            "Am I wrong to finally walk away from my own dad?",
+        ],
+        "caption_chunks": [
+            "My dad handed my phone number to every single bank and neighbor",
+            "Everyone kept calling about his problems",
+            "Should I stop helping him?",
+        ],
+    }
+
+    normalized = normalize_narration_fields(item)
+
+    assert normalized["caption_chunks_repaired"] is True
+    assert all(len(chunk) <= 42 for chunk in normalized["caption_chunks"])
+    assert caption_chunks_align_with_tts_text(normalized)[0] is True
+    assert normalized["caption_chunks"][-1].endswith("?")
+
+
 def test_reddit_item_without_source_context_fails_in_production(monkeypatch):
     monkeypatch.setenv("APP_ENV", "production")
     monkeypatch.delenv("ALLOW_MISSING_SOURCE_CONTEXT", raising=False)
@@ -206,6 +228,8 @@ def test_caption_chunks_must_be_near_contiguous(monkeypatch):
 def test_caption_quality_uses_caption_specific_rules():
     assert caption_quality_reason("His car sat there for six hours", is_first=True) == ""
     assert caption_quality_reason("The door camera showed his car", is_first=True) == ""
+    assert caption_quality_reason("My dad gave my number to every bank", is_first=True) == ""
+    assert caption_quality_reason("landlord walking right into my apartment", is_first=True) == ""
     assert caption_quality_reason("Things got worse", is_first=True) == "generic_filler"
     assert caption_quality_reason("The boundary was simple", is_first=True) == "generic_filler"
 
@@ -244,3 +268,24 @@ def test_opening_visual_query_must_match_hook():
 
     assert opening_visual_query_relevance_reason(relevant) == ""
     assert "opening_visual_query_mismatch" in evaluate_content_gate(mismatched)["hard_errors"]
+
+
+def test_childcare_opening_visual_query_is_not_generic():
+    lines = [
+        "He left me with four kids while I handled daycare and every bill.",
+        "Would you stay with someone like this?",
+    ]
+    result = evaluate_content_gate(
+        _safe_item(
+            script=lines,
+            voiceover_lines=lines,
+            tts_text=" ".join(lines),
+            caption_chunks=["He left me with four kids", "Would you stay with someone like this?"],
+            public_title="He Left Me With Four Kids",
+            title="He Left Me With Four Kids #shorts #story",
+            first_frame_text="HE LEFT ME WITH FOUR KIDS",
+            opening_visual_query="four kids home childcare",
+        )
+    )
+
+    assert "generic_opening_visual_query" not in result["hard_errors"]

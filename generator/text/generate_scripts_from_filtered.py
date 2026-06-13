@@ -6,7 +6,9 @@ import re
 from pathlib import Path
 from typing import Any, Dict
 from generator.text.content_gate import ensure_content_gate, normalize_narration_fields
+from generator.text.failure_policy import FailureAction, classify_failure
 from generator.text.generate_script import generate_script, ReturnScript
+from generator.text.metadata_repair import repair_metadata
 from generator.text.script_fingerprint import (
     STYLE_VARIANTS,
     apply_script_fingerprint,
@@ -120,6 +122,8 @@ def call_gpt_generate_script(title, content, post=None, regenerate_reason=None):
         "- Fill `payoff_line` with the final conflict statement before the viewer question.",
         "- Fill `viewer_question` with the exact final comment-bait question. It must be a real question and should not be generic if the source supports a sharper one.",
         "- Fill `marketability_score` from 1 to 5. Use 4 or 5 only when the story has a concrete unfair action, clear stakes, and a debatable final decision.",
+        "- Fill predicted performance scores honestly on a 1-10 scale: retention and clarity must be 8 or higher, comment score must be 7 or higher, and `predicted_ai_smell_score` is reversed where 1 means fully human/native and 10 means very AI/template. Accepted scripts must keep `predicted_ai_smell_score` at 3 or lower.",
+        "- Fill `critic_scores.ai_smell_score` using the same reversed AI-smell scale: 1 is best, 10 is worst. Keep it at 3 or lower for a script you believe should publish.",
         "- Fill `retention_risk` with the main reason viewers might swipe away and how your rewrite prevents it.",
         "- Fill `cut_plan` with 4 to 6 short visual cut intentions. Use concrete settings, hands, phones, bills, hallway, kitchen, office, vet, car, or message shots.",
         "- Fill `bg_strategy` as `story`, `asmr`, or `hybrid`. Use `hybrid` for most stories, `story` when concrete visual scenes matter, and `asmr` only when the source is mostly emotional or abstract.",
@@ -213,6 +217,10 @@ def _script_target_window() -> tuple[int, int]:
     return target_min, max(target_min, min(target_max, MAX_SCRIPT_CHARS))
 
 
+def _max_llm_drafts_per_source() -> int:
+    return max(1, _int_env("SCRIPT_MAX_LLM_DRAFTS_PER_SOURCE", 2))
+
+
 def validate_and_parse_metadata(result: ReturnScript, idx, post) -> Dict[str, Any]:
     """
     ReturnScript(객체) → dict로 변환하고, 기존 검증 로직(키/타입/길이)을 유지.
@@ -258,6 +266,11 @@ def validate_and_parse_metadata(result: ReturnScript, idx, post) -> Dict[str, An
             raise ValueError("❌ visual_keywords는 문자열 리스트여야 함")
         if not isinstance(metadata["first_frame_text"], str) or not metadata["first_frame_text"].strip():
             raise ValueError("❌ first_frame_text는 문자열이어야 함")
+        metadata["first_frame_text"] = _clean_first_frame_text(
+            metadata.get("first_frame_text")
+            or metadata.get("first_2_seconds")
+            or metadata.get("title")
+        )
         if not isinstance(metadata["opening_visual_query"], str) or not metadata["opening_visual_query"].strip():
             raise ValueError("❌ opening_visual_query는 문자열이어야 함")
         if not isinstance(metadata["visual_beat_queries"], list) or not all(isinstance(beat, dict) for beat in metadata["visual_beat_queries"]):
@@ -268,6 +281,7 @@ def validate_and_parse_metadata(result: ReturnScript, idx, post) -> Dict[str, An
             raise ValueError("❌ story_beats는 문자열 리스트여야 함")
         if not isinstance(metadata["viewer_question"], str) or not metadata["viewer_question"].strip():
             raise ValueError("❌ viewer_question은 문자열이어야 함")
+        metadata["first_2_seconds"] = _clean_short_hook_text(metadata.get("first_2_seconds"), max_chars=95)
         if not isinstance(metadata["retention_angle"], str) or not metadata["retention_angle"].strip():
             raise ValueError("❌ retention_angle은 문자열이어야 함")
         if not isinstance(metadata["adaptation_strategy"], str) or not metadata["adaptation_strategy"].strip():
@@ -284,7 +298,15 @@ def validate_and_parse_metadata(result: ReturnScript, idx, post) -> Dict[str, An
         metadata.setdefault("critic_scores", {})
         metadata.setdefault("critic_problems", [])
         metadata.setdefault("critic_rewrite_instructions", [])
+        metadata.setdefault("critic_attempt_count", 0)
         normalize_narration_fields(metadata)
+        if post and post.get("content"):
+            metadata, repair_actions = repair_metadata(metadata, post, stage="pre_gate")
+            if repair_actions:
+                print(
+                    f"🛠️ metadata repair applied (post {idx}): "
+                    f"{', '.join(action.get('code', 'unknown') for action in repair_actions)}"
+                )
 
         if post and post.get("content"):
             marketability_reject = source_reject_reason_for_marketability(post)
@@ -365,8 +387,10 @@ def _regenerate_reason_from_error(message: str) -> str:
         return (
             f"{current_phrase}Return the full JSON again, but rewrite the `script` to "
             f"{target_min_chars}-{target_max_chars} characters total, hard max {MAX_SCRIPT_CHARS}. "
-            "Use 7 to 10 complete voiceover lines. Keep the same source conflict, hook, turning point, payoff, "
-            "and final question. Remove repeated backstory, extra dialogue, and neutral reflection. "
+            "Aim for the middle of that range, not the lower edge. Use 8 to 10 complete voiceover lines. "
+            "Add one or two concrete, source-grounded beats before the final question when the draft is short. "
+            "Keep the same source conflict, hook, turning point, payoff, and final question. "
+            "Cut only repeated backstory, extra dialogue, and neutral reflection. "
             "The first line must stay under 120 characters and no line may exceed 170 characters."
         )
     if "품질검증 실패" in message:
@@ -716,12 +740,24 @@ def _clean_sentence(text: str, *, max_chars: int) -> str:
 def _clean_first_frame_text(text: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9 $'&-]+", "", str(text or "")).upper()
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    cleaned = re.sub(r"\bJUST\s+", "", cleaned)
+    cleaned = re.sub(r"\bRIGHT\s+INTO\b", "INTO", cleaned)
     if len(cleaned) <= 38:
         return cleaned
     truncated = cleaned[:38].rstrip()
     if " " in truncated:
         truncated = truncated.rsplit(" ", 1)[0]
-    return truncated.strip()
+    return _strip_dangling_tail(truncated).strip()
+
+
+def _clean_short_hook_text(text: str, *, max_chars: int) -> str:
+    cleaned = re.sub(r"\s+", " ", str(text or "")).strip(" -.,;:")
+    if len(cleaned) <= max_chars:
+        return cleaned
+    truncated = cleaned[:max_chars].rstrip()
+    if " " in truncated:
+        truncated = truncated.rsplit(" ", 1)[0]
+    return _strip_dangling_tail(truncated).strip(" -.,;:")
 
 
 def _strip_dangling_tail(text: str) -> str:
@@ -885,10 +921,10 @@ def generate_scripts_from_filtered():
         origin_id = post.get("id", None)
         regenerate_reason = None
         try_count = 0
-        max_retries = 2  # 최대 2회까지 재생성 (기존 유지)
+        max_retries = _max_llm_drafts_per_source() - 1
         preflight_error = _source_preflight_error(post)
         if preflight_error:
-            failed_items.append({"idx": idx, "id": origin_id, "title": title, "error": preflight_error})
+            failed_items.append({"idx": idx, "id": origin_id, "title": title, "error": preflight_error, "stage": "source_preflight"})
             print(f"🚫 원문 품질 미달로 스킵 (post {idx}): {preflight_error}")
             continue
         if llm_unavailable_reason and _local_fallback_enabled():
@@ -897,7 +933,7 @@ def generate_scripts_from_filtered():
                 _accept_metadata(metadata, metadata_list, previous_history)
                 print(f"🧩 로컬 fallback 대본 생성 완료 (post {idx}): {origin_id}")
             except Exception as fallback_error:
-                failed_items.append({"idx": idx, "id": origin_id, "title": title, "error": str(fallback_error)})
+                failed_items.append({"idx": idx, "id": origin_id, "title": title, "error": str(fallback_error), "stage": "script_generation"})
                 print(f"🚫 로컬 fallback 실패 (post {idx}): {fallback_error}")
             continue
 
@@ -931,11 +967,16 @@ def generate_scripts_from_filtered():
                 if origin_id is not None:
                     metadata["id"] = origin_id
                     metadata["uploaded"] = False
+                metadata["generation_attempt_count"] = try_count + 1
+                metadata["llm_draft_count"] = try_count + 1
+                metadata["failure_action"] = ""
+                metadata["final_failure_codes"] = []
 
                 _accept_metadata(metadata, metadata_list, previous_history)
                 break  # 성공 시 루프 종료
 
             except Exception as e:
+                char_count = None
                 if isinstance(result, ReturnScript):
                     char_count = len(script_text(result.model_dump()))
                     print(f"⚠️ GPT 응답 검증 실패 (post {idx}, 시도 {try_count+1}, script_chars={char_count}): {e}")
@@ -948,14 +989,40 @@ def generate_scripts_from_filtered():
                         print(f"🧩 OpenAI quota 오류로 로컬 fallback 대본 생성 완료 (post {idx}): {origin_id}")
                         break
                     except Exception as fallback_error:
-                        failed_items.append({"idx": idx, "id": origin_id, "title": title, "error": str(fallback_error)})
+                        failed_items.append({"idx": idx, "id": origin_id, "title": title, "error": str(fallback_error), "stage": "script_generation"})
                         print(f"🚫 로컬 fallback 실패 (post {idx}): {fallback_error}")
                         break
+                failure_action = classify_failure(msg, script_chars=char_count, repeated=try_count >= max_retries)
+                if failure_action in {FailureAction.REPAIR_ONLY, FailureAction.SKIP_SOURCE}:
+                    failed_items.append(
+                        {
+                            "idx": idx,
+                            "id": origin_id,
+                            "title": title,
+                            "error": msg,
+                            "stage": "script_generation",
+                            "generation_attempt_count": try_count + 1,
+                            "failure_action": failure_action.value,
+                        }
+                    )
+                    print(f"🚫 repair-first 스킵 (post {idx}): action={failure_action.value} error={msg}")
+                    break
+
                 regenerate_reason = _regenerate_reason_from_error(msg)
 
                 try_count += 1
                 if try_count > max_retries:
-                    failed_items.append({"idx": idx, "id": origin_id, "title": title, "error": msg})
+                    failed_items.append(
+                        {
+                            "idx": idx,
+                            "id": origin_id,
+                            "title": title,
+                            "error": msg,
+                            "stage": "script_generation",
+                            "generation_attempt_count": try_count,
+                            "failure_action": FailureAction.SKIP_SOURCE.value,
+                        }
+                    )
                     print(f"🚫 최종 실패 (post {idx}): {msg}")
 
     with open(FINAL_METADATA_FILE, "w", encoding="utf-8") as f:
@@ -966,7 +1033,53 @@ def generate_scripts_from_filtered():
             json.dump(failed_items, f, ensure_ascii=False, indent=2)
         print(f"⚠️ 실패한 포스트 {len(failed_items)}개 → {FAILED_POSTS_FILE}에 저장됨")
 
+    summary = _generation_summary(posts, metadata_list, failed_items)
+    summary_path = FINAL_METADATA_FILE.with_name("generation_summary.json")
+    with open(summary_path, "w", encoding="utf-8") as f:
+        json.dump(summary, f, ensure_ascii=False, indent=2)
+    print(f"🧾 생성 요약 저장 완료 → {summary_path}")
     print(f"📦 최종 메타데이터 저장 완료 → {FINAL_METADATA_FILE}")
+
+
+def _generation_summary(posts: list[dict], accepted: list[dict], failed: list[dict]) -> dict:
+    failure_codes = _failure_code_counts([str(item.get("error") or "") for item in failed])
+    return {
+        "sources_considered": len(posts),
+        "sources_skipped_preflight": sum(1 for item in failed if item.get("stage") == "source_preflight"),
+        "llm_drafts": sum(int(item.get("llm_draft_count") or item.get("generation_attempt_count") or 0) for item in accepted)
+        + sum(int(item.get("generation_attempt_count") or 0) for item in failed),
+        "llm_rewrites": sum(max(0, int(item.get("generation_attempt_count") or 0) - 1) for item in accepted)
+        + sum(max(0, int(item.get("generation_attempt_count") or 0) - 1) for item in failed),
+        "critic_calls": sum(int(item.get("critic_attempt_count") or 0) for item in accepted),
+        "repair_successes": sum(1 for item in accepted if item.get("repair_actions")),
+        "final_accepted": len(accepted),
+        "final_rejected": len(failed),
+        "top_failure_codes": failure_codes[:10],
+    }
+
+
+def _failure_code_counts(errors: list[str]) -> list[dict]:
+    counts: dict[str, int] = {}
+    known = [
+        "title_quality",
+        "generic_opening_visual_query",
+        "opening_visual_query_mismatch",
+        "first_caption_hook",
+        "caption_chunks_not_in_tts_text",
+        "script가 너무 짧음",
+        "script_too_short",
+        "weak_market_hook",
+        "weak_first_2_seconds",
+        "question_not_separate",
+        "unsafe_visual_keywords",
+        "missing_concrete_receipt_detail",
+    ]
+    for error in errors:
+        for code in known:
+            if code in error:
+                normalized = "script_too_short" if code == "script가 너무 짧음" else code
+                counts[normalized] = counts.get(normalized, 0) + 1
+    return [{"code": code, "count": count} for code, count in sorted(counts.items(), key=lambda item: item[1], reverse=True)]
 
 
 # 게시물 id로 재생성하는 함수(tts생성시 사용) — 이름/기능 변경 금지

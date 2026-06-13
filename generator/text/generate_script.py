@@ -1,7 +1,7 @@
 import json
 import os
 import re
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, List, Literal, Optional
 from dotenv import load_dotenv, find_dotenv
 import openai
 from pydantic import BaseModel, Field, ValidationError
@@ -37,7 +37,32 @@ def _token_budgets() -> list[int]:
             return budgets
     return [3200, 4200, 5200]
 
+
+def _text_verbosity(model: str | None = None) -> str:
+    raw = os.getenv("SCRIPT_TEXT_VERBOSITY", "").strip().lower()
+    if raw in {"low", "medium", "high"}:
+        return raw
+    selected_model = (model or _default_model()).lower()
+    if selected_model.startswith("gpt-4.1"):
+        return "medium"
+    return "low"
+
 # --- Schema ---
+class VisualBeatQuery(BaseModel):
+    beat: str = ""
+    query: str = ""
+
+
+class ScriptCriticScores(BaseModel):
+    ai_smell_score: int = Field(3, ge=1, le=10)
+    native_naturalness_score: int = Field(8, ge=1, le=10)
+    retention_score: int = Field(8, ge=1, le=10)
+    specificity_score: int = Field(8, ge=1, le=10)
+    hook_score: int = Field(8, ge=1, le=10)
+    payoff_score: int = Field(8, ge=1, le=10)
+    comment_potential_score: int = Field(7, ge=1, le=10)
+
+
 class ReturnScript(BaseModel):
     title: str
     description: str
@@ -46,7 +71,7 @@ class ReturnScript(BaseModel):
     visual_keywords: List[str]
     first_frame_text: str = Field("", description="Max 38 characters of on-screen hook text for the first frame.")
     opening_visual_query: str = Field("", description="The first stock-video query, matched to the first spoken line.")
-    visual_beat_queries: List[Dict[str, str]] = Field(default_factory=list, description="Ordered beat/query pairs for hook, receipt/reveal, decision, and question visuals.")
+    visual_beat_queries: List[VisualBeatQuery] = Field(default_factory=list, description="Ordered beat/query pairs for hook, receipt/reveal, decision, and question visuals.")
     hook_type: str = Field("", description="The Shorts hook pattern used, such as unfair accusation, crossed boundary, cost, betrayal, or villain framing.")
     first_2_seconds: str = Field("", description="The exact opening phrase that should be compelling within the first two seconds.")
     source_summary: str = Field(..., description="One or two sentences summarizing the source conflict.")
@@ -71,7 +96,7 @@ class ReturnScript(BaseModel):
     predicted_clarity_score: int = Field(8, ge=1, le=10)
     predicted_ai_smell_score: int = Field(3, ge=1, le=10)
     skip_reason: str = ""
-    critic_scores: Dict[str, Any] = Field(default_factory=dict)
+    critic_scores: ScriptCriticScores = Field(default_factory=ScriptCriticScores)
     critic_problems: List[str] = Field(default_factory=list)
     critic_rewrite_instructions: List[str] = Field(default_factory=list)
     script: List[str]
@@ -128,7 +153,7 @@ def _try_structured(client: openai.OpenAI, prompt: str, max_output_tokens: int) 
         ],
         text_format=ReturnScript,
         max_output_tokens=max_output_tokens,
-        text={"verbosity": "low"},
+        text={"verbosity": _text_verbosity()},
     )
     parsed: ReturnScript = resp.output_parsed
     if parsed is None:
@@ -152,7 +177,7 @@ def _fallback_json_mode(client: openai.OpenAI, prompt: str, max_output_tokens: i
               )},
             {"role": "user", "content": prompt},
         ],
-        text={"format": {"type": "json_object"}, "verbosity": "low"},
+        text={"format": {"type": "json_object"}, "verbosity": _text_verbosity()},
         max_output_tokens=max_output_tokens,
     )
     raw = (resp.output_text or "").strip()
@@ -166,6 +191,8 @@ def _fallback_json_mode(client: openai.OpenAI, prompt: str, max_output_tokens: i
 
 
 def _critic_enabled() -> bool:
+    if os.getenv("SCRIPT_CRITIC_STAGE", "after_local_gate").strip().lower() == "after_local_gate":
+        return False
     return os.getenv("SCRIPT_CRITIC_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
 
 
@@ -224,15 +251,16 @@ def _critic_prompt(source_prompt: str, draft: ReturnScript) -> str:
 
 def critique_script(prompt: str, draft: ReturnScript) -> NativeViewerCritic:
     client = _get_client()
+    model = os.getenv("SCRIPT_CRITIC_MODEL") or _default_model()
     resp = client.responses.parse(
-        model=os.getenv("SCRIPT_CRITIC_MODEL") or _default_model(),
+        model=model,
         input=[
             {"role": "system", "content": "You are a ruthless native English Shorts viewer critic."},
             {"role": "user", "content": _critic_prompt(prompt, draft)},
         ],
         text_format=NativeViewerCritic,
         max_output_tokens=int(os.getenv("SCRIPT_CRITIC_MAX_OUTPUT_TOKENS", "1400")),
-        text={"verbosity": "low"},
+        text={"verbosity": _text_verbosity(model)},
     )
     parsed: NativeViewerCritic = resp.output_parsed
     if parsed is None:

@@ -92,6 +92,10 @@ def test_common_conflict_titles_pass_quality_validation():
     assert title_quality_reason("My Coworker Changed His Lunch Order") == ""
     assert title_quality_reason("They Drained The Office Coffee Fund") == ""
     assert title_quality_reason("She Shared My Streaming Password") == ""
+    assert title_quality_reason("My Dad Gave My Number To Every Bank") == ""
+    assert title_quality_reason("My Daughter Dented My Van") == ""
+    assert title_quality_reason("My Landlord Walked Into My Apartment") == ""
+    assert title_quality_reason("Her Cat Bit Mine Twice, Then Refused To Pay") == ""
 
 
 def test_sanitize_upload_metadata_blocks_internal_values():

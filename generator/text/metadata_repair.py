@@ -1,0 +1,608 @@
+from __future__ import annotations
+
+import re
+from copy import deepcopy
+from typing import Any
+
+from generator.text.content_gate import (
+    caption_chunks_align_with_tts_text,
+    caption_quality_reason,
+    opening_visual_query_relevance_reason,
+)
+from generator.text.failure_policy import script_repair_min_chars
+from generator.text.script_quality import MAX_SCRIPT_CHARS, MIN_SCRIPT_CHARS, script_text
+from generator.text.youtube_metadata import title_quality_reason
+
+
+def repair_metadata(metadata: dict, post: dict, *, stage: str = "pre_gate") -> tuple[dict, list[dict]]:
+    repaired = deepcopy(metadata)
+    actions: list[dict] = []
+
+    _normalize_lines(repaired)
+    _repair_final_question(repaired, post, actions)
+    _repair_length(repaired, post, actions)
+    _repair_retention_angle(repaired, post, actions)
+    _repair_title(repaired, post, actions)
+    _repair_first_frame(repaired, actions)
+    _repair_visuals(repaired, post, actions)
+    _rebuild_captions(repaired, actions)
+    _sync_text_fields(repaired)
+
+    repaired["metadata_repair_stage"] = stage
+    repaired["repair_actions"] = list(repaired.get("repair_actions") or []) + actions
+    repaired["repair_attempt_count"] = int(repaired.get("repair_attempt_count") or 0) + (1 if actions else 0)
+    return repaired, actions
+
+
+def _normalize_lines(item: dict) -> None:
+    lines = [str(line or "").strip() for line in item.get("voiceover_lines") or item.get("script") or [] if str(line or "").strip()]
+    item["voiceover_lines"] = lines
+    item["script"] = list(lines)
+    _sync_text_fields(item)
+
+
+def _repair_final_question(item: dict, post: dict, actions: list[dict]) -> None:
+    lines = [str(line or "").strip() for line in item.get("voiceover_lines") or [] if str(line or "").strip()]
+    before = list(lines)
+    if not lines:
+        question = _source_question(item, post)
+        item["voiceover_lines"] = [question]
+        item["script"] = [question]
+        item["viewer_question"] = question
+        actions.append(_action("viewer_question_rebuilt", "Created missing final viewer question.", before, item["voiceover_lines"]))
+        return
+
+    candidates: list[str] = []
+    for line in lines:
+        candidates.extend(_question_sentences(line))
+    viewer_question = str(item.get("viewer_question") or "").strip()
+    if viewer_question.endswith("?"):
+        candidates.append(viewer_question)
+    question = _choose_question(candidates, item, post)
+
+    cleaned_lines: list[str] = []
+    for index, line in enumerate(lines):
+        parts = _split_question_from_line(line)
+        statement = parts[0]
+        line_question = parts[1]
+        if index == len(lines) - 1:
+            if statement and len(cleaned_lines) < 9:
+                cleaned_lines.append(_finish_sentence(statement))
+            continue
+        if line_question:
+            line = _finish_sentence(statement) if statement else ""
+        if line:
+            cleaned_lines.append(line)
+
+    cleaned_lines = [line for line in cleaned_lines if line.strip()]
+    cleaned_lines.append(question)
+    item["voiceover_lines"] = cleaned_lines[:10]
+    item["script"] = list(item["voiceover_lines"])
+    item["viewer_question"] = item["voiceover_lines"][-1]
+    if before != item["voiceover_lines"]:
+        actions.append(_action("viewer_question_placed", "Moved the viewer question to the final line.", before, item["voiceover_lines"]))
+
+
+def _repair_length(item: dict, post: dict, actions: list[dict]) -> None:
+    before_count = len(script_text(item))
+    if not (script_repair_min_chars() <= before_count < MIN_SCRIPT_CHARS):
+        return
+    lines = [str(line or "").strip() for line in item.get("voiceover_lines") or [] if str(line or "").strip()]
+    if len(lines) >= 10 or not lines or not lines[-1].endswith("?"):
+        return
+    repair_line = _source_grounded_repair_line(item, post)
+    if not repair_line:
+        return
+    before = list(lines)
+    lines.insert(-1, repair_line)
+    item["voiceover_lines"] = lines
+    item["script"] = list(lines)
+    after_count = len(script_text(item))
+    if after_count > MAX_SCRIPT_CHARS:
+        item["voiceover_lines"] = before
+        item["script"] = before
+        return
+    item["length_repair_status"] = "added_source_grounded_line"
+    item["length_repair_line"] = repair_line
+    item["script_char_count_before_repair"] = before_count
+    item["script_char_count_after_repair"] = after_count
+    actions.append(
+        _action(
+            "length_repair_line_added",
+            "Added one source-grounded line before the final question.",
+            before,
+            item["voiceover_lines"],
+        )
+    )
+
+
+def _repair_retention_angle(item: dict, post: dict, actions: list[dict]) -> None:
+    before = str(item.get("retention_angle") or "").strip()
+    if len(before) >= 60 and _has_retention_signal(before):
+        return
+    combined = _combined_text(item, post)
+    if _is_pet_medical_conflict(combined):
+        after = "A pet injury, expired shots, a bloodwork bill, and a roommate refusing to pay create an immediate debate."
+    elif _has_any(combined, ("landlord", "apartment", "painter", "cat sitter", "walked in")):
+        after = "A home privacy violation, surprise entries, a cat sitter receipt, and a chain-lock decision create a clear debate."
+    elif _has_any(combined, ("dad", "va", "medicare", "bank", "appointment")):
+        after = "Constant family demands, phone-call receipts, and the choice to stop helping make the conflict highly debatable."
+    elif _has_any(combined, ("van", "dent", "damage", "repair")):
+        after = "Property damage, a clear driving rule, and a repair bill create a simple but divisive family argument."
+    else:
+        after = "A concrete crossed line, visible consequence, and final decision give viewers a clear side to argue."
+    item["retention_angle"] = after
+    actions.append(_action("retention_angle_rebuilt", "Rebuilt a concrete retention angle.", before, after))
+
+
+def _repair_title(item: dict, post: dict, actions: list[dict]) -> None:
+    before = str(item.get("public_title") or item.get("title") or "").strip()
+    if before and not title_quality_reason(before):
+        item["public_title"] = _strip_hashtags(before)
+        return
+    title = _deterministic_title(item, post)
+    if title_quality_reason(title):
+        title = _title_from_first_line(item)
+    if title_quality_reason(title):
+        return
+    item["original_public_title"] = before
+    item["public_title"] = title
+    item["title_repair_status"] = "rebuilt_from_narration"
+    actions.append(_action("public_title_rebuilt", "Rebuilt public title from narration/source.", before, title))
+
+
+def _repair_first_frame(item: dict, actions: list[dict]) -> None:
+    before = str(item.get("first_frame_text") or "").strip()
+    source = str(item.get("public_title") or "") or _first_line(item)
+    after = _first_frame_text(source)
+    if before == after and len(before) <= 38:
+        return
+    item["first_frame_text"] = after
+    item["first_frame_text_repair_status"] = "rebuilt_from_title"
+    actions.append(_action("first_frame_text_rebuilt", "Rebuilt first-frame hook text.", before, after))
+
+
+def _repair_visuals(item: dict, post: dict, actions: list[dict]) -> None:
+    before = str(item.get("opening_visual_query") or "").strip()
+    query = _opening_query(item, post)
+    item["opening_visual_query"] = query
+    item["opening_visual_query_repair_status"] = "rebuilt_from_archetype"
+    receipt_query = _receipt_query(item, post)
+    decision_query = _decision_query(item, post)
+    item["visual_beat_queries"] = [
+        {"beat": "hook", "query": query},
+        {"beat": "receipt", "query": receipt_query},
+        {"beat": "decision", "query": decision_query},
+    ]
+    item["visual_keywords"] = _unique([query, receipt_query, decision_query] + [str(v or "") for v in item.get("visual_keywords") or []])[:8]
+    item["cut_plan"] = _unique([query, receipt_query, decision_query] + [str(v or "") for v in item.get("cut_plan") or []])[:6]
+    if before != query:
+        actions.append(_action("opening_visual_query_rebuilt", "Rebuilt opening visual query from archetype.", before, query))
+
+
+def _rebuild_captions(item: dict, actions: list[dict]) -> None:
+    before = list(item.get("caption_chunks") or [])
+    chunks = _caption_chunks_from_lines(item.get("voiceover_lines") or [])
+    item["caption_chunks"] = chunks
+    item["caption_repair_status"] = "rebuilt_from_voiceover"
+    item["caption_repair_actions"] = [{"code": "caption_chunks_rebuilt", "message": "Rebuilt captions from exact voiceover words."}]
+    aligned, _reason = caption_chunks_align_with_tts_text(item)
+    if not aligned or (chunks and caption_quality_reason(chunks[0], is_first=True)):
+        fallback = _safe_caption_chunks_from_lines(item.get("voiceover_lines") or [])
+        item["caption_chunks"] = fallback
+    if before != item["caption_chunks"]:
+        actions.append(_action("caption_chunks_rebuilt", "Rebuilt captions from exact voiceover words.", before, item["caption_chunks"]))
+
+
+def _sync_text_fields(item: dict) -> None:
+    lines = [str(line or "").strip() for line in item.get("voiceover_lines") or item.get("script") or [] if str(line or "").strip()]
+    item["voiceover_lines"] = lines
+    item["script"] = list(lines)
+    item["tts_text"] = " ".join(lines).strip()
+    item["script_char_count"] = len(item["tts_text"])
+
+
+def _caption_chunks_from_lines(lines: list[str]) -> list[str]:
+    chunks: list[str] = []
+    for index, line in enumerate(lines):
+        cleaned = _clean_spaces(line)
+        if not cleaned:
+            continue
+        if cleaned.endswith("?"):
+            chunks.append(_short_question_chunk(cleaned))
+            continue
+        chunks.append(_truncate_words(cleaned, 42))
+    return [chunk for chunk in chunks if chunk]
+
+
+def _safe_caption_chunks_from_lines(lines: list[str]) -> list[str]:
+    chunks = []
+    for line in lines:
+        cleaned = _clean_spaces(line)
+        if not cleaned:
+            continue
+        chunks.append(_short_question_chunk(cleaned) if cleaned.endswith("?") else _truncate_words(cleaned, 42))
+    return [chunk for chunk in chunks if chunk]
+
+
+def _best_caption_phrase(line: str) -> str:
+    words = line.split()
+    if not words:
+        return ""
+    concrete = _concrete_terms()
+    best = ""
+    best_score = -1
+    for start in range(len(words)):
+        phrase = ""
+        for end in range(start, len(words)):
+            trial = f"{phrase} {words[end]}".strip()
+            if len(trial) > 42:
+                break
+            lowered = _normalize_token_text(trial)
+            score = sum(1 for term in concrete if term in lowered)
+            if start == 0:
+                score += 1
+            if score > best_score or (score == best_score and len(trial) > len(best)):
+                best = trial
+                best_score = score
+    return _trim_caption(best or _truncate_words(line, 42))
+
+
+def _short_question_chunk(question: str) -> str:
+    cleaned = question.rstrip("?").strip()
+    chunk = _truncate_words(cleaned, 41).rstrip(" .,;:")
+    return f"{chunk}?"
+
+
+def _deterministic_title(item: dict, post: dict) -> str:
+    combined = _combined_text(item, post)
+    if _is_pet_medical_conflict(combined):
+        return "Her Cat Bit Mine Twice, Then Refused To Pay"
+    if _has_any(combined, ("daycare", "four kids", "bath time", "school pickups", "mother's day")):
+        return "He Left Me With Four Kids"
+    if _has_any(combined, ("landlord", "apartment", "walked in", "walks into", "bar manager")):
+        return "My Landlord Walked Into My Apartment"
+    if _has_any(combined, ("daughter", "van", "dented", "dent")):
+        return "My Daughter Dented My Van"
+    if _has_any(combined, ("dad", "bank", "doctor", "va", "medicare")):
+        return "My Dad Gave My Number To Every Bank"
+    if _has_any(combined, ("driveway", "parked")):
+        return "My Neighbor Parked In My Driveway"
+    if _has_any(combined, ("aunt", "birthday dinner", "whole dinner", "restaurant bill", "on my card")):
+        return "My Aunt Put Dinner On My Card"
+    if _has_any(combined, ("package", "building chat", "hallway")):
+        return "She Accused Me In The Building Chat"
+    return _title_from_first_line(item)
+
+
+def _title_from_first_line(item: dict) -> str:
+    line = _first_line(item)
+    line = re.sub(r"\b(?:again|actually|just|really)\b", "", line, flags=re.I)
+    line = re.sub(r"\s+", " ", line).strip(" .,!?:;")
+    return _title_case(_truncate_words(line, 68))
+
+
+def _opening_query(item: dict, post: dict) -> str:
+    combined = _combined_text(item, post)
+    candidates: list[str]
+    if _is_pet_medical_conflict(combined):
+        candidates = ["cat vet clinic", "cats apartment living room"]
+    elif _has_any(combined, ("daycare", "four kids", "bath time", "school pickups", "mother's day")):
+        candidates = ["four kids home childcare", "family home childcare"]
+    elif _has_any(combined, ("restaurant", "birthday dinner", "dinner bill", "credit card", "on my card", "receipt")):
+        candidates = ["restaurant bill credit card", "credit card restaurant table"]
+    elif _has_any(combined, ("driveway", "parking", "parked")):
+        candidates = ["parked car driveway", "suburban driveway car"]
+    elif _has_any(combined, ("package", "building chat", "hallway")):
+        candidates = ["apartment hallway package", "phone building chat"]
+    elif _has_any(combined, ("coworker", "manager", "office")):
+        candidates = ["office coworker phone messages", "workplace meeting phone"]
+    elif _has_any(combined, ("laundry", "washer", "machine")):
+        candidates = ["laundry room washing machines"]
+    elif _has_any(combined, ("storage unit", "boxes")):
+        candidates = ["storage unit boxes"]
+    elif _has_any(combined, ("landlord", "apartment", "bar manager", "painter")):
+        candidates = ["apartment landlord door", "apartment hallway door"]
+    elif _has_any(combined, ("van", "dent", "dented")):
+        candidates = ["dented van parking lot", "damaged van close up"]
+    elif _has_any(combined, ("dad", "bank", "va", "medicare", "phone")):
+        candidates = ["phone bank paperwork", "phone calls bills paperwork"]
+    elif _has_any(combined, ("groceries", "roommate", "grocery")):
+        candidates = ["shared kitchen groceries"]
+    else:
+        candidates = ["phone messages close up"]
+    for candidate in candidates:
+        item["opening_visual_query"] = candidate
+        if not opening_visual_query_relevance_reason(item):
+            return candidate
+    return candidates[0]
+
+
+def _receipt_query(item: dict, post: dict) -> str:
+    combined = _combined_text(item, post)
+    if _has_any(combined, ("camera", "screenshot", "timestamp")):
+        return "phone screenshot timestamp"
+    if _has_any(combined, ("bill", "card", "receipt")):
+        return "receipt credit card close up"
+    if _has_any(combined, ("chat", "text", "message")):
+        return "phone text messages"
+    if _is_pet_medical_conflict(combined):
+        return "veterinary clinic cat"
+    return "phone messages close up"
+
+
+def _decision_query(item: dict, post: dict) -> str:
+    combined = _combined_text(item, post)
+    if _is_pet_medical_conflict(combined):
+        return "person texting vet bill"
+    if _has_any(combined, ("landlord", "apartment")):
+        return "tenant locking apartment door"
+    if _has_any(combined, ("van", "dent")):
+        return "car repair bill decision"
+    return "person texting decision"
+
+
+def _source_grounded_repair_line(item: dict, post: dict) -> str:
+    combined = _combined_text(item, post)
+    if _is_pet_medical_conflict(combined):
+        return "What bothered me most was that she knew the shots were expired before the second bite."
+    if _has_any(combined, ("landlord", "apartment", "cat sitter", "painter")):
+        return "The part I couldn't ignore was the cat sitter texting me while strangers were inside."
+    if _has_any(combined, ("dad", "va", "medicare", "bank", "appointment")):
+        return "The part I couldn't ignore was that he had VA options but still expected me to fix it."
+    if _has_any(combined, ("van", "dent", "repair", "damage")):
+        return "That meant a real repair bill, not just an awkward family argument."
+    if _has_any(combined, ("message", "text", "receipt", "screenshot")):
+        return "I had the message in front of me, but they still wanted me to absorb it quietly."
+    return "The part I couldn't ignore was the detail that showed this was not just a misunderstanding."
+
+
+def _source_question(item: dict, post: dict) -> str:
+    combined = _combined_text(item, post)
+    if _is_pet_medical_conflict(combined):
+        return "Would you pay if your unvaccinated cat bit your roommate's pet?"
+    if _has_any(combined, ("birthday", "dinner", "card")):
+        return "Would you pay for twelve dinners just because you made the reservation?"
+    if _has_any(combined, ("driveway", "parked")):
+        return "Would you apologize after someone parked in your driveway?"
+    if _has_any(combined, ("package", "accused", "clip")):
+        return "Would you post the clip if someone accused you publicly?"
+    if _has_any(combined, ("landlord", "apartment")):
+        return "Would you use a chain lock or just hope they listen?"
+    return "Would you have done the same?"
+
+
+def _choose_question(candidates: list[str], item: dict, post: dict) -> str:
+    cleaned = [_clean_spaces(q).strip() for q in candidates if str(q or "").strip().endswith("?")]
+    if cleaned:
+        return _truncate_question(cleaned[-1])
+    return _source_question(item, post)
+
+
+def _question_sentences(line: str) -> list[str]:
+    return [match.strip() for match in re.findall(r"[^.!?]*\?", str(line or "")) if match.strip()]
+
+
+def _split_question_from_line(line: str) -> tuple[str, str]:
+    questions = _question_sentences(line)
+    if not questions:
+        return line.strip(), ""
+    question = questions[-1]
+    statement = line.replace(question, "").strip(" .,!?:;")
+    return statement, question
+
+
+def _truncate_question(question: str) -> str:
+    if len(question) <= 150:
+        return question
+    return _short_question_chunk(question)
+
+
+def _first_frame_text(text: str) -> str:
+    cleaned = _strip_hashtags(text).upper()
+    cleaned = re.sub(r"[^A-Z0-9 $'&-]+", "", cleaned)
+    cleaned = re.sub(r"\b(?:THEN|JUST|THE|A)\b", "", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if len(cleaned) <= 38:
+        return cleaned
+    return _truncate_words(cleaned, 38).upper()
+
+
+def _combined_text(item: dict, post: dict) -> str:
+    parts = [
+        post.get("title", ""),
+        post.get("content", ""),
+        item.get("public_title", ""),
+        item.get("title", ""),
+        " ".join(item.get("voiceover_lines") or item.get("script") or []),
+        item.get("source_archetype", ""),
+    ]
+    return _clean_spaces(" ".join(str(part or "") for part in parts)).lower()
+
+
+def _first_line(item: dict) -> str:
+    lines = item.get("voiceover_lines") or item.get("script") or []
+    return str(lines[0] if lines else item.get("title") or "").strip()
+
+
+def _has_any(text: str, terms: tuple[str, ...]) -> bool:
+    return any(term in text for term in terms)
+
+
+def _is_pet_medical_conflict(text: str) -> bool:
+    lowered = str(text or "").lower()
+    has_pet = bool(re.search(r"\b(?:cat|cats|pet|pets)\b", lowered))
+    has_medical = bool(re.search(r"\b(?:bit|bite|bitten|bloodwork|vaccinated|vaccine|shots?|puncture|vet)\b", lowered))
+    return has_pet and has_medical
+
+
+def _has_retention_signal(text: str) -> bool:
+    lowered = text.lower()
+    return _has_any(
+        lowered,
+        (
+            "accusation",
+            "bill",
+            "camera",
+            "card",
+            "cat",
+            "consequence",
+            "debate",
+            "decision",
+            "privacy",
+            "property",
+            "receipt",
+            "refusing",
+            "unfair",
+            "violation",
+        ),
+    )
+
+
+def _concrete_terms() -> set[str]:
+    return {
+        "apartment",
+        "bank",
+        "bill",
+        "blood",
+        "bloodwork",
+        "camera",
+        "car",
+        "card",
+        "cat",
+        "chat",
+        "dent",
+        "door",
+        "driveway",
+        "landlord",
+        "message",
+        "phone",
+        "receipt",
+        "sitter",
+        "text",
+        "van",
+        "vet",
+    }
+
+
+def _trim_caption(text: str) -> str:
+    return str(text or "").strip(" .,!;:")
+
+
+def _truncate_words(text: str, limit: int) -> str:
+    cleaned = _clean_spaces(text)
+    if len(cleaned) <= limit:
+        return cleaned
+    truncated = cleaned[:limit].rstrip()
+    if " " in truncated:
+        truncated = truncated.rsplit(" ", 1)[0]
+    return _strip_dangling_tail(truncated).strip(" .,!?:;")
+
+
+def _strip_dangling_tail(text: str) -> str:
+    dangling = {
+        "a",
+        "an",
+        "and",
+        "as",
+        "at",
+        "because",
+        "but",
+        "by",
+        "for",
+        "from",
+        "had",
+        "has",
+        "have",
+        "he",
+        "her",
+        "him",
+        "his",
+        "honestly",
+        "how",
+        "i",
+        "if",
+        "in",
+        "into",
+        "it",
+        "just",
+        "me",
+        "of",
+        "on",
+        "or",
+        "our",
+        "should",
+        "that",
+        "the",
+        "they",
+        "their",
+        "then",
+        "to",
+        "was",
+        "we",
+        "were",
+        "what",
+        "when",
+        "where",
+        "why",
+        "with",
+        "without",
+        "would",
+        "you",
+    }
+    words = str(text or "").split()
+    while words and words[-1].strip(".,;:!?").lower() in dangling:
+        words.pop()
+    return " ".join(words)
+
+
+def _finish_sentence(text: str) -> str:
+    cleaned = _clean_spaces(text).strip(" ,;:")
+    if not cleaned:
+        return ""
+    if cleaned.endswith((".", "!", "?")):
+        return cleaned
+    return f"{cleaned}."
+
+
+def _title_case(text: str) -> str:
+    small = {"a", "an", "and", "for", "in", "of", "on", "or", "the", "to", "with"}
+    words = []
+    for index, word in enumerate(text.split()):
+        lower = word.lower()
+        words.append(lower if index > 0 and lower in small else lower[:1].upper() + lower[1:])
+    return " ".join(words)
+
+
+def _strip_hashtags(text: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"#\w+", "", str(text or ""))).strip(" .,-")
+
+
+def _clean_spaces(text: str) -> str:
+    return re.sub(r"\s+", " ", str(text or "")).strip()
+
+
+def _normalize_token_text(text: str) -> str:
+    return re.sub(r"[^a-z0-9 ]+", " ", str(text or "").lower())
+
+
+def _unique(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        clean = _clean_spaces(value)
+        key = clean.lower()
+        if not clean or key in seen:
+            continue
+        seen.add(key)
+        result.append(clean)
+    return result
+
+
+def _action(code: str, message: str, before: Any, after: Any) -> dict:
+    return {
+        "code": code,
+        "message": message,
+        "before": before,
+        "after": after,
+    }

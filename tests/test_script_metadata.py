@@ -2,7 +2,13 @@ import pytest
 
 from generator.text.generate_script import ReturnScript
 from generator.text.generate_scripts_from_filtered import _source_preflight_error, validate_and_parse_metadata
-from generator.text.script_quality import _first_sentence, _has_hook_stakes, validate_script_quality
+from generator.text.script_quality import (
+    _first_sentence,
+    _has_hook_stakes,
+    _has_incomplete_sentence,
+    _has_marketability_signal,
+    validate_script_quality,
+)
 
 
 def _market_fields(**overrides):
@@ -326,6 +332,24 @@ def test_blocked_and_turned_count_as_hook_stakes():
     assert _has_hook_stakes("my friend put a wedding invoice in my name")
     assert _has_hook_stakes("she told everyone i volunteered to pay it")
     assert _has_hook_stakes("they said i was covering the cost")
+    assert _has_hook_stakes("my landlord walked into my apartment without warning")
+    assert _has_hook_stakes("my daughter dented my van after i said no")
+    assert _has_hook_stakes("my dad calls nonstop then snaps when i cannot drop everything")
+    assert _has_hook_stakes("my dad told me i was selfish for saying no")
+    assert _has_hook_stakes("my dad hands out my phone number to banks")
+    assert _has_hook_stakes("my landlord kept strolling into my apartment")
+    assert _has_hook_stakes("he makes triple my income, but only covers rent")
+
+
+def test_retention_signal_accepts_real_conflict_language():
+    assert _has_marketability_signal("A privacy invasion with a landlord walking in and a debatable lockout decision.")
+    assert _has_marketability_signal("A family entitlement story where an adult child may need to walk away.")
+
+
+def test_legitimate_question_ending_with_that_is_not_dangling():
+    assert not _has_incomplete_sentence("Would you stay with someone like that?")
+    assert not _has_incomplete_sentence("She never really seems awake then.")
+    assert _has_incomplete_sentence("I tried to keep it calm, but it already felt like.")
 
 
 def test_ai_template_phrases_fail_validation():
