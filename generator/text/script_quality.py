@@ -66,6 +66,7 @@ _HOOK_STAKES_TERMS = {
     "opened",
     "paid for",
     "paying",
+    "parked",
     "pressured",
     "promised",
     "punctured",
@@ -84,6 +85,8 @@ _HOOK_STAKES_TERMS = {
     "trashed",
     "turned",
     "used",
+    "whole birthday dinner",
+    "whole bill",
     "without a yes",
     "without asking",
     "without consent",
@@ -92,6 +95,9 @@ _HOOK_STAKES_TERMS = {
     "without telling",
     "without their",
     "wouldn't",
+    "my card",
+    "my driveway",
+    "on my card",
 }
 _ROMANTIC_OR_SEXUAL_TERMS = {
     "boyfriend",

@@ -313,3 +313,6 @@ def test_blocked_and_turned_count_as_hook_stakes():
     assert _has_hook_stakes("my coworkers drank coffee i paid for")
     assert _has_hook_stakes("my uncle gave away my bedroom")
     assert _has_hook_stakes("they mocked me for asking them to chip in")
+    assert _has_hook_stakes("my neighbor parked in my driveway for six hours")
+    assert _has_hook_stakes("my aunt tried to put a whole birthday dinner on my card")
+    assert _has_hook_stakes("the server tried to run the whole bill on my card")
