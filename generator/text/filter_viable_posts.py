@@ -119,6 +119,7 @@ def _ask_source_scorecard(client: openai.OpenAI, prompt: str, model: str) -> Sou
             {"role": "user", "content": prompt + "\n\nReturn only the JSON object."},
         ],
     ]
+    quota_error: Exception | None = None
     for attempt, messages in enumerate(messages_templates, start=1):
         try:
             kwargs = {
@@ -132,6 +133,11 @@ def _ask_source_scorecard(client: openai.OpenAI, prompt: str, model: str) -> Sou
             return _parse_source_scorecard(resp.output_text or "")
         except Exception as e:
             print(f"⚠️ source scorecard 호출 실패 (시도 {attempt}/{len(messages_templates)}): {e}")
+            if _is_llm_quota_error(str(e)):
+                quota_error = e
+                break
+    if quota_error:
+        raise RuntimeError(f"llm_quota_unavailable: {quota_error}") from quota_error
     return None
 
 
@@ -205,6 +211,73 @@ def _local_precheck(post: dict) -> str:
     return ""
 
 
+def _is_llm_quota_error(message: str) -> bool:
+    lowered = (message or "").lower()
+    return "insufficient_quota" in lowered or "exceeded your current quota" in lowered or "rate_limit_exceeded" in lowered
+
+
+def _local_fallback_enabled() -> bool:
+    return os.getenv("FILTER_LOCAL_FALLBACK_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _local_source_scorecard(post: dict, reason: str = "") -> SourceScorecard:
+    title = str(post.get("title") or "")
+    content = str(post.get("content") or "")
+    lowered = f"{title} {content}".lower()
+    archetype = _local_archetype(lowered)
+    provider = str(post.get("source_provider") or "").lower()
+    synthetic_bonus = 1 if provider == "synthetic" else 0
+    has_boundary = any(
+        term in lowered
+        for term in (
+            "boundary",
+            "without asking",
+            "without permission",
+            "my driveway",
+            "my room",
+            "my card",
+            "bill",
+            "invoice",
+            "accused",
+            "blamed",
+            "proof",
+            "group chat",
+        )
+    )
+    base = 4 if has_boundary else 3
+    high = min(5, base + synthetic_bonus)
+    decision = "YES" if base >= 4 else "NO"
+    return SourceScorecard(
+        decision=decision,
+        relatability=high,
+        conflict_clarity=high,
+        stakes=base,
+        debate_potential=high,
+        safe_adaptability=high,
+        visualizability=4 if archetype != "abstract_boundary" else 3,
+        retention_risk="medium" if decision == "YES" else "high",
+        archetype=archetype,
+        reason=(
+            "Local fallback scorecard used because the LLM evaluator was unavailable; "
+            f"source has {'clear' if has_boundary else 'weak'} boundary/conflict signals. {reason[:120]}"
+        ).strip(),
+    )
+
+
+def _local_archetype(lowered: str) -> str:
+    if any(term in lowered for term in ("bill", "card", "invoice", "deposit", "pay")):
+        return "money_pressure"
+    if any(term in lowered for term in ("driveway", "parking", "gate", "car")):
+        return "neighbor_property"
+    if any(term in lowered for term in ("bedroom", "apartment", "room", "couch")):
+        return "family_boundary"
+    if any(term in lowered for term in ("coworker", "office", "manager", "team")):
+        return "workplace_accusation"
+    if any(term in lowered for term in ("roommate", "housemate", "shared")):
+        return "roommate_boundary"
+    return "abstract_boundary"
+
+
 # -----------------------------
 # Main
 # -----------------------------
@@ -220,6 +293,7 @@ def filter_viable_posts():
         raw_posts = json.load(f)
 
     selected_posts: List[dict] = []
+    llm_unavailable_reason = ""
 
     for post in raw_posts:
         title, content = post.get("title", ""), post.get("content", "")
@@ -270,7 +344,11 @@ def filter_viable_posts():
         """
 
         try:
-            scorecard = _ask_source_scorecard(client, prompt, model)
+            if llm_unavailable_reason and _local_fallback_enabled():
+                scorecard = _local_source_scorecard(post, llm_unavailable_reason)
+                print(f"🧩 로컬 source scorecard 사용: id={post.get('id', 'unknown')} reason=llm_unavailable")
+            else:
+                scorecard = _ask_source_scorecard(client, prompt, model)
             if not scorecard:
                 print("⚠️ GPT scorecard 응답 없음/불명. 해당 포스트 스킵")
                 continue
@@ -289,6 +367,27 @@ def filter_viable_posts():
                     f"score={source_score} risk={scorecard.retention_risk} reason={scorecard.reason}"
                 )
 
+        except RuntimeError as e:
+            if _is_llm_quota_error(str(e)) and _local_fallback_enabled():
+                llm_unavailable_reason = str(e)
+                scorecard = _local_source_scorecard(post, llm_unavailable_reason)
+                print(f"🧩 OpenAI quota 오류로 로컬 source scorecard 사용: id={post.get('id', 'unknown')}")
+                source_score = _scorecard_average(scorecard)
+                min_score = float(os.getenv("SOURCE_SCORE_MIN_AVG", "4.0"))
+                if scorecard.decision == "YES" and scorecard.retention_risk != "high" and source_score >= min_score:
+                    post["source_scorecard"] = scorecard.model_dump()
+                    post["source_score"] = source_score
+                    post["source_archetype"] = scorecard.archetype.strip().lower()[:80]
+                    selected_posts.append(post)
+                else:
+                    print(
+                        "⏭️ local source scorecard reject: "
+                        f"id={post.get('id', 'unknown')} decision={scorecard.decision} "
+                        f"score={source_score} risk={scorecard.retention_risk} reason={scorecard.reason}"
+                    )
+            else:
+                print(f"GPT 판단 오류: {e}")
+            continue
         except Exception as e:
             print(f"GPT 판단 오류: {e}")
             continue
