@@ -108,6 +108,18 @@ The local validator rejects scripts before TTS when any hard failure is detected
 
 Non-blocking warnings are stored in `quality_warnings` for valid scripts that are outside the preferred 820-980 character target, show repetitive line starts, or overload the final question.
 
+## Final Pipeline Gates
+
+The pipeline now applies deterministic gates after script generation and before upload:
+
+- TTS keeps only items with valid mp3 and Polly speech mark artifacts.
+- Subtitle generation aligns `caption_chunks` to Polly word marks and records `caption_alignment_status`.
+- Render requires mp3, SRT, and a `tts_check_result.json` row for each metadata item.
+- Publish-ready finalization requires a video key and a final MP4, either local or confirmed in S3.
+- Upload checks `content_gate` again, skips rejected due items, and uploads the first due item that passes.
+
+In production, legacy upload metadata is disabled unless `ALLOW_LEGACY_UPLOAD_METADATA=1`. Real Reddit/PullPush metadata must include `source_content_excerpt` or `source_content` unless `ALLOW_MISSING_SOURCE_CONTEXT=1`.
+
 ## Performance Learning Loop
 
 The daily metrics collector reads uploaded video IDs from DynamoDB and stores YouTube performance snapshots back onto each content record:

@@ -108,3 +108,60 @@ def test_narration_fields_derive_from_script():
     assert normalized["tts_text"] == "My roommate put twelve dinners on my card. Would you have disputed the charge?"
     assert all(len(chunk) <= 42 for chunk in normalized["caption_chunks"])
     assert normalized["caption_chunks"][-1].endswith("?")
+
+
+def test_reddit_item_without_source_context_fails_in_production(monkeypatch):
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.delenv("ALLOW_MISSING_SOURCE_CONTEXT", raising=False)
+
+    result = evaluate_content_gate(_safe_item(source_provider="reddit", source_url="https://reddit.test/post"))
+
+    assert result["ok"] is False
+    assert "missing_source_context" in result["hard_errors"]
+
+
+def test_pullpush_item_without_source_context_fails_in_production(monkeypatch):
+    monkeypatch.setenv("YT_ENV", "production")
+    monkeypatch.delenv("ALLOW_MISSING_SOURCE_CONTEXT", raising=False)
+
+    result = evaluate_content_gate(_safe_item(source_provider="pullpush", source_url="https://reddit.test/post"))
+
+    assert result["ok"] is False
+    assert "missing_source_context" in result["hard_errors"]
+
+
+def test_unknown_provider_fails_in_production_unless_allowed(monkeypatch):
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.delenv("ALLOW_UNKNOWN_SOURCE_PROVIDER", raising=False)
+
+    blocked = evaluate_content_gate(_safe_item(source_provider=""))
+    assert "unknown_source_provider" in blocked["hard_errors"]
+
+    monkeypatch.setenv("ALLOW_UNKNOWN_SOURCE_PROVIDER", "1")
+    allowed = evaluate_content_gate(_safe_item(source_provider=""))
+    assert "unknown_source_provider" not in allowed["hard_errors"]
+
+
+def test_missing_source_context_override_allows_real_provider(monkeypatch):
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("ALLOW_MISSING_SOURCE_CONTEXT", "1")
+
+    result = evaluate_content_gate(_safe_item(source_provider="reddit", source_url="https://reddit.test/post"))
+
+    assert "missing_source_context" not in result["hard_errors"]
+
+
+def test_caption_retention_policy_rejects_generic_and_long_chunks():
+    result = evaluate_content_gate(
+        _safe_item(
+            caption_chunks=[
+                "The boundary was simple",
+                "This caption is far too long for the current Shorts caption style",
+                "Was I wrong to post the clip?",
+            ]
+        )
+    )
+
+    assert any(error.startswith("first_caption_hook") for error in result["hard_errors"])
+    assert any(error.startswith("caption_chunk_too_long") for error in result["hard_errors"])
+    assert any(error.startswith("generic_caption_chunk") for error in result["hard_errors"])

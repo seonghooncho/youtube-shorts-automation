@@ -37,13 +37,18 @@ def evaluate_content_gate(item: dict[str, Any]) -> dict[str, Any]:
     script = _script_lines(item)
     public_title = str(item.get("public_title") or "").strip()
     title = str(item.get("title") or "").strip()
+    raw_source_text = _raw_source_text(item)
 
+    if _is_production_env() and source_provider not in {"reddit", "pullpush", "synthetic"} and not _allow_unknown_source_provider():
+        hard_errors.append("unknown_source_provider")
     if source_provider == "synthetic" and not _allow_synthetic_source():
         hard_errors.append("synthetic_source_not_allowed")
     if generation_fallback == "local_template" and not _allow_local_template_upload():
         hard_errors.append("local_template_fallback_not_allowed")
     if source_provider in {"reddit", "pullpush"} and not str(item.get("source_url") or "").strip() and not _allow_missing_source_url():
         hard_errors.append("missing_source_url")
+    if source_provider in {"reddit", "pullpush"} and not raw_source_text and _is_production_env() and not _allow_missing_source_context():
+        hard_errors.append("missing_source_context")
     if not script:
         hard_errors.append("missing_script")
     if _starts_with_aita(public_title or title):
@@ -183,6 +188,7 @@ def normalize_narration_fields(item: dict[str, Any]) -> dict[str, Any]:
     item["script"] = list(lines)
     item["tts_text"] = tts_text(item)
     item["caption_chunks"] = caption_chunks(item)
+    _apply_caption_policy_metadata(item)
     return item
 
 
@@ -227,12 +233,26 @@ def _caption_errors(item: dict[str, Any]) -> list[str]:
     if not chunks:
         errors.append("missing_caption_chunks")
         return errors
+    _apply_caption_policy_metadata(item)
+    first_caption_reason = title_quality_reason(chunks[0])
+    if first_caption_reason:
+        errors.append(f"first_caption_hook:{first_caption_reason}")
     long_chunks = [idx + 1 for idx, chunk in enumerate(chunks) if len(chunk) > 42]
     if long_chunks:
         errors.append(f"caption_chunk_too_long:{long_chunks[:3]}")
     multi_line_chunks = [idx + 1 for idx, chunk in enumerate(chunks) if len(str(chunk).splitlines()) > 2]
     if multi_line_chunks:
         errors.append(f"caption_chunk_too_many_lines:{multi_line_chunks[:3]}")
+    generic_chunks = [idx + 1 for idx, chunk in enumerate(chunks) if _is_generic_caption(chunk)]
+    if generic_chunks:
+        errors.append(f"generic_caption_chunk:{generic_chunks[:3]}")
+    multi_sentence_chunks = [
+        idx + 1
+        for idx, chunk in enumerate(chunks)
+        if len(re.findall(r"[.!?]", str(chunk))) > 1 and len(str(chunk)) > 32
+    ]
+    if multi_sentence_chunks:
+        errors.append(f"caption_chunk_multi_sentence:{multi_sentence_chunks[:3]}")
     lines = voiceover_lines(item)
     final_line = lines[-1] if lines else ""
     if final_line.endswith("?") and not chunks[-1].rstrip().endswith("?"):
@@ -254,11 +274,15 @@ def _predicted_score_errors(item: dict[str, Any]) -> list[str]:
 
 
 def _source_text(item: dict[str, Any]) -> str:
-    raw = str(item.get("source_content_excerpt") or item.get("source_content") or "").strip()
+    raw = _raw_source_text(item)
     if raw:
         return raw
     beats = item.get("story_beats") or []
     return " ".join(str(beat or "").strip() for beat in beats if str(beat or "").strip())
+
+
+def _raw_source_text(item: dict[str, Any]) -> str:
+    return str(item.get("source_content_excerpt") or item.get("source_content") or "").strip()
 
 
 def _source_contains_receipt(source_text: str) -> bool:
@@ -300,9 +324,46 @@ def _allow_low_comment_score() -> bool:
     return _truthy("ALLOW_LOW_PREDICTED_COMMENT_SCORE")
 
 
+def _allow_missing_source_context() -> bool:
+    return _truthy("ALLOW_MISSING_SOURCE_CONTEXT")
+
+
+def _allow_unknown_source_provider() -> bool:
+    return _truthy("ALLOW_UNKNOWN_SOURCE_PROVIDER")
+
+
 def _truthy(name: str) -> bool:
     return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _is_production_env() -> bool:
     return any(os.getenv(name, "").strip().lower() == "production" for name in ("APP_ENV", "YT_ENV"))
+
+
+def _apply_caption_policy_metadata(item: dict[str, Any]) -> None:
+    chunks = caption_chunks(item)
+    total_chars = sum(len(chunk) for chunk in chunks)
+    density = "sparse"
+    if total_chars >= 180 or len(chunks) >= 8:
+        density = "dense"
+    elif total_chars >= 90 or len(chunks) >= 5:
+        density = "medium"
+    item["first_caption_hook_score"] = 1 if chunks and not title_quality_reason(chunks[0]) else 0
+    item["caption_density_bucket"] = density
+    item["caption_reveal_policy"] = "sync_with_narration"
+
+
+def _is_generic_caption(chunk: str) -> bool:
+    lowered = re.sub(r"\s+", " ", str(chunk or "").strip().lower())
+    generic = {
+        "the boundary was simple",
+        "the proof was clear",
+        "what happened next",
+        "things got worse",
+        "people are split",
+        "now everyone is mad",
+        "this caused drama",
+        "i tried to keep it calm",
+        "so what do you think",
+    }
+    return lowered in generic

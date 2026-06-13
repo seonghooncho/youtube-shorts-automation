@@ -1,7 +1,8 @@
 import os
 import json
+import re
 from pathlib import Path
-from shared.utils.config import MARKS_DIR, SUBTITLES_DIR
+from shared.utils.config import FINAL_METADATA_FILE, MARKS_DIR, SUBTITLES_DIR
 
 def ms_to_srt_time(ms):
     seconds, milliseconds = divmod(ms, 1000)
@@ -9,7 +10,39 @@ def ms_to_srt_time(ms):
     hours, minutes = divmod(minutes, 60)
     return f"{hours:02}:{minutes:02}:{seconds:02},{milliseconds:03}"
 
-def convert_single_mark_file(json_path: Path, srt_path: Path):
+def convert_single_mark_file(json_path: Path, srt_path: Path, metadata: dict | None = None):
+    entries = _load_mark_entries(json_path)
+    if not entries:
+        print(f"❌ No valid entries found in {json_path.name}")
+        return "failed"
+
+    if metadata and metadata.get("caption_chunks"):
+        try:
+            captions = align_caption_chunks_to_marks(metadata.get("caption_chunks") or [], entries)
+            _write_srt_entries(captions, srt_path)
+            metadata["caption_alignment_status"] = "aligned"
+            metadata["caption_chunk_count"] = len(captions)
+            metadata["caption_alignment_warnings"] = []
+            return "aligned"
+        except Exception as exc:
+            warnings = [f"caption_chunk_alignment_failed:{exc}"]
+            metadata["caption_alignment_warnings"] = warnings
+            if _is_production_env() and not _allow_caption_alignment_fallback():
+                metadata["caption_alignment_status"] = "failed"
+                metadata["caption_chunk_count"] = 0
+                srt_path.unlink(missing_ok=True)
+                print(f"🚫 Caption alignment failed in production for {json_path.name}: {exc}")
+                return "failed"
+            _write_word_grouping_srt(entries, srt_path)
+            metadata["caption_alignment_status"] = "fallback_word_grouping"
+            metadata["caption_chunk_count"] = 0
+            return "fallback_word_grouping"
+
+    _write_word_grouping_srt(entries, srt_path)
+    return "fallback_word_grouping"
+
+
+def _load_mark_entries(json_path: Path) -> list[dict]:
     entries = []
     with open(json_path, 'r', encoding='utf-8') as f:
         first_line = f.readline().strip()
@@ -37,11 +70,11 @@ def convert_single_mark_file(json_path: Path, srt_path: Path):
                 except json.JSONDecodeError as e:
                     print(f"⚠️ JSON decode error at {json_path.name}:{line_num} → {e}")
                     continue
+    return entries
 
-    if not entries:
-        print(f"❌ No valid entries found in {json_path.name}")
-        return
 
+def _write_word_grouping_srt(entries: list[dict], srt_path: Path) -> None:
+    srt_path.parent.mkdir(parents=True, exist_ok=True)
     with open(srt_path, 'w', encoding='utf-8') as out:
         for i in range(len(entries) - 1):
             start = ms_to_srt_time(entries[i]['time'])
@@ -57,6 +90,58 @@ def convert_single_mark_file(json_path: Path, srt_path: Path):
             out.write(f"{len(entries)}\n")
             out.write(f"{ms_to_srt_time(last['time'])} --> {ms_to_srt_time(last['time'] + 500)}\n")
             out.write(f"{last['value']}\n")
+
+
+def align_caption_chunks_to_marks(chunks: list[str], marks: list[dict]) -> list[tuple[int, int, str]]:
+    word_marks = [mark for mark in marks if mark.get("type") in (None, "word") and str(mark.get("value") or "").strip()]
+    normalized_marks = [_normalize_words(str(mark.get("value") or "")) for mark in word_marks]
+    captions: list[tuple[int, int, str]] = []
+    cursor = 0
+    for chunk in chunks:
+        clean_chunk = re.sub(r"\s+", " ", str(chunk or "")).strip()
+        tokens = _normalize_words(clean_chunk)
+        if not tokens:
+            continue
+        start_index = None
+        end_index = None
+        for token in tokens:
+            found = None
+            while cursor < len(normalized_marks):
+                mark_tokens = normalized_marks[cursor]
+                if token in mark_tokens:
+                    found = cursor
+                    break
+                cursor += 1
+            if found is None:
+                raise ValueError(f"token_not_found:{token}")
+            if start_index is None:
+                start_index = found
+            end_index = found
+            cursor = found + 1
+        if start_index is None or end_index is None:
+            continue
+        start = int(word_marks[start_index].get("time") or 0)
+        if end_index + 1 < len(word_marks):
+            end = int(word_marks[end_index + 1].get("time") or start + 500)
+        else:
+            end = int(word_marks[end_index].get("time") or start) + 500
+        captions.append((start, max(start + 200, end), clean_chunk))
+    if not captions:
+        raise ValueError("no_caption_chunks_aligned")
+    return captions
+
+
+def _normalize_words(text: str) -> list[str]:
+    return [match.group(0).lower().strip("'") for match in re.finditer(r"[A-Za-z0-9']+", str(text or ""))]
+
+
+def _write_srt_entries(captions: list[tuple[int, int, str]], srt_path: Path) -> None:
+    srt_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(srt_path, "w", encoding="utf-8") as out:
+        for index, (start, end, text) in enumerate(captions, start=1):
+            out.write(f"{index}\n")
+            out.write(f"{ms_to_srt_time(start)} --> {ms_to_srt_time(end)}\n")
+            out.write(f"{text}\n\n")
 
 
 # def convert_all_marks_to_srt():
@@ -85,13 +170,56 @@ def convert_all_marks_to_srt():
         print("❌ No marks files found in", MARKS_DIR)
         return
 
+    metadata_by_id = _load_metadata_by_id()
     for file in files:
         srt_name = file.stem.replace("_marks", "") + ".srt"
         srt_path = SUBTITLES_DIR / srt_name
+        content_id = file.stem.replace("_marks", "")
         print(f"🎯 Converting: {file.name} -> {srt_name}")
-        convert_single_mark_file(file, srt_path)
+        convert_single_mark_file(file, srt_path, metadata_by_id.get(content_id))
 
+    _save_metadata(metadata_by_id)
     print("✅ All files converted to SRT successfully!")
+
+
+def _load_metadata_by_id() -> dict[str, dict]:
+    if not FINAL_METADATA_FILE.exists():
+        return {}
+    try:
+        with open(FINAL_METADATA_FILE, "r", encoding="utf-8") as f:
+            items = json.load(f)
+        if not isinstance(items, list):
+            return {}
+        return {str(item.get("id")): item for item in items if isinstance(item, dict) and item.get("id")}
+    except Exception as exc:
+        print(f"⚠️ final metadata load failed for captions: {exc}")
+        return {}
+
+
+def _save_metadata(metadata_by_id: dict[str, dict]) -> None:
+    if not metadata_by_id or not FINAL_METADATA_FILE.exists():
+        return
+    try:
+        with open(FINAL_METADATA_FILE, "r", encoding="utf-8") as f:
+            items = json.load(f)
+        if not isinstance(items, list):
+            return
+        merged = []
+        for item in items:
+            content_id = str(item.get("id") or "")
+            merged.append(metadata_by_id.get(content_id, item))
+        with open(FINAL_METADATA_FILE, "w", encoding="utf-8") as f:
+            json.dump(merged, f, ensure_ascii=False, indent=2)
+    except Exception as exc:
+        print(f"⚠️ final metadata caption status save failed: {exc}")
+
+
+def _is_production_env() -> bool:
+    return any(os.getenv(name, "").strip().lower() == "production" for name in ("APP_ENV", "YT_ENV"))
+
+
+def _allow_caption_alignment_fallback() -> bool:
+    return os.getenv("ALLOW_CAPTION_ALIGNMENT_FALLBACK", "").strip().lower() in {"1", "true", "yes", "on"}
 
 if __name__ == "__main__":
     convert_all_marks_to_srt()

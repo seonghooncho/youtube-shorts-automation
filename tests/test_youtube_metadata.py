@@ -86,6 +86,14 @@ def test_weak_generic_title_fails_quality_validation():
     assert title_quality_reason("He Parked In My Driveway, Then Called Me Petty") == ""
 
 
+def test_common_conflict_titles_pass_quality_validation():
+    assert title_quality_reason("She Left Her Laundry In Both Machines") == ""
+    assert title_quality_reason("He Returned My Car Empty And Scratched") == ""
+    assert title_quality_reason("My Coworker Changed His Lunch Order") == ""
+    assert title_quality_reason("They Drained The Office Coffee Fund") == ""
+    assert title_quality_reason("She Shared My Streaming Password") == ""
+
+
 def test_sanitize_upload_metadata_blocks_internal_values():
     reason = unsafe_upload_metadata_reason(
         "PENDING #shorts",
