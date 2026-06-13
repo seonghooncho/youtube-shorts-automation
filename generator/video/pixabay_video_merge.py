@@ -286,17 +286,38 @@ def _concat_segments(segment_paths: list[Path], output_path: Path) -> None:
         for path in segment_paths:
             f.write(f"file '{path.resolve().as_posix()}'\n")
 
+    fps = _int_env("SHORTS_RENDER_FPS", 30)
+    scaler = os.getenv("SHORTS_SCALE_FILTER", "lanczos")
+    video_filter = (
+        "scale=1080:1920:force_original_aspect_ratio=increase:"
+        f"flags={scaler},"
+        "crop=1080:1920,"
+        f"fps={fps},setsar=1,format=yuv420p"
+    )
     cmd = [
         _ffmpeg_bin(),
         "-y",
+        "-fflags",
+        "+genpts",
         "-f",
         "concat",
         "-safe",
         "0",
         "-i",
         str(concat_file),
-        "-c",
-        "copy",
+        "-vf",
+        video_filter,
+        "-an",
+        "-c:v",
+        "libx264",
+        "-preset",
+        os.getenv("BG_CONCAT_PRESET", os.getenv("BG_SEGMENT_PRESET", "fast")),
+        "-crf",
+        os.getenv("BG_CONCAT_CRF", os.getenv("BG_SEGMENT_CRF", "18")),
+        "-pix_fmt",
+        "yuv420p",
+        "-movflags",
+        "+faststart",
         str(output_path),
     ]
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)

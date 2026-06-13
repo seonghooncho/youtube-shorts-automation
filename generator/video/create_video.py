@@ -270,6 +270,8 @@ def render_video_with_ffmpeg(filename: str):
     ffmpeg_cmd = [
         _ffmpeg_bin(),
         "-y",
+        "-reinit_filter",
+        "0",
         "-i", str(background_path),
         "-f", "lavfi", "-t", "1", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
         "-i", str(audio_path),
@@ -289,7 +291,11 @@ def render_video_with_ffmpeg(filename: str):
         "-shortest",
         str(output_path),
     ]
-    subprocess.run(ffmpeg_cmd, check=True)
+    subprocess.run(
+        ffmpeg_cmd,
+        check=True,
+        timeout=_env_int("FINAL_RENDER_TIMEOUT_SECONDS", 600, minimum=60),
+    )
 
     # 임시파일 정리
     temp_caption_ass.unlink(missing_ok=True)

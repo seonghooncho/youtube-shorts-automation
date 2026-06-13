@@ -5,6 +5,7 @@ from PIL import Image, ImageFilter
 
 import generator.video.pixabay_video_merge as pixabay_video_merge
 from generator.video.pixabay_video_merge import (
+    _concat_segments,
     _download_video_safe,
     _fetch_pixabay_video_urls_safe,
     _image_sharpness_score,
@@ -254,3 +255,34 @@ def test_download_video_safe_removes_blurry_candidate(monkeypatch, tmp_path):
 
     assert _download_video_safe("https://example.com/video.mp4", part_path, "abc", "phone") is False
     assert not part_path.exists()
+
+
+def test_concat_segments_reencodes_normalized_background(monkeypatch, tmp_path):
+    captured = {}
+
+    def _fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["kwargs"] = kwargs
+
+    segment_a = tmp_path / "a.mp4"
+    segment_b = tmp_path / "b.mp4"
+    segment_a.write_bytes(b"a")
+    segment_b.write_bytes(b"b")
+    output_path = tmp_path / "out.mp4"
+
+    monkeypatch.setenv("SHORTS_RENDER_FPS", "30")
+    monkeypatch.setenv("BG_CONCAT_PRESET", "fast")
+    monkeypatch.setenv("BG_CONCAT_CRF", "18")
+    monkeypatch.setattr(pixabay_video_merge, "_ffmpeg_bin", lambda: "ffmpeg")
+    monkeypatch.setattr(pixabay_video_merge.subprocess, "run", _fake_run)
+
+    _concat_segments([segment_a, segment_b], output_path)
+
+    cmd = captured["cmd"]
+    assert "-fflags" in cmd
+    assert "+genpts" in cmd
+    assert "-c:v" in cmd
+    assert cmd[cmd.index("-c:v") + 1] == "libx264"
+    assert ("-c" not in cmd) or (cmd[cmd.index("-c") + 1] != "copy")
+    assert "fps=30,setsar=1,format=yuv420p" in cmd[cmd.index("-vf") + 1]
+    assert cmd[cmd.index("-movflags") + 1] == "+faststart"

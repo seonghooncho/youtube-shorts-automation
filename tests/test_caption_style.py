@@ -6,6 +6,7 @@ from generator.video.create_video import (
     _format_centered_caption_text,
     _video_filter_with_subtitles,
     _write_centered_caption_ass,
+    render_video_with_ffmpeg,
 )
 
 
@@ -125,3 +126,47 @@ def test_video_filter_normalizes_before_burning_subtitles(monkeypatch):
     assert video_filter.startswith("scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos")
     assert "crop=1080:1920" in video_filter
     assert "format=yuv444p,subtitles='captions.ass',format=yuv420p" in video_filter
+
+
+def test_render_video_with_ffmpeg_uses_timeout_and_stable_filter_options(monkeypatch, tmp_path):
+    audio_dir = tmp_path / "audio"
+    subtitle_dir = tmp_path / "subtitles"
+    final_dir = tmp_path / "final"
+    audio_dir.mkdir()
+    subtitle_dir.mkdir()
+    final_dir.mkdir()
+    (audio_dir / "story.mp3").write_bytes(b"audio")
+    (subtitle_dir / "story.srt").write_text(
+        "1\n00:00:00,000 --> 00:00:01,000\nhello world\n\n",
+        encoding="utf-8",
+    )
+    background_path = tmp_path / "background.mp4"
+    background_path.write_bytes(b"video")
+    tts_path = tmp_path / "tts_check_result.json"
+    tts_path.write_text(
+        '[{"filename":"story","speed":1.18,"final_duration":42.0}]',
+        encoding="utf-8",
+    )
+    captured = {}
+
+    def _fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(create_video, "AUDIO_DIR", audio_dir)
+    monkeypatch.setattr(create_video, "SUBTITLES_DIR", subtitle_dir)
+    monkeypatch.setattr(create_video, "FINAL_DIR", final_dir)
+    monkeypatch.setattr(create_video, "TTS_RESULT_JSON", tts_path)
+    monkeypatch.setattr(create_video, "get_video_source", lambda name: background_path)
+    monkeypatch.setattr(create_video, "ensure_anton_font", lambda: tmp_path / "Anton-Regular.ttf")
+    monkeypatch.setattr(create_video, "_ffmpeg_bin", lambda: "ffmpeg")
+    monkeypatch.setattr(create_video.subprocess, "run", _fake_run)
+    monkeypatch.setenv("FINAL_RENDER_TIMEOUT_SECONDS", "123")
+
+    render_video_with_ffmpeg("story")
+
+    cmd = captured["cmd"]
+    assert cmd[cmd.index("-reinit_filter") + 1] == "0"
+    assert "-drop_changed" not in cmd
+    assert captured["kwargs"]["check"] is True
+    assert captured["kwargs"]["timeout"] == 123
