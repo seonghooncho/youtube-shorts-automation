@@ -16,18 +16,10 @@ s3 = boto3.client("s3")
 ssm = boto3.client("ssm")
 dynamodb = boto3.resource("dynamodb")
 
-BUCKET_NAME = os.environ["BUCKET_NAME"]
-CONTENT_TABLE_NAME = os.getenv("CONTENT_TABLE_NAME", "")
 PUBLISH_METADATA_KEY = os.getenv("PUBLISH_METADATA_KEY", "publish-ready/final_metadata.json")
 LEGACY_METADATA_KEY = os.getenv("LEGACY_METADATA_KEY", "shorts/state/final_metadata.json")
 SSM_PREFIX = os.getenv("SSM_PARAMETER_PREFIX", "/ytshorts")
-PRIVACY_STATUS = os.getenv("YOUTUBE_PRIVACY_STATUS", "private")
-CATEGORY_ID = os.getenv("YOUTUBE_CATEGORY_ID", "22")
-PUBLISH_HOUR_LOCAL = int(os.getenv("PUBLISH_HOUR_LOCAL", "8"))
-PUBLISH_MINUTE_LOCAL = int(os.getenv("PUBLISH_MINUTE_LOCAL", "0"))
-SCHEDULE_TIMEZONE = os.getenv("SCHEDULE_TIMEZONE", "Asia/Seoul")
-PUBLISH_REBASE_STALE_DAYS = int(os.getenv("PUBLISH_REBASE_STALE_DAYS", "3"))
-YOUTUBE_MIN_UPLOAD_BYTES = int(os.getenv("YOUTUBE_MIN_UPLOAD_BYTES", "1048576"))
+_CONFIG_CACHE: dict[str, str] = {}
 
 
 def handler(event, context):
@@ -99,9 +91,12 @@ def handler(event, context):
 
 
 def _load_metadata() -> tuple[list[dict[str, Any]], str]:
+    bucket_name = _setting("S3_BUCKET_NAME", os.getenv("BUCKET_NAME", ""))
+    if not bucket_name:
+        return [], PUBLISH_METADATA_KEY
     for key in (PUBLISH_METADATA_KEY, LEGACY_METADATA_KEY):
         try:
-            response = s3.get_object(Bucket=BUCKET_NAME, Key=key)
+            response = s3.get_object(Bucket=bucket_name, Key=key)
             return json.loads(response["Body"].read().decode("utf-8")), key
         except ClientError as exc:
             if exc.response["Error"]["Code"] in {"NoSuchKey", "404", "NotFound"}:
@@ -111,10 +106,13 @@ def _load_metadata() -> tuple[list[dict[str, Any]], str]:
 
 
 def _save_metadata(metadata: list[dict[str, Any]], metadata_key: str) -> None:
+    bucket_name = _setting("S3_BUCKET_NAME", os.getenv("BUCKET_NAME", ""))
+    if not bucket_name:
+        raise RuntimeError("S3_BUCKET_NAME is not configured")
     payload = json.dumps(metadata, ensure_ascii=False, indent=2).encode("utf-8")
-    s3.put_object(Bucket=BUCKET_NAME, Key=metadata_key, Body=payload, ContentType="application/json")
+    s3.put_object(Bucket=bucket_name, Key=metadata_key, Body=payload, ContentType="application/json")
     if metadata_key != LEGACY_METADATA_KEY:
-        s3.put_object(Bucket=BUCKET_NAME, Key=LEGACY_METADATA_KEY, Body=payload, ContentType="application/json")
+        s3.put_object(Bucket=bucket_name, Key=LEGACY_METADATA_KEY, Body=payload, ContentType="application/json")
 
 
 def _next_due_item(metadata: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -133,11 +131,12 @@ def _next_due_item(metadata: list[dict[str, Any]]) -> dict[str, Any] | None:
 
 
 def _rebase_stale_queue(metadata: list[dict[str, Any]]) -> bool:
-    if PUBLISH_REBASE_STALE_DAYS <= 0:
+    rebase_stale_days = _int_setting("PUBLISH_REBASE_STALE_DAYS", 3)
+    if rebase_stale_days <= 0:
         return False
 
     now = int(time.time())
-    threshold_seconds = PUBLISH_REBASE_STALE_DAYS * 86400
+    threshold_seconds = rebase_stale_days * 86400
     queue = [
         item
         for item in metadata
@@ -151,15 +150,17 @@ def _rebase_stale_queue(metadata: list[dict[str, Any]]) -> bool:
     if not oldest or oldest >= now - threshold_seconds:
         return False
 
-    timezone = ZoneInfo(SCHEDULE_TIMEZONE)
+    timezone = ZoneInfo(_setting("SCHEDULE_TIMEZONE", "Asia/Seoul"))
     now_dt = datetime.fromtimestamp(now, timezone)
+    publish_hour = _int_setting("PUBLISH_HOUR_LOCAL", 8)
+    publish_minute = _int_setting("PUBLISH_MINUTE_LOCAL", 0)
     for index, item in enumerate(queue):
         if index == 0:
             scheduled_dt = now_dt
         else:
             scheduled_dt = datetime.combine(
                 now_dt.date() + timedelta(days=index),
-                dt_time(hour=PUBLISH_HOUR_LOCAL, minute=PUBLISH_MINUTE_LOCAL),
+                dt_time(hour=publish_hour, minute=publish_minute),
                 tzinfo=timezone,
             )
         item["scheduled_publish_at"] = int(scheduled_dt.timestamp())
@@ -168,9 +169,12 @@ def _rebase_stale_queue(metadata: list[dict[str, Any]]) -> bool:
 
 
 def _download_video(video_key: str, content_id: str, local_path: str) -> str:
+    bucket_name = _setting("S3_BUCKET_NAME", os.getenv("BUCKET_NAME", ""))
+    if not bucket_name:
+        raise RuntimeError("S3_BUCKET_NAME is not configured")
     for key in (video_key, f"shorts/videos/{content_id}.mp4"):
         try:
-            s3.download_file(BUCKET_NAME, key, local_path)
+            s3.download_file(bucket_name, key, local_path)
             return key
         except ClientError as exc:
             if exc.response["Error"]["Code"] in {"NoSuchKey", "404", "NotFound"}:
@@ -181,8 +185,9 @@ def _download_video(video_key: str, content_id: str, local_path: str) -> str:
 
 def _validate_upload_candidate(local_path: str) -> tuple[bool, str]:
     size = os.path.getsize(local_path)
-    if size < YOUTUBE_MIN_UPLOAD_BYTES:
-        return False, f"video_too_small:{size}<{YOUTUBE_MIN_UPLOAD_BYTES}"
+    min_upload_bytes = _int_setting("YOUTUBE_MIN_UPLOAD_BYTES", 1_048_576)
+    if size < min_upload_bytes:
+        return False, f"video_too_small:{size}<{min_upload_bytes}"
     return True, "ok"
 
 
@@ -240,11 +245,11 @@ def _upload_youtube(file_path: str, item: dict[str, Any], config: dict[str, str]
             "title": title,
             "description": description,
             "tags": tags,
-            "categoryId": CATEGORY_ID,
+            "categoryId": _setting("YOUTUBE_CATEGORY_ID", "22"),
         },
         "status": {
-            "privacyStatus": PRIVACY_STATUS,
-            "selfDeclaredMadeForKids": os.getenv("YOUTUBE_MADE_FOR_KIDS", "0") == "1",
+            "privacyStatus": _setting("YOUTUBE_PRIVACY_STATUS", "public"),
+            "selfDeclaredMadeForKids": _bool_setting("YOUTUBE_MADE_FOR_KIDS", False),
         },
     }
     init_request = urllib.request.Request(
@@ -274,9 +279,10 @@ def _upload_youtube(file_path: str, item: dict[str, Any], config: dict[str, str]
 
 
 def _mark_content(content_id: str, status: str, extra: dict[str, Any] | None = None) -> None:
-    if not CONTENT_TABLE_NAME:
+    table_name = _setting("CONTENT_TABLE_NAME", os.getenv("CONTENT_TABLE_NAME", ""))
+    if not table_name:
         return
-    table = dynamodb.Table(CONTENT_TABLE_NAME)
+    table = dynamodb.Table(table_name)
     names = {"#status": "status"}
     values = {":status": status, ":updated_at": int(time.time())}
     parts = ["#status = :status", "updated_at = :updated_at"]
@@ -292,3 +298,30 @@ def _mark_content(content_id: str, status: str, extra: dict[str, Any] | None = N
         ExpressionAttributeNames=names,
         ExpressionAttributeValues=values,
     )
+
+
+def _setting(name: str, default: str) -> str:
+    env_value = os.getenv(name)
+    if env_value is not None:
+        return env_value
+    if name in _CONFIG_CACHE:
+        return _CONFIG_CACHE[name]
+    parameter_name = f"{SSM_PREFIX}/{name}"
+    try:
+        value = ssm.get_parameter(Name=parameter_name, WithDecryption=True)["Parameter"]["Value"]
+    except ClientError:
+        value = default
+    _CONFIG_CACHE[name] = value
+    return value
+
+
+def _int_setting(name: str, default: int) -> int:
+    try:
+        return int(_setting(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _bool_setting(name: str, default: bool) -> bool:
+    raw = _setting(name, "1" if default else "0")
+    return raw.strip().lower() in {"1", "true", "yes", "on"}

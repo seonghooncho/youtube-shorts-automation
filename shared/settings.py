@@ -25,7 +25,7 @@ class AwsSettings:
 @dataclass(frozen=True)
 class UploadSettings:
     target_platforms: frozenset[str] = frozenset({"youtube"})
-    youtube_privacy_status: str = "private"
+    youtube_privacy_status: str = "public"
     instagram_enabled: bool = False
     tiktok_enabled: bool = False
 

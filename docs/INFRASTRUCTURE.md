@@ -50,9 +50,27 @@ ytshorts-upload-daily:  cron(0 8 * * ? *) Asia/Seoul
 
 14개를 요청해도 모든 단계가 14개를 보장하지는 않습니다. Reddit 후보 부족, GPT 검증 실패, Polly/TTS 길이 검증 실패, Pixabay/ffmpeg 렌더 실패가 있으면 실제 publish-ready 개수는 줄 수 있습니다. 버퍼는 이 실패분을 흡수하기 위한 것이고, 다음 refill에서 부족분을 다시 채웁니다.
 
-## 시크릿 관리
+## SSM 설정/시크릿 관리
 
-시크릿 값은 Terraform 변수로 받지 않습니다. Terraform state에 민감 값이 남지 않도록 `/ytshorts/*` SSM SecureString을 런타임에 읽거나 컨테이너 secret으로 주입합니다.
+운영 설정과 시크릿은 `/ytshorts/*` SSM Parameter Store에 둡니다. Batch 컨테이너는 SSM parameter를 container secret으로 주입받고, planner/publisher Lambda는 런타임에 SSM을 읽습니다. EventBridge Scheduler는 생성 개수 같은 운영값을 직접 들고 있지 않고 `mode`만 전달합니다.
+
+Terraform이 관리하는 비밀이 아닌 운영 설정 예시는 다음과 같습니다.
+
+```text
+/ytshorts/GENERATION_BATCH_DAYS
+/ytshorts/GENERATION_BUFFER_DAYS
+/ytshorts/GENERATION_MAX_NEW_ITEMS
+/ytshorts/YOUTUBE_PRIVACY_STATUS
+/ytshorts/SCHEDULE_TIMEZONE
+/ytshorts/PUBLISH_HOUR_LOCAL
+/ytshorts/FILTER_MODEL
+/ytshorts/SCRIPT_MODEL
+/ytshorts/CAPTION_FONT_SIZE
+/ytshorts/FINAL_RENDER_CRF
+/ytshorts/PIXABAY_MIN_SHARPNESS_SCORE
+```
+
+시크릿 값은 Terraform 변수로 받지 않습니다. Terraform state에 민감 값이 남지 않도록 기존 credential 파라미터는 외부에서 SSM SecureString으로 관리하고, 런타임에만 읽습니다.
 
 필수 파라미터:
 

@@ -76,7 +76,7 @@ aws codebuild start-build \
 
 ## 업로드 안전장치
 
-기본 업로드는 `private`입니다. 공개 업로드는 Terraform variable 또는 Lambda/Batch environment의 `YOUTUBE_PRIVACY_STATUS=public`로 명시합니다.
+기본 업로드는 `public`입니다. 검수용 비공개/일부공개 업로드가 필요하면 Terraform variable 또는 Lambda/Batch environment의 `YOUTUBE_PRIVACY_STATUS=private` 또는 `YOUTUBE_PRIVACY_STATUS=unlisted`로 명시합니다.
 
 YouTube upload에는 API key가 아니라 OAuth refresh token이 필요합니다. OAuth 값은 `/ytshorts/YOUTUBE_CLIENT_ID`, `/ytshorts/YOUTUBE_CLIENT_SECRET`, `/ytshorts/YOUTUBE_REFRESH_TOKEN`, `/ytshorts/YOUTUBE_TOKEN_URI`에 저장되어 있습니다. 해당 값이 `PENDING`이면 업로드 workflow는 안전하게 blocked 상태로 종료합니다.
 

@@ -10,7 +10,7 @@ from uploader.youtube_oauth import build_youtube_credentials
 def upload_youtube(file_path, title, description, tags: Iterable[str]):
     creds = build_youtube_credentials(interactive=False)
     youtube = build("youtube", "v3", credentials=creds)
-    privacy_status = os.getenv("YOUTUBE_PRIVACY_STATUS", "private")
+    privacy_status = os.getenv("YOUTUBE_PRIVACY_STATUS", "public")
 
     request = youtube.videos().insert(
         part="snippet,status",

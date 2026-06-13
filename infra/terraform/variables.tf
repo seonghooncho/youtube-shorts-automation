@@ -115,7 +115,7 @@ variable "codebuild_compute_type" {
 
 variable "youtube_privacy_status" {
   type    = string
-  default = "private"
+  default = "public"
 }
 
 variable "youtube_min_upload_bytes" {

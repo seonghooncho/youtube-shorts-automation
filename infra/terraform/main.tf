@@ -19,6 +19,48 @@ locals {
 
   ssm_parameter_prefix = "/ytshorts"
 
+  runtime_config_values = {
+    AWS_REGION                        = var.aws_region
+    AWS_DEFAULT_REGION                = var.aws_region
+    S3_BUCKET_NAME                    = aws_s3_bucket.artifacts.bucket
+    CONTENT_TABLE_NAME                = aws_dynamodb_table.content.name
+    TARGET_PLATFORMS                  = "youtube"
+    YOUTUBE_PRIVACY_STATUS            = var.youtube_privacy_status
+    YOUTUBE_CATEGORY_ID               = "22"
+    YOUTUBE_MADE_FOR_KIDS             = "0"
+    YOUTUBE_MIN_UPLOAD_BYTES          = tostring(var.youtube_min_upload_bytes)
+    REDDIT_MAX_POSTS                  = tostring(var.reddit_max_posts)
+    REDDIT_MIN_NEEDED                 = tostring(var.reddit_min_needed)
+    REDDIT_FALLBACK_PROVIDER          = "pullpush"
+    GENERATION_BATCH_DAYS             = tostring(var.generation_batch_days)
+    GENERATION_BUFFER_DAYS            = tostring(var.generation_buffer_days)
+    GENERATION_MAX_NEW_ITEMS          = tostring(var.generation_max_new_items)
+    SCHEDULE_TIMEZONE                 = var.schedule_timezone
+    PUBLISH_HOUR_LOCAL                = tostring(var.publish_hour_local)
+    PUBLISH_MINUTE_LOCAL              = tostring(var.publish_minute_local)
+    PUBLISH_REBASE_STALE_DAYS         = tostring(var.publish_rebase_stale_days)
+    FILTER_MODEL                      = var.openai_filter_model
+    SCRIPT_MODEL                      = var.openai_script_model
+    CAPTION_FONT_SIZE                 = "114"
+    CAPTION_OUTLINE                   = "7"
+    CAPTION_SHADOW                    = "0"
+    CAPTION_MAX_CHARS                 = "14"
+    CAPTION_FADE_MS                   = "0"
+    SHORTS_SCALE_FILTER               = "lanczos"
+    BG_SEGMENT_PRESET                 = "fast"
+    BG_SEGMENT_CRF                    = "18"
+    FINAL_RENDER_PRESET               = "fast"
+    FINAL_RENDER_CRF                  = "17"
+    FINAL_AUDIO_BITRATE               = "128k"
+    PIXABAY_MIN_SOURCE_LONG_EDGE      = "1920"
+    PIXABAY_MIN_SOURCE_SHORT_EDGE     = "1080"
+    PIXABAY_ENABLE_SHARPNESS_FILTER   = "1"
+    PIXABAY_MIN_SHARPNESS_SCORE       = "60"
+    PIXABAY_SHARPNESS_SAMPLE_FRAMES   = "4"
+    PIXABAY_SHARPNESS_SAMPLE_INTERVAL = "2"
+    PIXABAY_SHARPNESS_SAMPLE_WIDTH    = "360"
+  }
+
   batch_secret_names = [
     "OPENAI_API_KEY",
     "HF_TOKEN",
@@ -26,38 +68,38 @@ locals {
     "SLACK_WEBHOOK_URL",
   ]
 
+  batch_runtime_config_names = [
+    for name in sort(keys(local.runtime_config_values)) : name
+    if !contains([
+      "GENERATION_BATCH_DAYS",
+      "GENERATION_BUFFER_DAYS",
+      "GENERATION_MAX_NEW_ITEMS",
+    ], name)
+  ]
+
+  batch_parameter_names = sort(concat(local.batch_secret_names, local.batch_runtime_config_names))
+
   batch_secrets = [
-    for name in local.batch_secret_names : {
+    for name in local.batch_parameter_names : {
       name      = name
       valueFrom = "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter${local.ssm_parameter_prefix}/${name}"
     }
-  ]
-
-  batch_environment = [
-    { name = "AWS_REGION", value = var.aws_region },
-    { name = "AWS_DEFAULT_REGION", value = var.aws_region },
-    { name = "S3_BUCKET_NAME", value = aws_s3_bucket.artifacts.bucket },
-    { name = "CONTENT_TABLE_NAME", value = aws_dynamodb_table.content.name },
-    { name = "TARGET_PLATFORMS", value = "youtube" },
-    { name = "YOUTUBE_PRIVACY_STATUS", value = var.youtube_privacy_status },
-    { name = "REDDIT_MAX_POSTS", value = tostring(var.reddit_max_posts) },
-    { name = "REDDIT_MIN_NEEDED", value = tostring(var.reddit_min_needed) },
-    { name = "REDDIT_FALLBACK_PROVIDER", value = "pullpush" },
-    { name = "GENERATION_BATCH_DAYS", value = tostring(var.generation_batch_days) },
-    { name = "GENERATION_BUFFER_DAYS", value = tostring(var.generation_buffer_days) },
-    { name = "GENERATION_MAX_NEW_ITEMS", value = tostring(var.generation_max_new_items) },
-    { name = "SCHEDULE_TIMEZONE", value = var.schedule_timezone },
-    { name = "PUBLISH_HOUR_LOCAL", value = tostring(var.publish_hour_local) },
-    { name = "PUBLISH_MINUTE_LOCAL", value = tostring(var.publish_minute_local) },
-    { name = "PUBLISH_REBASE_STALE_DAYS", value = tostring(var.publish_rebase_stale_days) },
-    { name = "FILTER_MODEL", value = var.openai_filter_model },
-    { name = "SCRIPT_MODEL", value = var.openai_script_model },
   ]
 }
 
 resource "aws_s3_bucket" "artifacts" {
   bucket = var.bucket_name
   tags   = local.tags
+}
+
+resource "aws_ssm_parameter" "runtime_config" {
+  for_each = local.runtime_config_values
+
+  name  = "${local.ssm_parameter_prefix}/${each.key}"
+  type  = "SecureString"
+  value = each.value
+
+  tags = local.tags
 }
 
 resource "aws_s3_bucket_public_access_block" "artifacts" {
@@ -485,7 +527,7 @@ resource "aws_iam_role_policy" "batch_execution_secrets" {
           "ssm:GetParameters"
         ]
         Resource = [
-          for name in local.batch_secret_names :
+          for name in local.batch_parameter_names :
           "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter${local.ssm_parameter_prefix}/${name}"
         ]
       },
@@ -623,7 +665,7 @@ resource "aws_batch_job_definition" "stage" {
     command          = ["python", "runner.py"]
     executionRoleArn = aws_iam_role.batch_execution.arn
     jobRoleArn       = aws_iam_role.batch_job.arn
-    environment      = local.batch_environment
+    environment      = []
     secrets          = local.batch_secrets
     resourceRequirements = [
       { type = "VCPU", value = var.batch_light_vcpu },
@@ -650,6 +692,8 @@ resource "aws_batch_job_definition" "stage" {
     attempt_duration_seconds = var.batch_timeout_seconds
   }
 
+  depends_on = [aws_ssm_parameter.runtime_config]
+
   tags = local.tags
 }
 
@@ -663,7 +707,7 @@ resource "aws_batch_job_definition" "script" {
     command          = ["python", "runner.py"]
     executionRoleArn = aws_iam_role.batch_execution.arn
     jobRoleArn       = aws_iam_role.batch_job.arn
-    environment      = local.batch_environment
+    environment      = []
     secrets          = local.batch_secrets
     resourceRequirements = [
       { type = "VCPU", value = var.batch_script_vcpu },
@@ -690,6 +734,8 @@ resource "aws_batch_job_definition" "script" {
     attempt_duration_seconds = var.batch_timeout_seconds
   }
 
+  depends_on = [aws_ssm_parameter.runtime_config]
+
   tags = local.tags
 }
 
@@ -703,7 +749,7 @@ resource "aws_batch_job_definition" "render" {
     command          = ["python", "runner.py"]
     executionRoleArn = aws_iam_role.batch_execution.arn
     jobRoleArn       = aws_iam_role.batch_job.arn
-    environment      = local.batch_environment
+    environment      = []
     secrets          = local.batch_secrets
     resourceRequirements = [
       { type = "VCPU", value = var.batch_render_vcpu },
@@ -729,6 +775,8 @@ resource "aws_batch_job_definition" "render" {
   timeout {
     attempt_duration_seconds = var.batch_timeout_seconds
   }
+
+  depends_on = [aws_ssm_parameter.runtime_config]
 
   tags = local.tags
 }
@@ -828,19 +876,14 @@ resource "aws_lambda_function" "publisher" {
 
   environment {
     variables = {
-      BUCKET_NAME               = aws_s3_bucket.artifacts.bucket
-      CONTENT_TABLE_NAME        = aws_dynamodb_table.content.name
-      SSM_PARAMETER_PREFIX      = local.ssm_parameter_prefix
-      YOUTUBE_PRIVACY_STATUS    = var.youtube_privacy_status
-      SCHEDULE_TIMEZONE         = var.schedule_timezone
-      PUBLISH_HOUR_LOCAL        = tostring(var.publish_hour_local)
-      PUBLISH_MINUTE_LOCAL      = tostring(var.publish_minute_local)
-      PUBLISH_REBASE_STALE_DAYS = tostring(var.publish_rebase_stale_days)
-      YOUTUBE_MIN_UPLOAD_BYTES  = tostring(var.youtube_min_upload_bytes)
+      SSM_PARAMETER_PREFIX = local.ssm_parameter_prefix
     }
   }
 
-  depends_on = [aws_cloudwatch_log_group.publisher]
+  depends_on = [
+    aws_cloudwatch_log_group.publisher,
+    aws_ssm_parameter.runtime_config,
+  ]
 
   tags = local.tags
 }
@@ -881,6 +924,24 @@ resource "aws_iam_role_policy" "planner" {
           aws_s3_bucket.artifacts.arn,
           "${aws_s3_bucket.artifacts.arn}/*"
         ]
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "ssm:GetParameter",
+          "ssm:GetParameters"
+        ]
+        Resource = "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter${local.ssm_parameter_prefix}/*"
+      },
+      {
+        Effect   = "Allow"
+        Action   = "kms:Decrypt"
+        Resource = "*"
+        Condition = {
+          StringEquals = {
+            "kms:ViaService" = "ssm.${var.aws_region}.amazonaws.com"
+          }
+        }
       }
     ]
   })
@@ -904,14 +965,14 @@ resource "aws_lambda_function" "planner" {
 
   environment {
     variables = {
-      BUCKET_NAME              = aws_s3_bucket.artifacts.bucket
-      GENERATION_BATCH_DAYS    = tostring(var.generation_batch_days)
-      GENERATION_BUFFER_DAYS   = tostring(var.generation_buffer_days)
-      GENERATION_MAX_NEW_ITEMS = tostring(var.generation_max_new_items)
+      SSM_PARAMETER_PREFIX = local.ssm_parameter_prefix
     }
   }
 
-  depends_on = [aws_cloudwatch_log_group.planner]
+  depends_on = [
+    aws_cloudwatch_log_group.planner,
+    aws_ssm_parameter.runtime_config,
+  ]
 
   tags = local.tags
 }
@@ -1411,10 +1472,7 @@ resource "aws_scheduler_schedule" "generate" {
     arn      = aws_sfn_state_machine.pipeline.arn
     role_arn = aws_iam_role.scheduler.arn
     input = jsonencode({
-      mode          = "generate"
-      days          = var.generation_batch_days
-      buffer_days   = var.generation_buffer_days
-      max_new_items = var.generation_max_new_items
+      mode = "generate"
     })
   }
 }
