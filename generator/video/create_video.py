@@ -37,15 +37,15 @@ DEFAULT_PADDING = 40       # 텍스트 이미지 패딩
 DEFAULT_LINE_SPACING_RATIO = 0.25  # 줄 간격 배수
 CAPTION_PLAY_RES_X = 1080
 CAPTION_PLAY_RES_Y = 1920
-DEFAULT_CAPTION_FONT_SIZE = 76
-DEFAULT_CAPTION_OUTLINE = 5
-DEFAULT_CAPTION_SHADOW = 2
+DEFAULT_CAPTION_FONT_SIZE = 114
+DEFAULT_CAPTION_OUTLINE = 7
+DEFAULT_CAPTION_SHADOW = 0
 DEFAULT_CAPTION_CENTER_X = CAPTION_PLAY_RES_X // 2
 DEFAULT_CAPTION_CENTER_Y = CAPTION_PLAY_RES_Y // 2
 DEFAULT_CAPTION_MAX_WORDS = 2
-DEFAULT_CAPTION_MAX_CHARS = 16
+DEFAULT_CAPTION_MAX_CHARS = 14
 DEFAULT_CAPTION_MAX_DURATION = 1.05
-DEFAULT_CAPTION_FADE_MS = 35
+DEFAULT_CAPTION_FADE_MS = 0
 ASS_WHITE_STYLE = "&H00FFFFFF"
 ASS_YELLOW_STYLE = "&H0000FFFF"
 ASS_BLACK_STYLE = "&H00000000"
@@ -263,7 +263,7 @@ def render_video_with_ffmpeg(filename: str):
         f":original_size={CAPTION_PLAY_RES_X}x{CAPTION_PLAY_RES_Y}"
     )
     filter_complex = (
-        f"[0:v]{subtitle_filter}[v];"
+        f"[0:v]{_video_filter_with_subtitles(subtitle_filter)}[v];"
         f"{_audio_merge_filter(speed)}"
     )
 
@@ -278,8 +278,8 @@ def render_video_with_ffmpeg(filename: str):
         "-map", "[v]",
         "-map", "[a]",
         "-c:v", "libx264",
-        "-preset", "veryfast",
-        "-crf", os.getenv("FINAL_RENDER_CRF", "19"),
+        "-preset", os.getenv("FINAL_RENDER_PRESET", "fast"),
+        "-crf", os.getenv("FINAL_RENDER_CRF", "17"),
         "-r", str(_env_int("SHORTS_RENDER_FPS", 30, minimum=24)),
         "-pix_fmt", "yuv420p",
         "-c:a", "aac",
@@ -293,6 +293,19 @@ def render_video_with_ffmpeg(filename: str):
 
     # 임시파일 정리
     temp_caption_ass.unlink(missing_ok=True)
+
+
+def _video_filter_with_subtitles(subtitle_filter: str) -> str:
+    scaler = os.getenv("SHORTS_SCALE_FILTER", "lanczos")
+    return (
+        "scale=1080:1920:force_original_aspect_ratio=increase:"
+        f"flags={scaler},"
+        "crop=1080:1920,"
+        "setsar=1,"
+        "format=yuv444p,"
+        f"{subtitle_filter},"
+        "format=yuv420p"
+    )
 
 
 def _atempo_filter(speed: float) -> str:

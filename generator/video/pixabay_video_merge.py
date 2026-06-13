@@ -4,8 +4,10 @@ import json
 import shutil
 import subprocess
 import hashlib
+import tempfile
 from pathlib import Path
 from dataclasses import dataclass
+import numpy as np
 from PIL import Image
 from imageio_ffmpeg import get_ffmpeg_exe
 from moviepy.editor import VideoFileClip
@@ -238,8 +240,10 @@ def _ffmpeg_bin() -> str:
 
 def _write_vertical_segment(input_path: Path, output_path: Path, duration: float, start_time: float = 0.0) -> None:
     fps = _int_env("SHORTS_RENDER_FPS", 30)
+    scaler = os.getenv("SHORTS_SCALE_FILTER", "lanczos")
     video_filter = (
-        "scale=1080:1920:force_original_aspect_ratio=increase,"
+        "scale=1080:1920:force_original_aspect_ratio=increase:"
+        f"flags={scaler},"
         "crop=1080:1920,"
         "eq=contrast=1.06:saturation=1.12:brightness=0.01,"
         f"fps={fps},setsar=1"
@@ -261,9 +265,9 @@ def _write_vertical_segment(input_path: Path, output_path: Path, duration: float
         "-c:v",
         "libx264",
         "-preset",
-        "veryfast",
+        os.getenv("BG_SEGMENT_PRESET", "fast"),
         "-crf",
-        os.getenv("BG_SEGMENT_CRF", "20"),
+        os.getenv("BG_SEGMENT_CRF", "18"),
         "-pix_fmt",
         "yuv420p",
         str(output_path),
@@ -419,14 +423,15 @@ def _select_pixabay_video_url(videos: dict) -> str | None:
             continue
         width = int(candidate.get("width") or 0)
         height = int(candidate.get("height") or 0)
-        candidates.append((max(width, height), candidate["url"]))
+        candidates.append((max(width, height), min(width, height), candidate["url"]))
     candidates.sort(reverse=True)
-    min_long_edge = _int_env("PIXABAY_MIN_SOURCE_LONG_EDGE", 720)
-    for long_edge, url in candidates:
-        if long_edge >= min_long_edge:
+    min_long_edge = _int_env("PIXABAY_MIN_SOURCE_LONG_EDGE", 1920)
+    min_short_edge = _int_env("PIXABAY_MIN_SOURCE_SHORT_EDGE", 1080)
+    for long_edge, short_edge, url in candidates:
+        if long_edge >= min_long_edge and short_edge >= min_short_edge:
             return url
     if candidates and _env_bool("PIXABAY_ALLOW_LOW_RES_FALLBACK", default=False):
-        return candidates[0][1]
+        return candidates[0][2]
     return None
 
 
@@ -599,10 +604,75 @@ def _fetch_pixabay_video_urls_safe(**kwargs) -> list[tuple[int | str, str, float
 def _download_video_safe(video_url: str, part_path: Path, content_id: str, query: str) -> bool:
     try:
         download_video_to_ebs(video_url, part_path)
+        if not _passes_video_quality_gate(part_path):
+            part_path.unlink(missing_ok=True)
+            return False
         return True
     except Exception as exc:
         print(f"⚠️ Pixabay 다운로드 실패로 후보 생략: [{content_id}] query='{query}' {video_url}: {exc}")
         return False
+
+
+def _passes_video_quality_gate(video_path: Path) -> bool:
+    if not _env_bool("PIXABAY_ENABLE_SHARPNESS_FILTER", default=True):
+        return True
+    min_score = _float_env("PIXABAY_MIN_SHARPNESS_SCORE", 60.0)
+    if min_score <= 0:
+        return True
+    try:
+        score = _video_sharpness_score(video_path)
+    except Exception as exc:
+        print(f"⚠️ 선명도 측정 실패, 후보 유지: {video_path}: {exc}")
+        return True
+    if score < min_score:
+        print(f"⚠️ 흐린 Pixabay 후보 생략: {video_path.name} sharpness={score:.1f} < {min_score:.1f}")
+        return False
+    return True
+
+
+def _video_sharpness_score(video_path: Path) -> float:
+    frame_count = max(1, _int_env("PIXABAY_SHARPNESS_SAMPLE_FRAMES", 4))
+    sample_interval = max(1.0, _float_env("PIXABAY_SHARPNESS_SAMPLE_INTERVAL", 2.0))
+    sample_width = max(160, _int_env("PIXABAY_SHARPNESS_SAMPLE_WIDTH", 360))
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        frame_pattern = str(Path(tmp_dir) / "frame_%02d.jpg")
+        cmd = [
+            _ffmpeg_bin(),
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            str(video_path),
+            "-vf",
+            f"fps=1/{sample_interval:g},scale={sample_width}:-1:flags=lanczos",
+            "-frames:v",
+            str(frame_count),
+            frame_pattern,
+        ]
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        scores = [
+            _image_sharpness_score(Image.open(frame_path))
+            for frame_path in sorted(Path(tmp_dir).glob("frame_*.jpg"))
+        ]
+    if not scores:
+        raise RuntimeError("no sampled frames")
+    return float(np.median(scores))
+
+
+def _image_sharpness_score(image: Image.Image) -> float:
+    grayscale = image.convert("L")
+    pixels = np.asarray(grayscale, dtype=np.float32)
+    if pixels.shape[0] < 3 or pixels.shape[1] < 3:
+        return 0.0
+    laplacian = (
+        -4 * pixels[1:-1, 1:-1]
+        + pixels[:-2, 1:-1]
+        + pixels[2:, 1:-1]
+        + pixels[1:-1, :-2]
+        + pixels[1:-1, 2:]
+    )
+    return float(laplacian.var())
 
 
 def _asmr_queries() -> list[str]:

@@ -22,6 +22,7 @@ google-auth-httplib2
 tqdm
 
 # Image processing
+numpy
 Pillow>=10.4,<12
 
 pysrt

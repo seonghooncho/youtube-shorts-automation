@@ -112,6 +112,17 @@ Pixabay results are filtered to avoid low-quality Shorts visuals such as:
 - cartoon / anime / animation
 - game / gaming / logo / VFX
 
+Source video selection defaults to 1080p-or-better material for Shorts framing:
+
+- `PIXABAY_MIN_SOURCE_LONG_EDGE=1920`
+- `PIXABAY_MIN_SOURCE_SHORT_EDGE=1080`
+
+This avoids common 1280x720 sources being upscaled to 1080x1920, which usually produces soft, low-quality background footage.
+
+Downloaded Pixabay candidates also pass a lightweight sharpness gate before they can be used in a background sequence. FFmpeg samples a few frames, Pillow/numpy compute a Laplacian-variance sharpness score, and candidates below `PIXABAY_MIN_SHARPNESS_SCORE` are discarded. This catches high-resolution but visually blurred source clips without adding OpenCV or another heavy runtime dependency.
+
+Final rendering normalizes the video to 1080x1920 with Lanczos scaling, burns ASS captions after normalization, renders captions over a 4:4:4 intermediate frame, then converts to YouTube-compatible yuv420p at the end. This keeps caption edges sharper than burning text into an already subsampled frame.
+
 ## Quality Gate
 
 Rendered MP4 files still must pass the hard upload validation: video stream, audio stream, duration, size, and resolution.
@@ -143,9 +154,19 @@ The render stage also logs non-blocking quality warnings when output is outside 
 - `PIXABAY_MAX_PAGES_PER_QUERY`
 - `PIXABAY_MIN_DOWNLOAD_BYTES`
 - `PIXABAY_MIN_SOURCE_LONG_EDGE`
+- `PIXABAY_MIN_SOURCE_SHORT_EDGE`
 - `PIXABAY_ALLOW_LOW_RES_FALLBACK`
+- `PIXABAY_ENABLE_SHARPNESS_FILTER`
+- `PIXABAY_MIN_SHARPNESS_SCORE`
+- `PIXABAY_SHARPNESS_SAMPLE_FRAMES`
+- `PIXABAY_SHARPNESS_SAMPLE_INTERVAL`
+- `PIXABAY_SHARPNESS_SAMPLE_WIDTH`
 - `SHORTS_RENDER_FPS`
+- `SHORTS_SCALE_FILTER`
+- `BG_SEGMENT_CRF`
+- `BG_SEGMENT_PRESET`
 - `FINAL_RENDER_CRF`
+- `FINAL_RENDER_PRESET`
 - `FINAL_AUDIO_BITRATE`
 - `FINAL_AUDIO_LOUDNORM`
 - `PIXABAY_MAX_QUERIES_PER_ITEM`

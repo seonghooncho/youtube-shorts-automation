@@ -4,6 +4,7 @@ from generator.video.create_video import (
     _build_centered_caption_events,
     _ensure_ffmpeg_font_dir,
     _format_centered_caption_text,
+    _video_filter_with_subtitles,
     _write_centered_caption_ass,
 )
 
@@ -84,6 +85,21 @@ def test_write_centered_caption_ass_sets_center_position_and_style(tmp_path, mon
     assert r"OKAY {\c&H00FFFF&}QUICK{\c&HFFFFFF&}" in content
 
 
+def test_write_centered_caption_ass_uses_larger_crisp_defaults(tmp_path, monkeypatch):
+    monkeypatch.delenv("CAPTION_FONT_SIZE", raising=False)
+    monkeypatch.delenv("CAPTION_OUTLINE", raising=False)
+    monkeypatch.delenv("CAPTION_SHADOW", raising=False)
+    monkeypatch.delenv("CAPTION_FADE_MS", raising=False)
+
+    ass_path = tmp_path / "captions.ass"
+    _write_centered_caption_ass([((0.0, 0.2), "blood")], ass_path, offset_seconds=0.0)
+
+    content = ass_path.read_text(encoding="utf-8")
+    assert "Style: Caption,Anton,114" in content
+    assert ",1,7,0,5,70,70,0,1" in content
+    assert r"\fad(" not in content or r"\fad(0,0)" in content
+
+
 def test_ensure_ffmpeg_font_dir_allows_missing_font(tmp_path, monkeypatch):
     monkeypatch.setattr(create_video, "FINAL_DIR", tmp_path / "final")
 
@@ -99,3 +115,13 @@ def test_audio_merge_filter_normalizes_loudness_and_sample_rate():
     assert "atempo=1.1600" in audio_filter
     assert "loudnorm=I=-16:TP=-1.5:LRA=11" in audio_filter
     assert "aformat=sample_rates=48000:channel_layouts=stereo" in audio_filter
+
+
+def test_video_filter_normalizes_before_burning_subtitles(monkeypatch):
+    monkeypatch.delenv("SHORTS_SCALE_FILTER", raising=False)
+
+    video_filter = _video_filter_with_subtitles("subtitles='captions.ass'")
+
+    assert video_filter.startswith("scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos")
+    assert "crop=1080:1920" in video_filter
+    assert "format=yuv444p,subtitles='captions.ass',format=yuv420p" in video_filter
