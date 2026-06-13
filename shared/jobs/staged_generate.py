@@ -4,6 +4,7 @@ from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from generator.text.filter_viable_posts import filter_viable_posts
+from generator.text.content_gate import filter_content_gate_items
 from generator.text.generate_scripts_from_filtered import generate_scripts_from_filtered
 from generator.text.scrape_reddit_and_store import scrape_reddit_and_store
 from generator.tts.analyze_all_tts import analyze_all_tts
@@ -32,6 +33,7 @@ from shared.utils.config import (
     get_video_source,
 )
 from shared.utils.s3_utils import update_metadata_after_video_creation
+from shared.utils.slack_notify import send_slack_message
 from shared.utils.video_validation import quality_warnings, validate_video_file
 
 
@@ -88,7 +90,7 @@ def filter_stage() -> None:
     filter_viable_posts()
     viable_posts = _read_json_file(VIABLE_POSTS_FILE)
     if not viable_posts:
-        raise RuntimeError("No viable Reddit posts found after filtering.")
+        print("✅ 품질 기준을 통과한 source가 없어 이번 생성 배치를 no-op 처리합니다.")
     store.upload_file(VIABLE_POSTS_FILE, "scripts/viable_posts.json")
 
 
@@ -102,10 +104,11 @@ def script_stage() -> None:
         return
 
     generate_scripts_from_filtered()
+    _log_generation_acceptance()
     _prepare_publish_schedule()
     metadata = _read_json_file(FINAL_METADATA_FILE)
     if not metadata:
-        raise RuntimeError("No final metadata generated from viable posts.")
+        print("✅ 품질 기준을 통과한 script가 없어 이후 단계를 no-op 처리합니다.")
     store.upload_file(FINAL_METADATA_FILE, "scripts/final_metadata.json")
     if FAILED_POSTS_FILE.exists():
         store.upload_file(FAILED_POSTS_FILE, "scripts/failed_posts.json")
@@ -116,6 +119,10 @@ def tts_stage() -> None:
     _download_required("scripts/final_metadata.json", FINAL_METADATA_FILE)
     if not _read_metadata():
         print("✅ 생성할 신규 항목이 없어 TTS stage를 no-op 처리합니다.")
+        return
+    _filter_metadata_by_content_gate("tts")
+    if not _read_metadata():
+        print("✅ content gate 통과 항목이 없어 TTS stage를 no-op 처리합니다.")
         return
 
     run_batch_tts()
@@ -147,6 +154,10 @@ def render_stage() -> None:
     _download_required("scripts/final_metadata.json", FINAL_METADATA_FILE)
     if not _read_metadata():
         print("✅ 생성할 신규 항목이 없어 render stage를 no-op 처리합니다.")
+        return
+    _filter_metadata_by_content_gate("render")
+    if not _read_metadata():
+        print("✅ content gate 통과 항목이 없어 render stage를 no-op 처리합니다.")
         return
 
     _download_file("state/used_pixabay_ids.json", USED_PIXABAY_IDS_FILE)
@@ -182,20 +193,53 @@ def finalize_stage() -> None:
         return
     _attach_video_keys_from_s3()
     _keep_rendered_metadata_only()
+    _filter_metadata_by_content_gate("finalize")
     if not _read_metadata():
-        raise RuntimeError("No rendered final videos found during finalize stage.")
+        print("✅ publish-ready로 보낼 content gate 통과 항목이 없습니다.")
+        return
     _finalize_publish_ready()
 
 
 def _finalize_publish_ready() -> None:
     _merge_render_shard_pixabay_usage()
     update_metadata_after_video_creation()
+    _filter_metadata_by_content_gate("publish_ready")
+    if not _read_metadata():
+        print("✅ content gate 통과 항목이 없어 publish-ready 업로드를 건너뜁니다.")
+        return
     store.upload_file(FINAL_METADATA_FILE, "publish-ready/final_metadata.json")
     store.upload_file(FINAL_METADATA_FILE, "state/final_metadata.json")
     if USED_PIXABAY_IDS_FILE.exists():
         store.upload_file(USED_PIXABAY_IDS_FILE, "state/used_pixabay_ids.json")
     with open(FINAL_METADATA_FILE, "r", encoding="utf-8") as f:
         content_repo.upsert_items(json.load(f), "PUBLISH_READY")
+
+
+def _filter_metadata_by_content_gate(stage: str) -> None:
+    items = _read_metadata()
+    accepted, rejected = filter_content_gate_items(items, stage=stage)
+    if rejected:
+        print(f"🚫 content gate rejected {len(rejected)} item(s) at {stage}: {rejected[:3]}")
+        _write_json_file(FAILED_POSTS_FILE, rejected)
+        try:
+            store.upload_file(FAILED_POSTS_FILE, "scripts/failed_posts.json")
+        except Exception as exc:
+            print(f"⚠️ failed_posts upload skipped: {exc}")
+    _write_metadata(accepted)
+
+
+def _log_generation_acceptance() -> None:
+    desired = _desired_new_count()
+    accepted = len(_read_metadata())
+    rejected = len(_read_json_file(FAILED_POSTS_FILE))
+    print(f"📊 generation quality summary desired={desired} accepted={accepted} rejected={rejected}")
+    if accepted < desired:
+        try:
+            send_slack_message(
+                f"ytshorts generation accepted fewer items than desired: desired={desired}, accepted={accepted}, rejected={rejected}"
+            )
+        except Exception as exc:
+            print(f"⚠️ Slack notify skipped: {exc}")
 
 
 def _download_required(key, path) -> None:

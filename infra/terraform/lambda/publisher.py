@@ -362,10 +362,28 @@ def _upload_youtube(file_path: str, item: dict[str, Any], config: dict[str, str]
 
 def _metadata_safety_error(item: dict[str, Any]) -> str:
     source_provider = str(item.get("source_provider") or "").strip().lower()
-    if source_provider == "synthetic" and not _bool_setting("SCRIPT_ALLOW_SYNTHETIC_SOURCES", False):
+    if source_provider == "synthetic" and not _bool_setting("ALLOW_SYNTHETIC_IN_PRODUCTION", False):
         return "unsafe_metadata:source_provider:synthetic_disabled"
-    if item.get("generation_fallback") == "local_template" and not _bool_setting("SCRIPT_LOCAL_FALLBACK_ENABLED", False):
+    if source_provider in {"reddit", "pullpush"} and not str(item.get("source_url") or "").strip() and not _bool_setting("ALLOW_MISSING_SOURCE_URL", False):
+        return "unsafe_metadata:source_url:missing"
+    if item.get("generation_fallback") == "local_template" and not _bool_setting("ALLOW_LOCAL_TEMPLATE_UPLOAD", False):
         return "unsafe_metadata:generation_fallback:local_template_disabled"
+    if not str(item.get("public_title") or "").strip():
+        return "unsafe_metadata:public_title:missing"
+    if _BANNED_PUBLIC_TITLE_PREFIX_RE.search(str(item.get("public_title") or item.get("title") or "")):
+        return "unsafe_metadata:public_title:aita_prefix"
+    if "#viral" in str(item.get("public_title") or "").lower() or "#viral" in str(item.get("title") or "").lower():
+        return "unsafe_metadata:title:viral_hashtag"
+    if not str(item.get("style_variant") or "").strip():
+        return "unsafe_metadata:style_variant:missing"
+    if not str(item.get("script_fingerprint") or "").strip():
+        return "unsafe_metadata:script_fingerprint:missing"
+    predicted_error = _predicted_safety_error(item)
+    if predicted_error:
+        return predicted_error
+    critic_error = _critic_safety_error(item.get("critic_scores") or {})
+    if critic_error:
+        return critic_error
     fields = {
         "title": item.get("title", ""),
         "description": item.get("description", ""),
@@ -380,6 +398,32 @@ def _metadata_safety_error(item: dict[str, Any]) -> str:
         _sanitize_upload_metadata(item)
     except ValueError as exc:
         return str(exc)
+    return ""
+
+
+def _predicted_safety_error(item: dict[str, Any]) -> str:
+    if _float_like(item.get("predicted_retention_score")) < 8:
+        return "unsafe_metadata:predicted_retention_score"
+    if _float_like(item.get("predicted_clarity_score")) < 8:
+        return "unsafe_metadata:predicted_clarity_score"
+    if _float_like(item.get("predicted_ai_smell_score")) > 3:
+        return "unsafe_metadata:predicted_ai_smell_score"
+    if _float_like(item.get("predicted_comment_score")) < 7 and not _bool_setting("ALLOW_LOW_PREDICTED_COMMENT_SCORE", False):
+        return "unsafe_metadata:predicted_comment_score"
+    return ""
+
+
+def _critic_safety_error(scores: dict[str, Any]) -> str:
+    if not scores:
+        return "unsafe_metadata:critic_scores:missing"
+    if _float_like(scores.get("ai_smell_score")) > 3:
+        return "unsafe_metadata:critic_ai_smell_score"
+    if _float_like(scores.get("native_naturalness_score")) < 8:
+        return "unsafe_metadata:critic_native_naturalness_score"
+    if _float_like(scores.get("retention_score")) < 8:
+        return "unsafe_metadata:critic_retention_score"
+    if _float_like(scores.get("specificity_score")) < 8:
+        return "unsafe_metadata:critic_specificity_score"
     return ""
 
 
@@ -452,6 +496,13 @@ def _normalize_tag(tag: Any) -> str:
     normalized = _SPACE_RE.sub(" ", normalized)
     normalized = re.sub(r"[^a-z0-9 #_-]", "", normalized)
     return normalized[:100].strip()
+
+
+def _float_like(value: Any) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _clean_public_text(text: Any) -> str:

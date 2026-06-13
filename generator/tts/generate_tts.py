@@ -7,6 +7,7 @@ from tqdm import tqdm
 import re
 import random
 from moviepy.editor import AudioFileClip
+from generator.text.content_gate import ensure_content_gate, normalize_narration_fields, tts_text
 from generator.text.generate_scripts_from_filtered import regenerate_post_by_id
 from generator.tts.speed_policy import final_duration_in_range
 from shared.utils.config import FINAL_METADATA_FILE, AUDIO_DIR, MARKS_DIR
@@ -75,9 +76,15 @@ def run_batch_tts():
             continue
 
         metadata = item
+        try:
+            ensure_content_gate(metadata, stage="tts")
+            normalize_narration_fields(metadata)
+        except ValueError as exc:
+            print(f"🚫 [id={original_filename}] content gate rejected before TTS: {exc}")
+            continue
         voice_type = metadata.get("voice", "male")
         voice_id = pick_voice_id(voice_type)
-        script_text = " ".join(metadata["script"])
+        script_text = tts_text(metadata)
 
         max_retries = 2
         try_count = 0
@@ -91,6 +98,9 @@ def run_batch_tts():
             audio.close()
 
             duration_ok, speed, final_duration = final_duration_in_range(duration)
+            wpm = _wpm(script_text, final_duration)
+            if wpm > _max_tts_wpm():
+                duration_ok = False
             if duration_ok:
                 # 성공
                 final_audio_path = AUDIO_DIR / f"{original_filename}.mp3"
@@ -104,7 +114,7 @@ def run_batch_tts():
                 print(
                     f"⛔️ {audio_path}: original={duration:.2f}s "
                     f"speed={speed:.2f} final={final_duration:.2f}s "
-                    f"(길이 부적절, 재시도 {try_count+1}/{max_retries})"
+                    f"wpm={wpm:.1f} (길이/속도 부적절, 재시도 {try_count+1}/{max_retries})"
                 )
                 os.remove(audio_path)
                 os.remove(marks_path)
@@ -125,13 +135,32 @@ def run_batch_tts():
                     break
 
                 # script, voice 갱신
-                script_text = " ".join(new_metadata["script"])
+                try:
+                    ensure_content_gate(new_metadata, stage="tts_regenerate")
+                    normalize_narration_fields(new_metadata)
+                except ValueError as exc:
+                    print(f"🚫 [id={original_filename}] regenerated metadata rejected before TTS retry: {exc}")
+                    break
+                script_text = tts_text(new_metadata)
                 voice_type = new_metadata.get("voice", "male")
                 voice_id = pick_voice_id(voice_type)
 
         if not success:
             print(f"🚫 [id={original_filename}] 최종 실패, skip")
 
+
+def _wpm(text: str, final_duration_seconds: float) -> float:
+    words = re.findall(r"[A-Za-z0-9']+", str(text or ""))
+    if final_duration_seconds <= 0:
+        return 999.0
+    return len(words) / (final_duration_seconds / 60)
+
+
+def _max_tts_wpm() -> float:
+    try:
+        return float(os.getenv("TTS_MAX_WPM", "225"))
+    except ValueError:
+        return 225.0
 
 
 if __name__ == "__main__":

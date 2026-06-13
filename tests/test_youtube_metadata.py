@@ -6,6 +6,7 @@ from generator.text.youtube_metadata import (
     format_youtube_title,
     merge_youtube_tags,
     sanitize_upload_metadata,
+    title_quality_reason,
     unsafe_upload_metadata_reason,
 )
 
@@ -77,6 +78,12 @@ def test_public_title_removes_aita_prefix_and_viral_hashtag():
     assert not formatted.lower().startswith("aita")
     assert "#viral" not in formatted
     assert formatted.endswith("#shorts #story")
+
+
+def test_weak_generic_title_fails_quality_validation():
+    assert title_quality_reason("The Argument Started Before I Even Sat Down") == "generic_title"
+    assert title_quality_reason("A Family Bill Turned Into A Group Argument") == "generic_title"
+    assert title_quality_reason("He Parked In My Driveway, Then Called Me Petty") == ""
 
 
 def test_sanitize_upload_metadata_blocks_internal_values():

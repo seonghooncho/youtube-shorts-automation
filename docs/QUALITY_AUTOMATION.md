@@ -6,7 +6,7 @@ Generated Shorts should be fast enough for the Shorts feed, visually varied, and
 
 ## Current Defaults
 
-- Script length: 820-980 preferred characters, hard limit 750-1150 characters.
+- Script length: 820-980 preferred characters, hard limit 650-1050 characters.
 - Script model: `gpt-5.5` by default for source-faithful adaptation quality.
 - Filter model: `gpt-5.4-nano` by default for low-cost source scorecard classification.
 - TTS speed: 1.12x-1.30x based on original duration.
@@ -84,7 +84,10 @@ Script generation uses Structured Outputs with these required fields:
 - `bg_strategy`: story, asmr, or hybrid
 - `rewrite_notes`: what was tightened for retention
 - `visual_keywords`: 5-8 concrete stock-video search phrases
-- `script`: first-person narration paragraphs
+- `voiceover_lines`: 7-10 complete narration lines
+- `tts_text`: explicit narration text for TTS pacing
+- `caption_chunks`: short caption chunks, max 42 characters each
+- `script`: compatibility copy of `voiceover_lines`
 
 The source is treated as a seed story rather than a transcript. The writer may compress repeated events, add plausible small dialogue, sharpen stakes, and choose a more relatable angle, but must keep the same core conflict, relationship type, narrator action, consequence, and final moral question. The writer must not invent new crimes, lawsuits, police, violence, sexual content, cheating, medical emergencies, revenge plans, pregnancy, minors, or job loss unless the source clearly supports them.
 
@@ -92,7 +95,7 @@ The local validator rejects scripts before TTS when any hard failure is detected
 
 - source content is too thin or likely truncated
 - source involves minors or teen/high-school context in romantic or sexual conflict
-- script is outside the 750-1150 character hard bounds
+- script is outside the 650-1050 character hard bounds
 - first sentence hook is missing, too long, starts with slow setup, or lacks a concrete crossed line
 - first two seconds are vague, too long, or lack a concrete crossed line
 - turning point, payoff line, retention risk, cut plan, or background strategy is missing or weak
@@ -103,7 +106,7 @@ The local validator rejects scripts before TTS when any hard failure is detected
 - script invents unsupported high-stakes facts such as police/legal threats, violence, cheating, pregnancy, medical emergencies, minors, or job loss
 - lexical overlap with the original story is too low, which usually means the adaptation drifted from the source
 
-Non-blocking warnings are stored in `quality_warnings` for valid scripts that are outside the preferred 820-980 character target, show repetitive paragraph starts, or overload the final paragraph.
+Non-blocking warnings are stored in `quality_warnings` for valid scripts that are outside the preferred 820-980 character target, show repetitive line starts, or overload the final question.
 
 ## Performance Learning Loop
 
@@ -121,10 +124,10 @@ When enough metrics exist, script generation reads the top-performing `source_ar
 
 Upload metadata follows the current reference Shorts pattern:
 
-- title starts with a concrete conflict sentence and ends with `#shorts #story #reddit #viral`
+- title starts with a concrete conflict sentence and ends with `#shorts #story`
 - title is capped at YouTube's 100-character limit after hashtag packaging
 - description contains the generated description, the sharper viewer question, and the same hashtag line
-- tags preserve source-specific tags first, then add stable discovery tags such as `shorts`, `story`, `reddit`, `viral`, `storytime`, and `reddit story`
+- tags preserve source-specific tags first, then add stable discovery tags such as `shorts`, `story`, `storytime`, `drama`, and `short story`
 
 GPT is instructed not to add hashtags directly. The local metadata post-processor applies the channel style only after script quality validation succeeds.
 

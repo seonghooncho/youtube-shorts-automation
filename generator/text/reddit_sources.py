@@ -29,7 +29,7 @@ class RedditScrapeConfig:
     request_max_attempts: int = 4
     request_backoff_seconds: float = 2.0
     pullpush_page_size: int = 50
-    synthetic_fallback_enabled: bool = True
+    synthetic_fallback_enabled: bool = False
     synthetic_fallback_count: int = 60
 
     @classmethod
@@ -54,7 +54,7 @@ class RedditScrapeConfig:
             request_max_attempts=int(os.getenv("REDDIT_REQUEST_MAX_ATTEMPTS", cls.request_max_attempts)),
             request_backoff_seconds=float(os.getenv("REDDIT_REQUEST_BACKOFF_SECONDS", cls.request_backoff_seconds)),
             pullpush_page_size=int(os.getenv("PULLPUSH_PAGE_SIZE", cls.pullpush_page_size)),
-            synthetic_fallback_enabled=os.getenv("REDDIT_SYNTHETIC_FALLBACK_ENABLED", "1") != "0",
+            synthetic_fallback_enabled=_synthetic_fallback_enabled_from_env(),
             synthetic_fallback_count=int(os.getenv("REDDIT_SYNTHETIC_FALLBACK_COUNT", cls.synthetic_fallback_count)),
         )
 
@@ -296,6 +296,10 @@ class SyntheticConflictSource:
                     "score": 0,
                     "num_comments": 0,
                     "source_provider": "synthetic",
+                    "source_authenticity": "synthetic",
+                    "source_collection_path": "synthetic",
+                    "source_quality_status": "skipped",
+                    "source_rejection_reason": "synthetic_fallback_source",
                     "source_generation_reason": "reddit_and_pullpush_unavailable",
                     **source_integrity_fields(content, detail_checked=True, detail_improved=False),
                 }
@@ -328,6 +332,10 @@ def post_from_reddit_child(child: Dict, config: RedditScrapeConfig) -> Optional[
         "score": data.get("score"),
         "num_comments": data.get("num_comments"),
         "source_provider": "reddit",
+        "source_authenticity": "reddit",
+        "source_collection_path": "reddit_oauth" if os.getenv("REDDIT_CLIENT_ID") and os.getenv("REDDIT_CLIENT_SECRET") else "reddit_public",
+        "source_quality_status": "",
+        "source_rejection_reason": "",
         **source_integrity_fields(content, detail_checked=False),
     }
 
@@ -353,11 +361,16 @@ def post_from_pullpush_item(data: Dict, config: RedditScrapeConfig) -> Optional[
         "score": data.get("score"),
         "num_comments": data.get("num_comments"),
         "source_provider": "pullpush",
+        "source_authenticity": "pullpush",
+        "source_collection_path": "pullpush",
+        "source_quality_status": "",
+        "source_rejection_reason": "",
         **source_integrity_fields(content, detail_checked=False),
     }
 
 
 def collect_with_fallback(config: RedditScrapeConfig, scraped_ids: Set[str]) -> List[Dict[str, str]]:
+    config = _production_safe_config(config)
     try:
         return RedditApiSource(config).collect(scraped_ids)
     except Exception as e:
@@ -368,10 +381,37 @@ def collect_with_fallback(config: RedditScrapeConfig, scraped_ids: Set[str]) -> 
             posts = PullPushSource(config).collect(scraped_ids)
         except Exception as pullpush_error:
             if not config.synthetic_fallback_enabled:
-                raise
+                print(f"⚠️ PullPush 수집 실패, synthetic fallback disabled: {pullpush_error}")
+                return []
             print(f"⚠️ PullPush 수집 실패, synthetic conflict fallback 사용: {pullpush_error}")
             return SyntheticConflictSource(config).collect(scraped_ids)
         return _supplement_with_synthetic_if_needed(config, scraped_ids, posts)
+
+
+def _production_safe_config(config: RedditScrapeConfig) -> RedditScrapeConfig:
+    if _is_production_env() and config.synthetic_fallback_enabled and not _allow_synthetic_in_production():
+        return RedditScrapeConfig(
+            **{
+                **config.__dict__,
+                "synthetic_fallback_enabled": False,
+            }
+        )
+    return config
+
+
+def _synthetic_fallback_enabled_from_env() -> bool:
+    enabled = os.getenv("REDDIT_SYNTHETIC_FALLBACK_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"}
+    if _is_production_env() and enabled and not _allow_synthetic_in_production():
+        return False
+    return enabled
+
+
+def _is_production_env() -> bool:
+    return any(os.getenv(name, "").strip().lower() == "production" for name in ("APP_ENV", "YT_ENV"))
+
+
+def _allow_synthetic_in_production() -> bool:
+    return os.getenv("ALLOW_SYNTHETIC_IN_PRODUCTION", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _get_json_with_retries(

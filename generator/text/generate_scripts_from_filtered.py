@@ -5,6 +5,7 @@ import os
 import re
 from pathlib import Path
 from typing import Any, Dict
+from generator.text.content_gate import ensure_content_gate, normalize_narration_fields
 from generator.text.generate_script import generate_script, ReturnScript
 from generator.text.script_fingerprint import (
     STYLE_VARIANTS,
@@ -14,6 +15,7 @@ from generator.text.script_fingerprint import (
 )
 from generator.text.script_quality import (
     MAX_SCRIPT_CHARS,
+    MIN_SCRIPT_CHARS,
     TARGET_MAX_SCRIPT_CHARS,
     TARGET_MIN_SCRIPT_CHARS,
     build_source_profile,
@@ -57,15 +59,28 @@ EXAMPLE_JSON = """
         "cut_plan": ["driveway hook", "phone camera alert", "kids running", "owner text message", "final boundary question"],
         "bg_strategy": "hybrid",
         "style_variant": "neighbor_dispute",
+        "voiceover_lines": [
+                "A dozen kids turned my driveway into their playground.",
+                "The unit next door is a short-term rental, so guests change every few days.",
+                "One night my security camera kept pinging while I was trying to work.",
+                "I opened the app and saw kids doing flips on my driveway.",
+                "When one kid fell on the concrete, I used the camera speaker and told them to leave.",
+                "The owner texted back that they were just enjoying the outdoors.",
+                "I sent screenshots and said my driveway was not free supervision.",
+                "Would you have shut it down too?"
+        ],
+        "tts_text": "A dozen kids turned my driveway into their playground. The unit next door is a short-term rental, so guests change every few days. One night my security camera kept pinging while I was trying to work. I opened the app and saw kids doing flips on my driveway. When one kid fell on the concrete, I used the camera speaker and told them to leave. The owner texted back that they were just enjoying the outdoors. I sent screenshots and said my driveway was not free supervision. Would you have shut it down too?",
+        "caption_chunks": ["Kids turned my driveway into a playground", "My security camera kept pinging", "I saw flips on the concrete", "The owner brushed it off", "Would you have shut it down too?"],
         "rewrite_notes": "Removed slow vacation-rental context and led with the crossed boundary.",
         "script": [
-                "A dozen kids turned my driveway into their playground, and their parents complained when I told them to leave.",
-                "I own a small townhouse near the beach, and the unit next door is a short-term rental. At first, the guests were just cutting across my yard. Annoying, but whatever.",
-                "Then one night my security camera kept pinging. I opened the app and saw kids running across my driveway, doing flips, screaming, and using my property like a party space.",
-                "I waited a few minutes, hoping an adult would step in. Nobody did. When one kid wiped out hard on the concrete, I used the camera speaker and told them they needed to leave.",
-                "The next day, I sent screenshots to the owner next door. I expected an apology. Instead, they said the kids were just enjoying the outdoors and I was overreacting.",
-                "So I told them clearly: their renters do not get to use my driveway, my yard, or my cameras as free supervision.",
-                "Was I too strict, or would you have shut it down too?"
+                "A dozen kids turned my driveway into their playground.",
+                "The unit next door is a short-term rental, so guests change every few days.",
+                "One night my security camera kept pinging while I was trying to work.",
+                "I opened the app and saw kids doing flips on my driveway.",
+                "When one kid fell on the concrete, I used the camera speaker and told them to leave.",
+                "The owner texted back that they were just enjoying the outdoors.",
+                "I sent screenshots and said my driveway was not free supervision.",
+                "Would you have shut it down too?"
         ]
 }
 """.strip()
@@ -109,18 +124,21 @@ def call_gpt_generate_script(title, content, post=None, regenerate_reason=None):
         "- Avoid generic AI-storytelling phrases: acted like I was the problem, the unreasonable one, people are split, half the people, keep the peace, let it go, crossed a boundary, the situation, the issue, the conflict, the drama, what changed everything, that was when, instead of owning it, I decided to stand my ground, I set a boundary, I held the boundary, The proof was clear, What made it worse was.",
         "- Prefer concrete receipts and actions over abstract labels. Each accepted script needs at least four source-grounded details such as a specific object, place, message, receipt, bill, camera, app, photo, timestamp, money amount, count, or exact action someone took.",
         "- The first sentence must be a strong hook with a concrete crossed line. Start with what someone did wrong, what it cost, or why the narrator looked like the villain. Do not start with age, backstory, relationship length, 'So, get this', or 'A little backstory'.",
-        "- The first 3 paragraphs must follow this rhythm: hook result, quick context, then unexpected escalation. Do not explain every detail chronologically.",
-        "- Every paragraph should either add a new problem, raise the stakes, or move toward the final decision. Cut neutral reflection.",
+        "- The first 3 voiceover lines must follow this rhythm: hook result, quick context, then unexpected escalation. Do not explain every detail chronologically.",
+        "- Every voiceover line should either add a new problem, raise the stakes, or move toward the final decision. Cut neutral reflection.",
         "- Keep the pacing fast. Remove filler, repeated setup, and slow explanations. The narration should still be understandable after a moderate speed-up.",
-        "- Structure the story in a `script` array of exactly 5 or 6 short paragraphs.",
+        "- Structure the story in `voiceover_lines` as 7 to 10 complete short lines. Keep `script` identical to `voiceover_lines` for compatibility.",
+        "- Fill `tts_text` as the complete narration joined from `voiceover_lines`, with natural punctuation pauses before the receipt/reveal and before the final question.",
+        "- Fill `caption_chunks` as short retention captions: max 42 characters per chunk, final question as its own chunk, first caption clearly shows the conflict, and do not reveal the twist too early.",
         f"- The joined `script` narration must be {target_min_chars} to {target_max_chars} characters, including spaces.",
         f"- Anything over {MAX_SCRIPT_CHARS} characters is invalid. Cut harder instead of explaining more.",
-        "- Paragraph length limits: hook under 135 characters, middle paragraphs under 185 characters each, final paragraph under 170 characters.",
+        "- Line limits: first line under 120 characters, no voiceover line over 170 characters.",
+        "- The final viewer question must be the separate final line.",
         "- Before returning, silently count the joined `script` characters and cut until it fits the target window. Do not reveal the count.",
-        "- Prefer 145 to 185 spoken words total. Remove repeated history, extra dialogue, and neutral reflection first.",
-        "- The target final narration length is roughly 42 to 65 seconds after a moderate speed-up. Prefer concise sentences over long paragraphs.",
+        "- Prefer 120 to 170 spoken words total. Remove repeated history, extra dialogue, and neutral reflection first.",
+        "- The target final narration length is roughly 42 to 65 seconds after a moderate speed-up. Prefer concise sentences over long lines.",
         "- The script should never feel stretched, repetitive, or abruptly shortened; keep only the setup, escalation, decision, and question.",
-        "- Keep the final paragraph short. Do not pack new facts and the viewer question into one overloaded sentence.",
+        "- Keep the final line short. Do not pack new facts and the viewer question into one overloaded sentence.",
         "- Add a `visual_keywords` array with 5 to 8 short English stock-video search phrases that match the story's setting and emotion.",
         "- Visual keywords should be concrete and searchable, such as 'phone texting', 'couple argument', 'apartment hallway', 'office conversation', 'security camera', or 'angry neighbor'. Avoid generic terms like 'nature', 'background', or 'landscape' unless the story truly needs them.",
         "- Avoid visual keywords that imply minors, teenagers, school romance, sexual content, or anything that would make stock footage unsafe.",
@@ -133,7 +151,7 @@ def call_gpt_generate_script(title, content, post=None, regenerate_reason=None):
         "\n[IMPORTANT]",
         "- The response **must strictly follow the JSON structure** shown above with no missing keys.",
         "- Any syntax or formatting error in the returned JSON will be considered a failure.",
-        "- **If the script contains fewer than 750 characters or more than 1150 characters, it's considered invalid.**",
+        f"- **If the joined voiceover contains fewer than {MIN_SCRIPT_CHARS} characters or more than {MAX_SCRIPT_CHARS} characters, it's considered invalid.**",
         "\n[Source metadata]",
         f"- Source provider: {source.provider or 'unknown'}",
         f"- Source URL: {source.source_url or 'unknown'}",
@@ -238,11 +256,13 @@ def validate_and_parse_metadata(result: ReturnScript, idx, post) -> Dict[str, An
             raise ValueError("❌ bg_strategy는 story, asmr, hybrid 중 하나여야 함")
 
         metadata["script"] = [line.strip() for line in metadata["script"] if line.strip()]
+        metadata["voiceover_lines"] = [line.strip() for line in metadata.get("voiceover_lines") or [] if str(line).strip()]
         metadata["story_beats"] = [beat.strip() for beat in metadata["story_beats"] if beat.strip()]
         metadata["cut_plan"] = [cut.strip() for cut in metadata["cut_plan"] if cut.strip()][:6]
         metadata.setdefault("critic_scores", {})
         metadata.setdefault("critic_problems", [])
         metadata.setdefault("critic_rewrite_instructions", [])
+        normalize_narration_fields(metadata)
 
         if post and post.get("content"):
             marketability_reject = source_reject_reason_for_marketability(post)
@@ -250,9 +270,9 @@ def validate_and_parse_metadata(result: ReturnScript, idx, post) -> Dict[str, An
                 raise ValueError(f"❌ source_marketability_reject: {marketability_reject}")
 
         script_length = len(script_text(metadata))
-        if script_length < 750:
+        if script_length < MIN_SCRIPT_CHARS:
             raise ValueError(f"❌ script가 너무 짧음 (현재 {script_length}자)")
-        if script_length > 1150:
+        if script_length > MAX_SCRIPT_CHARS:
             raise ValueError(f"❌ script가 쇼츠 목표보다 너무 긺 (현재 {script_length}자)")
 
         metadata["visual_keywords"] = _clean_visual_keywords(metadata["visual_keywords"])
@@ -261,7 +281,14 @@ def validate_and_parse_metadata(result: ReturnScript, idx, post) -> Dict[str, An
         metadata["source_score"] = (post or {}).get("source_score")
         metadata["source_archetype"] = (post or {}).get("source_archetype") or metadata.get("hook_type") or ""
         metadata["source_provider"] = (post or {}).get("source_provider", "")
+        metadata["source_authenticity"] = (post or {}).get("source_authenticity") or metadata["source_provider"] or "unknown"
+        metadata["source_collection_path"] = (post or {}).get("source_collection_path", "")
+        metadata["source_detail_checked"] = bool((post or {}).get("source_detail_checked", False))
+        metadata["source_detail_improved"] = bool((post or {}).get("source_detail_improved", False))
+        metadata["source_quality_status"] = (post or {}).get("source_quality_status", "")
+        metadata["source_rejection_reason"] = (post or {}).get("source_rejection_reason", "")
         metadata["source_title"] = (post or {}).get("title") or metadata.get("source_title") or metadata.get("title") or ""
+        metadata["source_content_excerpt"] = str((post or {}).get("content") or "")[:3000]
         metadata["public_title"] = metadata.get("public_title") or metadata.get("title") or metadata["source_title"]
         metadata["source_subreddit"] = (post or {}).get("subreddit", "")
         metadata["source_url"] = (post or {}).get("source_url", "")
@@ -316,9 +343,9 @@ def _regenerate_reason_from_error(message: str) -> str:
         return (
             f"{current_phrase}Return the full JSON again, but rewrite the `script` to "
             f"{target_min_chars}-{target_max_chars} characters total, hard max {MAX_SCRIPT_CHARS}. "
-            "Use exactly 5 short paragraphs. Keep the same source conflict, hook, turning point, payoff, "
+            "Use 7 to 10 complete voiceover lines. Keep the same source conflict, hook, turning point, payoff, "
             "and final question. Remove repeated backstory, extra dialogue, and neutral reflection. "
-            "No paragraph may exceed 185 characters."
+            "The first line must stay under 120 characters and no line may exceed 170 characters."
         )
     if "품질검증 실패" in message:
         return (
@@ -545,7 +572,7 @@ def _fallback_public_title(title: str, content: str) -> str:
 
 def _fallback_opening_hook(title: str, crossed_line: str, content: str) -> str:
     action = _fallback_hook_action(title, crossed_line, content)
-    return _clean_sentence(f"{action}, then complained when I asked them to stop", max_chars=132)
+    return _clean_sentence(f"{action}, then complained when I asked them to stop", max_chars=116)
 
 
 def _fallback_hook_action(title: str, crossed_line: str, content: str) -> str:
@@ -761,6 +788,7 @@ def _accept_metadata(
     previous_history: list[Dict[str, Any]],
 ) -> None:
     apply_script_fingerprint(metadata)
+    ensure_content_gate(metadata, stage="script_accept")
     diversity_issues = batch_diversity_issues(metadata, metadata_list, previous_history)
     if diversity_issues:
         raise ValueError(f"batch_diversity_failed: {diversity_issues_to_reason(diversity_issues)}")

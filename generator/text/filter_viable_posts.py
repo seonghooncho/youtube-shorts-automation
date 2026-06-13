@@ -217,7 +217,7 @@ def _is_llm_quota_error(message: str) -> bool:
 
 
 def _local_fallback_enabled() -> bool:
-    return os.getenv("FILTER_LOCAL_FALLBACK_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
+    return os.getenv("FILTER_LOCAL_FALLBACK_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _local_source_scorecard(post: dict, reason: str = "") -> SourceScorecard:
@@ -225,8 +225,6 @@ def _local_source_scorecard(post: dict, reason: str = "") -> SourceScorecard:
     content = str(post.get("content") or "")
     lowered = f"{title} {content}".lower()
     archetype = _local_archetype(lowered)
-    provider = str(post.get("source_provider") or "").lower()
-    synthetic_bonus = 1 if provider == "synthetic" else 0
     has_boundary = any(
         term in lowered
         for term in (
@@ -245,7 +243,7 @@ def _local_source_scorecard(post: dict, reason: str = "") -> SourceScorecard:
         )
     )
     base = 4 if has_boundary else 3
-    high = min(5, base + synthetic_bonus)
+    high = base
     decision = "YES" if base >= 4 else "NO"
     return SourceScorecard(
         decision=decision,
@@ -282,7 +280,13 @@ def _local_archetype(lowered: str) -> str:
 # Main
 # -----------------------------
 def filter_viable_posts():
-    client = _get_client()
+    try:
+        client = _get_client()
+        client_unavailable_reason = ""
+    except Exception as e:
+        client = None
+        client_unavailable_reason = str(e)
+        print(f"⚠️ source evaluator unavailable: {client_unavailable_reason}")
     model = os.getenv("FILTER_MODEL") or os.getenv("OPENAI_MODEL", "gpt-5.4-nano")
 
     if not RAW_POSTS_FILE.exists():
@@ -299,6 +303,8 @@ def filter_viable_posts():
         title, content = post.get("title", ""), post.get("content", "")
         local_reject_reason = _local_precheck(post)
         if local_reject_reason:
+            post["source_quality_status"] = "rejected"
+            post["source_rejection_reason"] = local_reject_reason
             print(f"⏭️ 로컬 precheck 실패로 스킵: {post.get('id', 'unknown')} - {local_reject_reason}")
             continue
 
@@ -344,13 +350,26 @@ def filter_viable_posts():
         """
 
         try:
+            if client is None:
+                if not _local_fallback_enabled():
+                    print(
+                        "⏭️ source evaluator unavailable and local fallback disabled; "
+                        f"skipping id={post.get('id', 'unknown')}"
+                    )
+                    post["source_quality_status"] = "skipped"
+                    post["source_rejection_reason"] = client_unavailable_reason or "source_evaluator_unavailable"
+                    continue
+                scorecard = _local_source_scorecard(post, client_unavailable_reason)
+                print(f"🧩 로컬 source scorecard 사용: id={post.get('id', 'unknown')} reason=client_unavailable")
             if llm_unavailable_reason and _local_fallback_enabled():
                 scorecard = _local_source_scorecard(post, llm_unavailable_reason)
                 print(f"🧩 로컬 source scorecard 사용: id={post.get('id', 'unknown')} reason=llm_unavailable")
-            else:
+            elif client is not None:
                 scorecard = _ask_source_scorecard(client, prompt, model)
             if not scorecard:
                 print("⚠️ GPT scorecard 응답 없음/불명. 해당 포스트 스킵")
+                post["source_quality_status"] = "skipped"
+                post["source_rejection_reason"] = "source_scorecard_empty"
                 continue
 
             source_score = _scorecard_average(scorecard)
@@ -359,8 +378,12 @@ def filter_viable_posts():
                 post["source_scorecard"] = scorecard.model_dump()
                 post["source_score"] = source_score
                 post["source_archetype"] = scorecard.archetype.strip().lower()[:80]
+                post["source_quality_status"] = "accepted"
+                post["source_rejection_reason"] = ""
                 selected_posts.append(post)
             else:
+                post["source_quality_status"] = "rejected"
+                post["source_rejection_reason"] = scorecard.reason
                 print(
                     "⏭️ source scorecard reject: "
                     f"id={post.get('id', 'unknown')} decision={scorecard.decision} "
@@ -378,17 +401,25 @@ def filter_viable_posts():
                     post["source_scorecard"] = scorecard.model_dump()
                     post["source_score"] = source_score
                     post["source_archetype"] = scorecard.archetype.strip().lower()[:80]
+                    post["source_quality_status"] = "accepted"
+                    post["source_rejection_reason"] = ""
                     selected_posts.append(post)
                 else:
+                    post["source_quality_status"] = "rejected"
+                    post["source_rejection_reason"] = scorecard.reason
                     print(
                         "⏭️ local source scorecard reject: "
                         f"id={post.get('id', 'unknown')} decision={scorecard.decision} "
                         f"score={source_score} risk={scorecard.retention_risk} reason={scorecard.reason}"
                     )
             else:
+                post["source_quality_status"] = "skipped"
+                post["source_rejection_reason"] = str(e)
                 print(f"GPT 판단 오류: {e}")
             continue
         except Exception as e:
+            post["source_quality_status"] = "skipped"
+            post["source_rejection_reason"] = str(e)
             print(f"GPT 판단 오류: {e}")
             continue
 

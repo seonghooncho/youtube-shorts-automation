@@ -1,9 +1,13 @@
+import json
+
 from generator.text.filter_viable_posts import (
     _ask_source_scorecard,
     _ask_yes_no,
     _is_llm_quota_error,
+    _local_fallback_enabled,
     _local_precheck,
     _local_source_scorecard,
+    filter_viable_posts,
 )
 
 
@@ -136,6 +140,65 @@ def test_local_source_scorecard_accepts_synthetic_boundary_source():
     assert scorecard.decision == "YES"
     assert scorecard.archetype == "money_pressure"
     assert scorecard.retention_risk == "medium"
+
+
+def test_filter_local_fallback_disabled_by_default(monkeypatch):
+    monkeypatch.delenv("FILTER_LOCAL_FALLBACK_ENABLED", raising=False)
+
+    assert _local_fallback_enabled() is False
+
+
+def test_local_source_scorecard_does_not_bonus_synthetic_provider():
+    content = (
+        "I had one clear boundary: my roommate could not put shared bills on my card. "
+        "Then she charged a dinner receipt without permission and blamed me in the group chat. "
+        "The messages showed I had only agreed to cover my own order."
+    )
+    synthetic = _local_source_scorecard({"source_provider": "synthetic", "title": "Card bill", "content": content})
+    reddit = _local_source_scorecard({"source_provider": "reddit", "title": "Card bill", "content": content})
+
+    assert synthetic.relatability == reddit.relatability
+    assert synthetic.debate_potential == reddit.debate_potential
+
+
+def test_llm_quota_failure_in_production_does_not_locally_approve(monkeypatch, tmp_path):
+    raw_path = tmp_path / "raw_posts.json"
+    viable_path = tmp_path / "viable_posts.json"
+    content = " ".join(
+        [
+            "My roommate put our shared dinner bill on my card without asking.",
+            "I had already said in the group chat that everyone needed to pay their own share.",
+            "The receipt showed twelve separate dinners, two desserts, and drinks I never ordered.",
+            "When I disputed the charge, she told our friends I embarrassed her at the restaurant.",
+            "I sent screenshots of the message where she promised to split the bill.",
+            "Now she says I made her look cheap, but she used my card before I agreed.",
+        ]
+        * 4
+    )
+    raw_path.write_text(
+        json.dumps(
+            [
+                {
+                    "id": "quota-1",
+                    "title": "My Roommate Put Twelve Dinners On My Card",
+                    "content": content,
+                    "content_char_count": len(content),
+                    "content_word_count": len(content.split()),
+                    "source_provider": "reddit",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.delenv("FILTER_LOCAL_FALLBACK_ENABLED", raising=False)
+    monkeypatch.setattr("generator.text.filter_viable_posts.RAW_POSTS_FILE", raw_path)
+    monkeypatch.setattr("generator.text.filter_viable_posts.VIABLE_POSTS_FILE", viable_path)
+    monkeypatch.setattr("generator.text.filter_viable_posts._get_client", lambda: _QuotaClient())
+
+    filter_viable_posts()
+
+    assert json.loads(viable_path.read_text(encoding="utf-8")) == []
 
 
 def test_local_precheck_rejects_minor_romance_source():
