@@ -344,7 +344,7 @@ def _build_local_fallback_metadata(post: Dict[str, Any], reason: str = "") -> Di
     consequence = parts.get("consequence") or _sentence_at(content, 5) or "I held the boundary and stopped covering for it"
     debate = parts.get("debate") or "Was I wrong to hold the boundary?"
 
-    hook = _clean_sentence(f"{_sentence_case(boundary)}, but {crossed_line}", max_chars=132)
+    hook = _fallback_opening_hook(crossed_line)
     if not hook.endswith((".", "?", "!")):
         hook = f"{hook}."
     first_two = _clean_sentence(hook, max_chars=96).rstrip(".!?")
@@ -421,6 +421,16 @@ def _extract_source_parts(content: str) -> Dict[str, str]:
     if questions:
         parts["debate"] = _clean_sentence(questions[-1], max_chars=160)
     return parts
+
+
+def _fallback_opening_hook(crossed_line: str) -> str:
+    action = _clean_sentence(crossed_line, max_chars=105).rstrip(".!?")
+    if not action:
+        action = "someone crossed the one boundary I had made clear"
+    return _clean_sentence(
+        f"Without asking me first, {action}, then acted like I was the problem",
+        max_chars=132,
+    )
 
 
 def _sentence_at(content: str, index: int) -> str:

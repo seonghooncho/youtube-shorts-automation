@@ -4,6 +4,7 @@ from generator.text.generate_scripts_from_filtered import (
     _is_llm_quota_error,
     _regenerate_reason_from_error,
 )
+from generator.text.reddit_sources import _SYNTHETIC_SCENARIOS, _synthetic_story_content
 
 
 def test_token_budgets_default_are_high_enough_for_full_schema(monkeypatch):
@@ -61,4 +62,21 @@ def test_local_fallback_metadata_passes_quality_validation():
     assert metadata["generation_fallback"] == "local_template"
     assert metadata["id"] == "synthetic-test"
     assert 750 <= metadata["script_char_count"] <= 1150
-    assert "my driveway" in metadata["first_2_seconds"].lower()
+    assert "without asking" in metadata["first_2_seconds"].lower()
+
+
+def test_local_fallback_metadata_covers_synthetic_seed_batch():
+    generated = []
+    for scenario in _SYNTHETIC_SCENARIOS[:17]:
+        post = {
+            "id": f"synthetic-test-{scenario['slug']}",
+            "title": scenario["title"],
+            "content": _synthetic_story_content(scenario),
+            "source_provider": "synthetic",
+        }
+
+        generated.append(_build_local_fallback_metadata(post, "insufficient_quota"))
+
+    assert len(generated) == 17
+    assert all(item["generation_fallback"] == "local_template" for item in generated)
+    assert all(750 <= item["script_char_count"] <= 1150 for item in generated)
