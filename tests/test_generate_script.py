@@ -6,6 +6,7 @@ from openai.lib._pydantic import to_strict_json_schema
 from generator.text import generate_script as generate_script_module
 from generator.text.generate_script import (
     DraftScript,
+    GenerateScriptError,
     NativeViewerCritic,
     ReturnScript,
     _text_verbosity,
@@ -18,6 +19,7 @@ from generator.text.generate_scripts_from_filtered import (
     _build_local_fallback_metadata,
     _clean_first_frame_text,
     _clean_short_hook_text,
+    _fit_fallback_script,
     _is_llm_quota_error,
     _regenerate_reason_from_error,
 )
@@ -115,6 +117,96 @@ def test_json_fallback_enabled_records_telemetry(monkeypatch):
     assert telemetry["structured_failures"] == 1
     assert telemetry["json_fallback_attempts"] == 1
     assert telemetry["json_fallback_failures"] == 0
+
+
+def test_schema_error_does_not_retry_all_structured_budgets(monkeypatch):
+    monkeypatch.setenv("SCRIPT_OUTPUT_TOKEN_BUDGETS", "100,200,300")
+    monkeypatch.setenv("SCRIPT_MAX_STRUCTURED_ATTEMPTS", "3")
+    monkeypatch.delenv("SCRIPT_RETRY_ON_TOKEN_LIMIT_ONLY", raising=False)
+    calls = {"structured": 0}
+
+    monkeypatch.setattr(generate_script_module, "_get_client", lambda: object())
+
+    def fail_schema(*_args):
+        calls["structured"] += 1
+        raise ValueError("schema validation failed: missing required DraftScript key")
+
+    monkeypatch.setattr(generate_script_module, "_try_structured", fail_schema)
+
+    with pytest.raises(GenerateScriptError) as exc:
+        generate_script("prompt")
+
+    assert calls["structured"] == 1
+    assert exc.value.telemetry["structured_attempts"] == 1
+    assert exc.value.telemetry["structured_retry_skipped_reason"] == "schema_validation_failure"
+
+
+def test_token_limit_error_retries_next_structured_budget(monkeypatch):
+    monkeypatch.setenv("SCRIPT_OUTPUT_TOKEN_BUDGETS", "100,200,300")
+    monkeypatch.setenv("SCRIPT_MAX_STRUCTURED_ATTEMPTS", "2")
+    calls = {"tokens": []}
+
+    monkeypatch.setattr(generate_script_module, "_get_client", lambda: object())
+
+    def structured(_client, _prompt, max_tokens):
+        calls["tokens"].append(max_tokens)
+        if len(calls["tokens"]) == 1:
+            raise ValueError("max output token limit reached; truncated JSON")
+        return _draft_script()
+
+    monkeypatch.setattr(generate_script_module, "_try_structured", structured)
+
+    draft = generate_script("prompt")
+
+    assert isinstance(draft, DraftScript)
+    assert calls["tokens"] == [100, 200]
+    telemetry = getattr(draft, "_generation_telemetry")
+    assert telemetry["structured_attempts"] == 2
+    assert telemetry["structured_retry_reason"] == "token_limit_or_truncated_output"
+
+
+def test_max_structured_attempts_caps_token_limit_retries(monkeypatch):
+    monkeypatch.setenv("SCRIPT_OUTPUT_TOKEN_BUDGETS", "100,200,300")
+    monkeypatch.setenv("SCRIPT_MAX_STRUCTURED_ATTEMPTS", "2")
+    calls = {"structured": 0}
+
+    monkeypatch.setattr(generate_script_module, "_get_client", lambda: object())
+
+    def fail_token_limit(*_args):
+        calls["structured"] += 1
+        raise ValueError("max output token limit reached")
+
+    monkeypatch.setattr(generate_script_module, "_try_structured", fail_token_limit)
+
+    with pytest.raises(GenerateScriptError) as exc:
+        generate_script("prompt")
+
+    assert calls["structured"] == 2
+    assert exc.value.telemetry["structured_attempts"] == 2
+    assert exc.value.telemetry["structured_retry_skipped_reason"] == "max_structured_attempts_reached"
+
+
+def test_failed_generate_script_errors_do_not_share_telemetry(monkeypatch):
+    monkeypatch.setenv("SCRIPT_OUTPUT_TOKEN_BUDGETS", "100")
+    monkeypatch.setenv("SCRIPT_MAX_STRUCTURED_ATTEMPTS", "1")
+    monkeypatch.setattr(generate_script_module, "_get_client", lambda: object())
+    messages = iter(["schema validation failed: missing key A", "schema validation failed: missing key B"])
+
+    def fail_next(*_args):
+        raise ValueError(next(messages))
+
+    monkeypatch.setattr(generate_script_module, "_try_structured", fail_next)
+
+    with pytest.raises(GenerateScriptError) as first:
+        generate_script("prompt-one")
+    with pytest.raises(GenerateScriptError) as second:
+        generate_script("prompt-two")
+
+    assert first.value.telemetry is not second.value.telemetry
+    assert first.value.telemetry["structured_attempts"] == 1
+    assert second.value.telemetry["structured_attempts"] == 1
+    assert first.value.telemetry["json_fallback_attempts"] == 0
+    assert second.value.telemetry["json_fallback_attempts"] == 0
 
 
 def test_text_verbosity_uses_medium_for_gpt_41(monkeypatch):
@@ -288,6 +380,16 @@ def test_local_fallback_metadata_covers_synthetic_seed_batch(monkeypatch):
     assert all(not _ends_with_dangling_word(line) for item in generated for line in item["script"])
     assert all(not _ends_with_dangling_word(_title_without_hashtags(item["title"])) for item in generated)
     assert all(len(item["title"]) <= 100 for item in generated)
+
+
+def test_local_fallback_does_not_add_generic_padding_lines():
+    script = ["Short crossed-line hook.", "Would you have said no?"]
+
+    fitted = _fit_fallback_script(script[:], ["A concrete driveway receipt existed."])
+
+    joined = " ".join(fitted)
+    assert "The frustrating part was not just the mistake" not in joined
+    assert "That is why this felt bigger" not in joined
 
 
 def test_local_fallback_disabled_by_default_in_production(monkeypatch):

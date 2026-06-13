@@ -203,6 +203,8 @@ def evaluate_content_gate(item: dict[str, Any]) -> dict[str, Any]:
         hard_errors.append("unknown_source_provider")
     if source_provider == "synthetic" and not _allow_synthetic_source():
         hard_errors.append("synthetic_source_not_allowed")
+    if generation_fallback == "local_template" and not _allow_local_template_render():
+        hard_errors.append("local_template_render_not_allowed")
     if generation_fallback == "local_template" and not _allow_local_template_upload():
         hard_errors.append("local_template_fallback_not_allowed")
     if source_provider in {"reddit", "pullpush"} and not str(item.get("source_url") or "").strip() and not _allow_missing_source_url():
@@ -596,6 +598,10 @@ def _allow_synthetic_source() -> bool:
 
 def _allow_local_template_upload() -> bool:
     return _truthy("ALLOW_LOCAL_TEMPLATE_UPLOAD")
+
+
+def _allow_local_template_render() -> bool:
+    return _truthy("ALLOW_LOCAL_TEMPLATE_RENDER")
 
 
 def _allow_missing_source_url() -> bool:

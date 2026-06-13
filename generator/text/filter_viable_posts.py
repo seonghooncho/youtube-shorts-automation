@@ -347,8 +347,97 @@ def local_source_priority(post: dict) -> float:
     return round(score, 2)
 
 
-def _source_scorecard_prompt(post: dict) -> str:
-    title, content = post.get("title", ""), post.get("content", "")
+def _filter_source_max_chars(content: str) -> int:
+    default_limit = _int_env("FILTER_SOURCE_MAX_CHARS", 2500)
+    long_limit = _int_env("FILTER_SOURCE_LONG_POST_MAX_CHARS", 1800)
+    if len(str(content or "")) > default_limit:
+        return max(700, min(default_limit, long_limit))
+    return default_limit
+
+
+def compact_source_for_filter(post: dict, max_chars: int) -> str:
+    content = str((post or {}).get("content") or "")
+    max_chars = max(500, int(max_chars or 2500))
+    if len(content) <= max_chars:
+        return content
+
+    normalized = re.sub(r"\s+", " ", content).strip()
+    leading = normalized[:1000].rsplit(" ", 1)[0].strip()
+    sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+", normalized) if part.strip()]
+    evidence_terms = (
+        "bill",
+        "receipt",
+        "camera",
+        "text",
+        "message",
+        "messages",
+        "screenshot",
+        "appointment",
+        "bloodwork",
+        "vet",
+        "card",
+        "driveway",
+        "package",
+        "landlord",
+        "manager",
+        "bank",
+        "timestamp",
+        "group chat",
+        "door camera",
+    )
+    evidence_sentences: list[str] = []
+    for sentence in sentences:
+        lowered = sentence.lower()
+        if _contains_evidence_term(lowered, evidence_terms) and sentence not in evidence_sentences:
+            evidence_sentences.append(sentence)
+        if len(" ".join(evidence_sentences)) > 700:
+            break
+
+    final_question = ""
+    for sentence in reversed(sentences):
+        if sentence.endswith("?"):
+            final_question = sentence
+            break
+    final_context = final_question or (sentences[-1] if sentences else "")
+    if len(final_context) > 420:
+        final_context = final_context[:420].rsplit(" ", 1)[0].strip()
+
+    sections = [leading]
+    if evidence_sentences:
+        sections.append(" ".join(evidence_sentences))
+    if final_context and final_context not in sections[-1]:
+        sections.append(final_context)
+    compacted = "\n...\n".join(section for section in sections if section).strip()
+    if len(compacted) <= max_chars:
+        return compacted
+
+    evidence_text = " ".join(evidence_sentences).strip()
+    if len(evidence_text) > 500:
+        head = evidence_text[:240].rsplit(" ", 1)[0].strip()
+        tail = evidence_text[-240:].split(" ", 1)[-1].strip()
+        evidence_text = f"{head} ... {tail}".strip()
+    tail = final_context[-320:] if final_context else ""
+    remaining = max_chars - len(evidence_text) - len(tail) - 20
+    if remaining <= 0:
+        return "\n...\n".join(part for part in (evidence_text, tail) if part)[:max_chars].strip()
+    head = leading[:remaining].rsplit(" ", 1)[0].strip()
+    return "\n...\n".join(part for part in (head, evidence_text, tail) if part)[:max_chars].strip()
+
+
+def _contains_evidence_term(lowered_sentence: str, terms: tuple[str, ...]) -> bool:
+    for term in terms:
+        if " " in term:
+            if term in lowered_sentence:
+                return True
+            continue
+        if re.search(rf"\b{re.escape(term)}\b", lowered_sentence):
+            return True
+    return False
+
+
+def _source_scorecard_prompt(post: dict, content_override: str | None = None) -> str:
+    title = post.get("title", "")
+    content = str(content_override if content_override is not None else post.get("content", ""))
     return f"""
         Evaluate whether this source can become a high-retention 42-65 second YouTube Shorts story.
 
@@ -476,6 +565,25 @@ def _local_archetype(lowered: str) -> str:
     return "abstract_boundary"
 
 
+def _source_rejection_reason_counts(posts: list[dict]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for post in posts:
+        reason = str(post.get("source_rejection_reason") or "").strip()
+        if not reason:
+            continue
+        key = reason[:100]
+        counts[key] = counts.get(key, 0) + 1
+    return dict(sorted(counts.items(), key=lambda item: item[1], reverse=True)[:10])
+
+
+def _accepted_source_archetypes(posts: list[dict]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for post in posts:
+        archetype = str(post.get("source_archetype") or "unknown").strip() or "unknown"
+        counts[archetype] = counts.get(archetype, 0) + 1
+    return dict(sorted(counts.items(), key=lambda item: item[1], reverse=True))
+
+
 # -----------------------------
 # Main
 # -----------------------------
@@ -501,6 +609,9 @@ def filter_viable_posts():
     source_scorecard_calls = 0
     source_scorecard_skipped_by_prerank = 0
     source_precheck_rejected = 0
+    filter_prompt_compacted_count = 0
+    filter_prompt_total_chars_before = 0
+    filter_prompt_total_chars_after = 0
     candidate_posts: List[dict] = []
 
     for post in raw_posts:
@@ -525,10 +636,22 @@ def filter_viable_posts():
         source_scorecard_skipped_by_prerank = len(skipped_by_prerank)
     else:
         posts_to_evaluate = candidate_posts
+        skipped_by_prerank = []
 
     for post in posts_to_evaluate:
         title = post.get("title", "")
-        prompt = _source_scorecard_prompt(post)
+        original_content = str(post.get("content") or "")
+        compacted_content = compact_source_for_filter(post, _filter_source_max_chars(original_content))
+        filter_prompt_total_chars_before += len(original_content)
+        filter_prompt_total_chars_after += len(compacted_content)
+        if compacted_content != original_content:
+            filter_prompt_compacted_count += 1
+            post["filter_prompt_compacted"] = True
+            post["filter_prompt_char_count"] = len(compacted_content)
+        else:
+            post["filter_prompt_compacted"] = False
+            post["filter_prompt_char_count"] = len(compacted_content)
+        prompt = _source_scorecard_prompt(post, compacted_content)
 
         try:
             if client is None:
@@ -626,6 +749,17 @@ def filter_viable_posts():
     selected_posts.sort(key=lambda item: float(item.get("source_priority_score") or item.get("source_acceptance_score") or item.get("source_score") or 0), reverse=True)
     with open(VIABLE_POSTS_FILE, "w", encoding="utf-8") as f:
         json.dump(selected_posts, f, ensure_ascii=False, indent=2)
+    local_priority_scores = [float(post.get("local_source_priority") or 0) for post in candidate_posts]
+    evaluated_priority_scores = [float(post.get("local_source_priority") or 0) for post in posts_to_evaluate]
+    skipped_examples = [
+        {
+            "id": post.get("id", ""),
+            "title": str(post.get("title") or "")[:120],
+            "local_source_priority": float(post.get("local_source_priority") or 0),
+            "reason": "below_local_prerank_cutoff",
+        }
+        for post in skipped_by_prerank[:5]
+    ]
     summary = {
         "raw_posts": len(raw_posts),
         "local_precheck_rejected": source_precheck_rejected,
@@ -633,6 +767,15 @@ def filter_viable_posts():
         "source_llm_eval_limit": _int_env("SOURCE_LLM_EVAL_LIMIT", 8),
         "source_scorecard_calls": source_scorecard_calls,
         "source_scorecard_skipped_by_prerank": source_scorecard_skipped_by_prerank,
+        "filter_prompt_compacted_count": filter_prompt_compacted_count,
+        "filter_prompt_total_chars_before": filter_prompt_total_chars_before,
+        "filter_prompt_total_chars_after": filter_prompt_total_chars_after,
+        "local_priority_cutoff_score": min(evaluated_priority_scores) if evaluated_priority_scores else 0,
+        "local_priority_top_scores": sorted(local_priority_scores, reverse=True)[:10],
+        "local_priority_min_evaluated": min(evaluated_priority_scores) if evaluated_priority_scores else 0,
+        "prerank_skipped_examples": skipped_examples,
+        "source_rejection_reason_counts": _source_rejection_reason_counts(raw_posts),
+        "accepted_source_archetypes": _accepted_source_archetypes(selected_posts),
         "accepted": len(selected_posts),
     }
     with open(_source_filter_summary_path(), "w", encoding="utf-8") as f:
