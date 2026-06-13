@@ -178,6 +178,19 @@ def test_synthetic_conflict_source_generates_viable_seed_shape():
     assert posts[0]["source_is_truncated"] is False
 
 
+def test_synthetic_conflict_source_uses_run_batch_id(monkeypatch):
+    monkeypatch.setenv("SYNTHETIC_SOURCE_BATCH_ID", "run-a")
+    config = RedditScrapeConfig(max_posts=1, synthetic_fallback_count=1)
+    first = SyntheticConflictSource(config).collect(set())
+    assert first[0]["id"].startswith("synthetic-run-a-")
+
+    monkeypatch.setenv("SYNTHETIC_SOURCE_BATCH_ID", "run-b")
+    second = SyntheticConflictSource(config).collect({first[0]["id"]})
+
+    assert len(second) == 1
+    assert second[0]["id"].startswith("synthetic-run-b-")
+
+
 def test_collect_with_fallback_uses_synthetic_when_external_sources_fail(monkeypatch):
     class _BrokenSource:
         def __init__(self, config):

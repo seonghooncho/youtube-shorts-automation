@@ -278,9 +278,9 @@ class SyntheticConflictSource:
 
     def collect(self, scraped_ids: Set[str]) -> List[Dict[str, str]]:
         posts: List[Dict[str, str]] = []
-        today = time.strftime("%Y%m%d", time.gmtime())
+        batch_id = os.getenv("SYNTHETIC_SOURCE_BATCH_ID") or time.strftime("%Y%m%d%H%M%S", time.gmtime())
         for index, scenario in enumerate(_SYNTHETIC_SCENARIOS, start=1):
-            post_id = f"synthetic-{today}-{scenario['slug']}"
+            post_id = f"synthetic-{batch_id}-{scenario['slug']}"
             if _should_skip(post_id, scraped_ids, {post["id"] for post in posts}, self.config):
                 continue
             content = _synthetic_story_content(scenario)
