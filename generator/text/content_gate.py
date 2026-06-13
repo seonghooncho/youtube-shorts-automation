@@ -188,10 +188,14 @@ _RECEIPT_TERMS = {
 }
 
 
-def evaluate_content_gate(item: dict[str, Any]) -> dict[str, Any]:
+_DRY_RUN_BLOCKED_STAGES = {"tts", "render", "finalize", "publish_ready", "upload", "publisher"}
+
+
+def evaluate_content_gate(item: dict[str, Any], *, stage: str = "") -> dict[str, Any]:
     hard_errors: list[str] = []
     warnings: list[str] = []
 
+    normalized_stage = str(stage or "").strip().lower()
     source_provider = str(item.get("source_provider") or item.get("source_authenticity") or "").strip().lower()
     generation_fallback = str(item.get("generation_fallback") or "").strip().lower()
     script = _script_lines(item)
@@ -199,6 +203,8 @@ def evaluate_content_gate(item: dict[str, Any]) -> dict[str, Any]:
     title = str(item.get("title") or "").strip()
     raw_source_text = _raw_source_text(item)
 
+    if item.get("dry_run") is True and normalized_stage in _DRY_RUN_BLOCKED_STAGES:
+        hard_errors.append("dry_run_item_not_allowed_downstream")
     if _is_production_env() and source_provider not in {"reddit", "pullpush", "synthetic"} and not _allow_unknown_source_provider():
         hard_errors.append("unknown_source_provider")
     if source_provider == "synthetic" and not _allow_synthetic_source():
@@ -263,7 +269,7 @@ def evaluate_content_gate(item: dict[str, Any]) -> dict[str, Any]:
 
 
 def ensure_content_gate(item: dict[str, Any], *, stage: str = "") -> None:
-    result = evaluate_content_gate(item)
+    result = evaluate_content_gate(item, stage=stage)
     if result["ok"]:
         return
     prefix = f"content_gate_failed:{stage}:" if stage else "content_gate_failed:"
@@ -274,7 +280,7 @@ def filter_content_gate_items(items: list[dict[str, Any]], *, stage: str = "") -
     accepted: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
     for item in items:
-        result = evaluate_content_gate(item)
+        result = evaluate_content_gate(item, stage=stage)
         item["content_gate"] = result
         if result["ok"]:
             accepted.append(item)

@@ -1,6 +1,7 @@
 from generator.text.content_gate import (
     caption_chunks_align_with_tts_text,
     caption_quality_reason,
+    ensure_content_gate,
     evaluate_content_gate,
     normalize_narration_fields,
     opening_visual_query_relevance_reason,
@@ -76,6 +77,29 @@ def test_content_gate_rejects_local_template_without_upload_override(monkeypatch
     assert result["ok"] is False
     assert "local_template_render_not_allowed" in result["hard_errors"]
     assert "local_template_fallback_not_allowed" in result["hard_errors"]
+
+
+def test_content_gate_blocks_dry_run_items_downstream():
+    item = _safe_item(dry_run=True)
+
+    assert evaluate_content_gate(item, stage="script_accept")["ok"] is True
+    assert evaluate_content_gate(item, stage="")["ok"] is True
+
+    for stage in ("tts", "render", "finalize", "publish_ready", "upload", "publisher"):
+        result = evaluate_content_gate(item, stage=stage)
+        assert result["ok"] is False
+        assert "dry_run_item_not_allowed_downstream" in result["hard_errors"]
+
+
+def test_ensure_content_gate_reports_dry_run_stage():
+    item = _safe_item(dry_run=True)
+
+    try:
+        ensure_content_gate(item, stage="tts")
+    except ValueError as exc:
+        assert "content_gate_failed:tts:dry_run_item_not_allowed_downstream" in str(exc)
+    else:
+        raise AssertionError("expected dry-run downstream metadata to fail content gate")
 
 
 def test_content_gate_rejects_low_critic_and_predicted_scores():
