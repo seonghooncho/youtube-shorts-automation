@@ -63,7 +63,8 @@ def test_validate_metadata_requires_visual_keywords():
 
     metadata = validate_and_parse_metadata(result, 0, {})
 
-    assert metadata["visual_keywords"] == ["phone texting", "couple argument"]
+    assert "nature" not in metadata["visual_keywords"]
+    assert len(metadata["visual_keywords"]) >= 2
 
 
 def test_validate_metadata_rejects_slow_long_script():

@@ -94,12 +94,26 @@ def _scorecard_average(scorecard: SourceScorecard) -> float:
     return round(sum(fields) / len(fields), 2)
 
 
-def _source_priority_score(scorecard: SourceScorecard) -> float:
+def source_acceptance_score(scorecard: SourceScorecard) -> float:
     fields = [
-        _scorecard_average(scorecard),
         scorecard.gate_fit_score,
         scorecard.hook_in_one_sentence,
         scorecard.receipt_strength,
+        scorecard.visual_matchability,
+        scorecard.length_fit_score,
+        scorecard.metadata_repairability,
+        scorecard.debate_potential,
+        scorecard.conflict_clarity,
+    ]
+    return round(sum(fields) / len(fields), 2)
+
+
+def _source_priority_score(scorecard: SourceScorecard) -> float:
+    fields = [
+        source_acceptance_score(scorecard),
+        scorecard.stakes,
+        scorecard.safe_adaptability,
+        scorecard.visualizability,
     ]
     return round(sum(fields) / len(fields), 2)
 
@@ -424,15 +438,17 @@ def filter_viable_posts():
                 continue
 
             source_score = _scorecard_average(scorecard)
-            min_score = float(os.getenv("SOURCE_SCORE_MIN_AVG", "4.0"))
+            acceptance_score = source_acceptance_score(scorecard)
+            min_score = float(os.getenv("SOURCE_ACCEPTANCE_MIN_SCORE", os.getenv("SOURCE_SCORE_MIN_AVG", "4.0")))
             if (
                 scorecard.decision == "YES"
                 and scorecard.retention_risk != "high"
-                and source_score >= min_score
+                and acceptance_score >= min_score
                 and _gate_fit_passes(scorecard)
             ):
                 post["source_scorecard"] = scorecard.model_dump()
                 post["source_score"] = source_score
+                post["source_acceptance_score"] = acceptance_score
                 post["source_priority_score"] = _source_priority_score(scorecard)
                 post["source_archetype"] = scorecard.archetype.strip().lower()[:80]
                 post["source_quality_status"] = "accepted"
@@ -444,7 +460,7 @@ def filter_viable_posts():
                 print(
                     "⏭️ source scorecard reject: "
                     f"id={post.get('id', 'unknown')} decision={scorecard.decision} "
-                    f"score={source_score} gate_fit={scorecard.gate_fit_score} hook={scorecard.hook_in_one_sentence} "
+                    f"score={source_score} acceptance={acceptance_score} gate_fit={scorecard.gate_fit_score} hook={scorecard.hook_in_one_sentence} "
                     f"visual={scorecard.visual_matchability} length={scorecard.length_fit_score} "
                     f"risk={scorecard.retention_risk} reason={scorecard.reason}"
                 )
@@ -455,15 +471,17 @@ def filter_viable_posts():
                 scorecard = _local_source_scorecard(post, llm_unavailable_reason)
                 print(f"🧩 OpenAI quota 오류로 로컬 source scorecard 사용: id={post.get('id', 'unknown')}")
                 source_score = _scorecard_average(scorecard)
-                min_score = float(os.getenv("SOURCE_SCORE_MIN_AVG", "4.0"))
+                acceptance_score = source_acceptance_score(scorecard)
+                min_score = float(os.getenv("SOURCE_ACCEPTANCE_MIN_SCORE", os.getenv("SOURCE_SCORE_MIN_AVG", "4.0")))
                 if (
                     scorecard.decision == "YES"
                     and scorecard.retention_risk != "high"
-                    and source_score >= min_score
+                    and acceptance_score >= min_score
                     and _gate_fit_passes(scorecard)
                 ):
                     post["source_scorecard"] = scorecard.model_dump()
                     post["source_score"] = source_score
+                    post["source_acceptance_score"] = acceptance_score
                     post["source_priority_score"] = _source_priority_score(scorecard)
                     post["source_archetype"] = scorecard.archetype.strip().lower()[:80]
                     post["source_quality_status"] = "accepted"
@@ -475,7 +493,7 @@ def filter_viable_posts():
                     print(
                         "⏭️ local source scorecard reject: "
                         f"id={post.get('id', 'unknown')} decision={scorecard.decision} "
-                        f"score={source_score} risk={scorecard.retention_risk} reason={scorecard.reason}"
+                        f"score={source_score} acceptance={acceptance_score} risk={scorecard.retention_risk} reason={scorecard.reason}"
                     )
             else:
                 post["source_quality_status"] = "skipped"
@@ -488,7 +506,7 @@ def filter_viable_posts():
             print(f"GPT 판단 오류: {e}")
             continue
 
-    selected_posts.sort(key=lambda item: float(item.get("source_priority_score") or item.get("source_score") or 0), reverse=True)
+    selected_posts.sort(key=lambda item: float(item.get("source_priority_score") or item.get("source_acceptance_score") or item.get("source_score") or 0), reverse=True)
     with open(VIABLE_POSTS_FILE, "w", encoding="utf-8") as f:
         json.dump(selected_posts, f, ensure_ascii=False, indent=2)
 
