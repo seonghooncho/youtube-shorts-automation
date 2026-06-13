@@ -46,6 +46,9 @@ DEFAULT_CAPTION_MAX_WORDS = 2
 DEFAULT_CAPTION_MAX_CHARS = 14
 DEFAULT_CAPTION_MAX_DURATION = 1.05
 DEFAULT_CAPTION_FADE_MS = 0
+DEFAULT_CAPTION_CHUNK_FONT_SIZE = 92
+DEFAULT_CAPTION_CHUNK_MAX_CHARS = 42
+DEFAULT_CAPTION_CHUNK_LINE_CHARS = 22
 ASS_WHITE_STYLE = "&H00FFFFFF"
 ASS_YELLOW_STYLE = "&H0000FFFF"
 ASS_BLACK_STYLE = "&H00000000"
@@ -348,16 +351,25 @@ def _write_adjusted_srt(adjusted_subs, path: Path, offset_seconds: float) -> Non
 
 def _write_centered_caption_ass(adjusted_subs, path: Path, offset_seconds: float) -> None:
     """Write centered Shorts-style captions as ASS for deterministic FFmpeg rendering."""
-    font_size = _env_int("CAPTION_FONT_SIZE", DEFAULT_CAPTION_FONT_SIZE, minimum=24)
+    render_mode = os.getenv("CAPTION_RENDER_MODE", "chunk").strip().lower()
+    if render_mode not in {"chunk", "word_pop"}:
+        render_mode = "chunk"
+    default_font_size = DEFAULT_CAPTION_FONT_SIZE if render_mode == "word_pop" else DEFAULT_CAPTION_CHUNK_FONT_SIZE
+    font_size = _env_int("CAPTION_CHUNK_FONT_SIZE" if render_mode == "chunk" else "CAPTION_FONT_SIZE", default_font_size, minimum=24)
     outline = _env_int("CAPTION_OUTLINE", DEFAULT_CAPTION_OUTLINE, minimum=0)
     shadow = _env_int("CAPTION_SHADOW", DEFAULT_CAPTION_SHADOW, minimum=0)
     center_x = _env_int("CAPTION_CENTER_X", DEFAULT_CAPTION_CENTER_X, minimum=0)
     center_y = _env_int("CAPTION_CENTER_Y", DEFAULT_CAPTION_CENTER_Y, minimum=0)
     fade_ms = _env_int("CAPTION_FADE_MS", DEFAULT_CAPTION_FADE_MS, minimum=0)
-    max_words = _env_int("CAPTION_MAX_WORDS", DEFAULT_CAPTION_MAX_WORDS, minimum=1)
-    max_chars = _env_int("CAPTION_MAX_CHARS", DEFAULT_CAPTION_MAX_CHARS, minimum=4)
-    _validate_caption_layout(font_size, outline, center_x, center_y, max_words, max_chars)
-    events = _build_centered_caption_events(adjusted_subs)
+    if render_mode == "word_pop":
+        max_words = _env_int("CAPTION_MAX_WORDS", DEFAULT_CAPTION_MAX_WORDS, minimum=1)
+        max_chars = _env_int("CAPTION_MAX_CHARS", DEFAULT_CAPTION_MAX_CHARS, minimum=4)
+        _validate_caption_layout(font_size, outline, center_x, center_y, max_words, max_chars)
+        events = _build_centered_caption_events(adjusted_subs)
+    else:
+        max_chars = _env_int("CAPTION_CHUNK_MAX_CHARS", DEFAULT_CAPTION_CHUNK_MAX_CHARS, minimum=8)
+        _validate_chunk_caption_layout(font_size, outline, center_x, center_y, max_chars)
+        events = _build_chunk_caption_events(adjusted_subs)
 
     with open(path, "w", encoding="utf-8") as f:
         f.write("[Script Info]\n")
@@ -381,10 +393,11 @@ def _write_centered_caption_ass(adjusted_subs, path: Path, offset_seconds: float
         )
         f.write("[Events]\n")
         f.write("Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n")
-        for (start, end, words) in events:
+        for event in events:
+            start, end, payload = event
             event_start = start + offset_seconds
             event_end = max(end + offset_seconds, event_start + 0.1)
-            text = _format_centered_caption_text(words)
+            text = _format_centered_caption_text(payload) if render_mode == "word_pop" else _format_chunk_caption_text(payload)
             prefix = f"{{\\an5\\pos({center_x},{center_y})\\fad({fade_ms},{fade_ms})}}"
             f.write(
                 "Dialogue: 0,"
@@ -426,6 +439,15 @@ def _build_centered_caption_events(
     return events
 
 
+def _build_chunk_caption_events(adjusted_subs):
+    events = []
+    for (start, end), text in adjusted_subs:
+        cleaned = _normalize_caption_word(text)
+        if cleaned:
+            events.append((float(start), float(end), cleaned))
+    return events
+
+
 def _validate_caption_layout(
     font_size: int,
     outline: int,
@@ -444,6 +466,27 @@ def _validate_caption_layout(
     estimated_width = min(max_chars, max_words * 8) * estimated_char_width + outline * 2
     if estimated_width > CAPTION_PLAY_RES_X - horizontal_margin * 2:
         raise ValueError(f"caption group may exceed safe width: estimated={estimated_width:.1f}")
+    if outline < max(3, int(font_size * 0.045)):
+        raise ValueError(f"caption outline too thin for Shorts contrast: outline={outline}, font_size={font_size}")
+
+
+def _validate_chunk_caption_layout(
+    font_size: int,
+    outline: int,
+    center_x: int,
+    center_y: int,
+    max_chars: int,
+) -> None:
+    horizontal_margin = _env_int("CAPTION_CHUNK_SAFE_MARGIN_X", 70, minimum=0)
+    vertical_margin = _env_int("CAPTION_SAFE_MARGIN_Y", 320, minimum=0)
+    if not (horizontal_margin <= center_x <= CAPTION_PLAY_RES_X - horizontal_margin):
+        raise ValueError(f"caption center_x outside safe area: {center_x}")
+    if not (vertical_margin <= center_y <= CAPTION_PLAY_RES_Y - vertical_margin):
+        raise ValueError(f"caption center_y outside safe area: {center_y}")
+    max_line_chars = min(max_chars, _env_int("CAPTION_CHUNK_LINE_CHARS", DEFAULT_CAPTION_CHUNK_LINE_CHARS, minimum=8))
+    estimated_width = max_line_chars * font_size * 0.42 + outline * 2
+    if estimated_width > CAPTION_PLAY_RES_X - horizontal_margin * 2:
+        raise ValueError(f"caption chunk may exceed safe width: estimated={estimated_width:.1f}")
     if outline < max(3, int(font_size * 0.045)):
         raise ValueError(f"caption outline too thin for Shorts contrast: outline={outline}, font_size={font_size}")
 
@@ -485,6 +528,46 @@ def _format_centered_caption_text(words) -> str:
         focus = display_words[-1]
         return f"{leading} {{\\c{ASS_YELLOW_INLINE}}}{focus}{{\\c{ASS_WHITE_INLINE}}}"
     return " ".join(display_words)
+
+
+def _format_chunk_caption_text(text: str) -> str:
+    uppercase = _env_bool("CAPTION_UPPERCASE", default=True)
+    highlight_last = _env_bool("CAPTION_HIGHLIGHT_LAST_WORD", default=True)
+    words = _normalize_caption_word(text).split()
+    if not words:
+        return ""
+    lines = _wrap_caption_chunk_words(words)
+    rendered_lines = []
+    word_index = 0
+    last_index = len(words) - 1
+    for line in lines:
+        rendered_words = []
+        for word in line:
+            display = word.upper() if uppercase else word
+            escaped = _escape_ass_text(display)
+            if highlight_last and word_index == last_index:
+                escaped = f"{{\\c{ASS_YELLOW_INLINE}}}{escaped}{{\\c{ASS_WHITE_INLINE}}}"
+            rendered_words.append(escaped)
+            word_index += 1
+        rendered_lines.append(" ".join(rendered_words))
+    return r"\N".join(rendered_lines)
+
+
+def _wrap_caption_chunk_words(words: list[str]) -> list[list[str]]:
+    max_line_chars = _env_int("CAPTION_CHUNK_LINE_CHARS", DEFAULT_CAPTION_CHUNK_LINE_CHARS, minimum=8)
+    if len(" ".join(words)) <= max_line_chars:
+        return [words]
+    first_line: list[str] = []
+    remaining = list(words)
+    while remaining:
+        candidate = first_line + [remaining[0]]
+        if first_line and len(" ".join(candidate)) > max_line_chars:
+            break
+        first_line.append(remaining.pop(0))
+    if not first_line and remaining:
+        first_line.append(remaining.pop(0))
+    second_line = remaining
+    return [first_line, second_line] if second_line else [first_line]
 
 
 def _normalize_caption_word(text: str) -> str:

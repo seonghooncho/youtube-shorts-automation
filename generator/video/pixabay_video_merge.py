@@ -550,6 +550,13 @@ def _queries_for_entry(entry: dict) -> list[str]:
         strategy = "hybrid"
     queries = []
     story_queries = []
+    opening_query = _clean_query(entry.get("opening_visual_query") or "")
+    if opening_query:
+        story_queries.append(opening_query)
+    for query in _visual_beat_query_values(entry):
+        normalized = _clean_query(query)
+        if normalized and normalized not in story_queries:
+            story_queries.append(normalized)
     for keyword in entry.get("visual_keywords") or []:
         normalized = _clean_query(keyword)
         if normalized and normalized not in story_queries:
@@ -605,6 +612,10 @@ def _update_metadata_with_bg_selection(content_id: str, selected_ids: set, queri
             item["pixabay_ids"] = sorted([str(video_id) for video_id in selected_ids])
             item["bg_queries"] = queries[:12]
             item["bg_strategy"] = strategy if strategy in {"story", "asmr", "hybrid"} else "hybrid"
+            opening_query = _clean_query(item.get("opening_visual_query") or "")
+            item["opening_visual_query_used"] = opening_query if opening_query in queries else (queries[0] if queries else "")
+            beat_queries = [_clean_query(query) for query in _visual_beat_query_values(item)]
+            item["visual_beat_queries_used"] = [query for query in beat_queries if query in queries]
             changed = True
             break
         if changed:
@@ -619,6 +630,18 @@ def _clean_query(query: str) -> str:
     if normalized in {"nature", "background", "landscape"}:
         return ""
     return normalized[:60]
+
+
+def _visual_beat_query_values(entry: dict) -> list[str]:
+    values: list[str] = []
+    for beat in entry.get("visual_beat_queries") or []:
+        if isinstance(beat, dict):
+            query = beat.get("query")
+        else:
+            query = beat
+        if str(query or "").strip():
+            values.append(str(query))
+    return values
 
 
 def _segment_duration_for_source(

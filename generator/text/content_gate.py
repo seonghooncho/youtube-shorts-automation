@@ -12,6 +12,75 @@ from generator.text.script_quality import (
 from generator.text.youtube_metadata import title_quality_reason
 
 
+_CAPTION_ACTOR_TERMS = {
+    "he",
+    "she",
+    "neighbor",
+    "roommate",
+    "coworker",
+    "aunt",
+    "brother",
+    "manager",
+    "owner",
+}
+_CAPTION_OBJECT_TERMS = {
+    "bill",
+    "building chat",
+    "camera",
+    "car",
+    "card",
+    "door camera",
+    "driveway",
+    "group chat",
+    "laundry",
+    "machine",
+    "package",
+    "receipt",
+    "storage unit",
+}
+_CAPTION_ACTION_TERMS = {
+    "accused",
+    "blocked",
+    "charged",
+    "changed",
+    "left",
+    "locked",
+    "moved",
+    "parked",
+    "posted",
+    "refused",
+    "returned",
+    "spent",
+    "took",
+    "used",
+}
+_CAPTION_BAD_PREFIXES = ("so ", "for context", "a little backstory")
+_AI_TEMPLATE_CAPTION_PHRASES = {
+    "acted like i was the problem",
+    "the unreasonable one",
+    "people are split",
+    "keep the peace",
+    "let it go",
+    "crossed a boundary",
+    "the situation",
+    "the issue",
+    "the conflict",
+    "the drama",
+    "what changed everything",
+    "the proof was clear",
+    "the boundary was simple",
+}
+_GENERIC_OPENING_QUERIES = {
+    "background",
+    "drama",
+    "generic story",
+    "landscape",
+    "nature",
+    "people",
+    "story",
+    "viral story",
+}
+_BAD_FIRST_FRAME_PREFIXES = ("aita", "story", "drama", "did i overreact")
 _RECEIPT_TERMS = {
     "app",
     "bill",
@@ -65,8 +134,12 @@ def evaluate_content_gate(item: dict[str, Any]) -> dict[str, Any]:
         hard_errors.append("missing_style_variant")
     if not str(item.get("script_fingerprint") or "").strip():
         hard_errors.append("missing_script_fingerprint")
+    hard_errors.extend(_opening_visual_errors(item))
 
     hard_errors.extend(_caption_errors(item))
+    captions_align, caption_alignment_reason = caption_chunks_align_with_tts_text(item)
+    if not captions_align:
+        hard_errors.append(f"caption_chunks_not_in_tts_text:{caption_alignment_reason}")
     hard_errors.extend(_critic_score_errors(item.get("critic_scores") or {}))
     hard_errors.extend(_predicted_score_errors(item))
 
@@ -170,6 +243,35 @@ def derive_caption_chunks(lines: list[str], max_chars: int = 42) -> list[str]:
     return chunks
 
 
+def caption_chunks_align_with_tts_text(item: dict[str, Any]) -> tuple[bool, str]:
+    chunks = caption_chunks(item)
+    if not chunks:
+        return False, "missing_caption_chunks"
+    narration = tts_text(item) or _join_tts_lines(voiceover_lines(item))
+    narration_tokens = _caption_tokens(narration)
+    if not narration_tokens:
+        return False, "missing_tts_text"
+
+    position = 0
+    for chunk_index, chunk in enumerate(chunks, start=1):
+        tokens = _caption_tokens(chunk)
+        if not tokens:
+            return False, f"empty_chunk_{chunk_index}"
+        for token in tokens:
+            found_at = _find_token(narration_tokens, token, position)
+            if found_at < 0:
+                return False, f"chunk_{chunk_index}_token_missing:{token}"
+            position = found_at + 1
+
+    final_line = voiceover_lines(item)[-1] if voiceover_lines(item) else ""
+    if final_line.rstrip().endswith("?"):
+        final_tokens = _caption_tokens(final_line)
+        final_chunk_tokens = _caption_tokens(chunks[-1])
+        if final_chunk_tokens and not _tokens_are_ordered_subset(final_chunk_tokens, final_tokens):
+            return False, "final_question_chunk_not_in_final_line"
+    return True, ""
+
+
 def _truncate_question_chunk(text: str, max_chars: int) -> str:
     cleaned = str(text or "").strip()
     if len(cleaned) <= max_chars:
@@ -234,7 +336,7 @@ def _caption_errors(item: dict[str, Any]) -> list[str]:
         errors.append("missing_caption_chunks")
         return errors
     _apply_caption_policy_metadata(item)
-    first_caption_reason = title_quality_reason(chunks[0])
+    first_caption_reason = caption_quality_reason(chunks[0], is_first=True)
     if first_caption_reason:
         errors.append(f"first_caption_hook:{first_caption_reason}")
     long_chunks = [idx + 1 for idx, chunk in enumerate(chunks) if len(chunk) > 42]
@@ -257,6 +359,47 @@ def _caption_errors(item: dict[str, Any]) -> list[str]:
     final_line = lines[-1] if lines else ""
     if final_line.endswith("?") and not chunks[-1].rstrip().endswith("?"):
         errors.append("final_question_caption_not_separate")
+    return errors
+
+
+def caption_quality_reason(chunk: str, *, is_first: bool = False) -> str:
+    lowered = re.sub(r"\s+", " ", str(chunk or "").strip().lower())
+    if not lowered:
+        return "empty"
+    if _is_generic_caption(lowered):
+        return "generic_filler"
+    if lowered.startswith(_CAPTION_BAD_PREFIXES):
+        return "slow_context_prefix"
+    for phrase in _AI_TEMPLATE_CAPTION_PHRASES:
+        if phrase in lowered:
+            return "ai_template_phrase"
+    if not is_first:
+        return ""
+
+    has_actor = any(term in lowered.split() for term in _CAPTION_ACTOR_TERMS)
+    has_object = any(term in lowered for term in _CAPTION_OBJECT_TERMS)
+    has_action = any(term in lowered.split() for term in _CAPTION_ACTION_TERMS)
+    if not (has_actor or has_object or has_action):
+        return "no_concrete_actor_object_or_action"
+    if not (has_object or has_action):
+        return "no_concrete_object_or_action"
+    return ""
+
+
+def _opening_visual_errors(item: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    first_frame_text = str(item.get("first_frame_text") or "").strip()
+    opening_visual_query = str(item.get("opening_visual_query") or "").strip()
+    if not first_frame_text:
+        errors.append("missing_first_frame_text")
+    elif len(first_frame_text) > 38:
+        errors.append("first_frame_text_too_long")
+    elif first_frame_text.lower().startswith(_BAD_FIRST_FRAME_PREFIXES):
+        errors.append("generic_first_frame_text")
+    if not opening_visual_query:
+        errors.append("missing_opening_visual_query")
+    elif _is_generic_opening_query(opening_visual_query):
+        errors.append("generic_opening_visual_query")
     return errors
 
 
@@ -348,7 +491,7 @@ def _apply_caption_policy_metadata(item: dict[str, Any]) -> None:
         density = "dense"
     elif total_chars >= 90 or len(chunks) >= 5:
         density = "medium"
-    item["first_caption_hook_score"] = 1 if chunks and not title_quality_reason(chunks[0]) else 0
+    item["first_caption_hook_score"] = 1 if chunks and not caption_quality_reason(chunks[0], is_first=True) else 0
     item["caption_density_bucket"] = density
     item["caption_reveal_policy"] = "sync_with_narration"
 
@@ -367,3 +510,36 @@ def _is_generic_caption(chunk: str) -> bool:
         "so what do you think",
     }
     return lowered in generic
+
+
+def _caption_tokens(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9']+", str(text or "").lower())
+
+
+def _find_token(tokens: list[str], needle: str, start: int) -> int:
+    for index in range(start, len(tokens)):
+        if tokens[index] == needle:
+            return index
+    return -1
+
+
+def _tokens_are_ordered_subset(subset: list[str], tokens: list[str]) -> bool:
+    position = 0
+    for token in subset:
+        found_at = _find_token(tokens, token, position)
+        if found_at < 0:
+            return False
+        position = found_at + 1
+    return True
+
+
+def _is_generic_opening_query(query: str) -> bool:
+    lowered = re.sub(r"\s+", " ", str(query or "").strip().lower())
+    if lowered in _GENERIC_OPENING_QUERIES:
+        return True
+    tokens = set(_caption_tokens(lowered))
+    if not tokens:
+        return True
+    concrete_tokens = set(_CAPTION_OBJECT_TERMS) | set(_CAPTION_ACTION_TERMS)
+    split_concrete = {token for phrase in concrete_tokens for token in phrase.split()}
+    return not bool(tokens & split_concrete)

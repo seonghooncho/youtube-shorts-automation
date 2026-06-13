@@ -49,6 +49,8 @@ def test_prompt_example_uses_consistent_voiceover_line_standard():
     assert example["script"] == example["voiceover_lines"]
     assert example["caption_chunks"][-1].endswith("?")
     assert all(len(chunk) <= 42 for chunk in example["caption_chunks"])
+    assert len(example["first_frame_text"]) <= 38
+    assert example["opening_visual_query"] == example["visual_beat_queries"][0]["query"]
 
 
 def test_critic_failure_causes_rewrite_failure(monkeypatch):
