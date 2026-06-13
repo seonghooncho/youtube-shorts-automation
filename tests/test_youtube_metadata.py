@@ -4,6 +4,8 @@ from generator.text.youtube_metadata import (
     format_youtube_description,
     format_youtube_title,
     merge_youtube_tags,
+    sanitize_upload_metadata,
+    unsafe_upload_metadata_reason,
 )
 
 
@@ -62,3 +64,25 @@ def test_apply_youtube_metadata_style_updates_upload_fields():
     assert "Would you show the screenshots?" in metadata["description"]
     assert metadata["tags"][:1] == ["workplace"]
     assert "shorts" in metadata["tags"]
+
+
+def test_sanitize_upload_metadata_blocks_internal_values():
+    reason = unsafe_upload_metadata_reason(
+        "PENDING #shorts",
+        "A normal description.",
+        ["storytime"],
+    )
+
+    assert reason == "unsafe_metadata:title:pending"
+
+
+def test_sanitize_upload_metadata_returns_public_fields():
+    metadata = sanitize_upload_metadata(
+        "My sister used my apartment as free storage #shorts",
+        "A family conflict about a crossed boundary.",
+        ["Family!", "#Storytime", "reddit"],
+    )
+
+    assert metadata["title"].endswith(" ".join(TITLE_HASHTAGS))
+    assert "A family conflict" in metadata["description"]
+    assert metadata["tags"][:2] == ["family", "storytime"]

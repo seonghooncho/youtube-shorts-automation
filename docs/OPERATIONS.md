@@ -94,6 +94,10 @@ YouTube upload에는 API key가 아니라 OAuth refresh token이 필요합니다
 
 성과 수집까지 사용하려면 refresh token에 `youtube.readonly`와 `yt-analytics.readonly` scope가 포함되어야 합니다. scope가 부족하면 metrics Lambda는 `/ytshorts/YOUTUBE_API_KEY`로 공개 Data API 통계 조회를 한 번 더 시도합니다. 공개 통계만 수집되면 `METRICS_PARTIAL`, 공개 API에서도 영상이 보이지 않거나 key가 없으면 `METRICS_BLOCKED`와 오류 사유를 남깁니다. Analytics API는 데이터 지연이 있을 수 있으므로 OAuth scope는 충분하지만 행이 없으면 실패가 아니라 `METRICS_PENDING`으로 기록합니다.
 
+OAuth scope는 refresh token만으로 자동 확장할 수 없습니다. Google 계정 동의 화면에서 새 scope를 한 번 승인해야 새 refresh token이 발급됩니다. 다만 scope가 부족해도 생성/업로드 workflow는 계속 동작하며, 성과 피드백 루프만 `METRICS_BLOCKED` 또는 `METRICS_PARTIAL` 상태로 degraded 됩니다.
+
+업로드 직전에는 title, description, tags, script에 내부 운영값이나 secret-like 값이 섞였는지 검사합니다. `PENDING`, OAuth/SSM/Terraform/AWS credential 이름, API key 형태 값이 발견되면 public 업로드하지 않고 `UPLOAD_BLOCKED`로 저장합니다.
+
 publisher Lambda는 `PUBLISH_REBASE_STALE_DAYS`보다 오래 밀린 미업로드 큐를 발견하면 예약일을 현재 시점부터 다시 일별 슬롯으로 정렬합니다. 오래된 예약일이 계속 누적되어 과거 스케줄만 업로드되는 상황을 줄이기 위한 보정입니다.
 
 publisher Lambda는 업로드 직전 `YOUTUBE_MIN_UPLOAD_BYTES`보다 작은 MP4를 `UPLOAD_BLOCKED`로 막습니다. Batch 렌더 단계는 이보다 앞서 `ffprobe`로 최종 MP4의 길이, 해상도, 오디오/비디오 스트림을 검증합니다.

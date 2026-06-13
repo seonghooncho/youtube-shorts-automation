@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import tempfile
 import time
 import urllib.parse
@@ -20,6 +21,51 @@ PUBLISH_METADATA_KEY = os.getenv("PUBLISH_METADATA_KEY", "publish-ready/final_me
 LEGACY_METADATA_KEY = os.getenv("LEGACY_METADATA_KEY", "shorts/state/final_metadata.json")
 SSM_PREFIX = os.getenv("SSM_PARAMETER_PREFIX", "/ytshorts")
 _CONFIG_CACHE: dict[str, str] = {}
+TITLE_HASHTAGS = ("#shorts", "#story", "#reddit", "#viral")
+DEFAULT_VIDEO_TAGS = (
+    "shorts",
+    "story",
+    "reddit",
+    "viral",
+    "storytime",
+    "reddit story",
+    "aita",
+    "drama",
+    "short story",
+)
+MAX_TITLE_CHARS = 100
+MAX_TITLE_CONFLICT_CHARS = 64
+MAX_DESCRIPTION_CHARS = 4800
+MAX_TAGS = 15
+_HASHTAG_RE = re.compile(r"#\w+")
+_SPACE_RE = re.compile(r"\s+")
+_SECRET_VALUE_RE = re.compile(
+    r"(sk-[A-Za-z0-9_-]{16,}|AIza[0-9A-Za-z_-]{20,}|AKIA[0-9A-Z]{16}|hf_[A-Za-z0-9]{20,})"
+)
+_INTERNAL_MARKERS = (
+    "OPENAI_API_KEY",
+    "HF_TOKEN",
+    "PIXABAY_API_KEY",
+    "SLACK_WEBHOOK_URL",
+    "AWS_ACCESS_KEY",
+    "AWS_SECRET_ACCESS_KEY",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "YOUTUBE_CLIENT_ID",
+    "YOUTUBE_CLIENT_SECRET",
+    "YOUTUBE_REFRESH_TOKEN",
+    "YOUTUBE_TOKEN_URI",
+    "SSM_PARAMETER",
+    "PARAMETER STORE",
+    "DYNAMODB",
+    "TERRAFORM",
+    "EVENTBRIDGE",
+    "STEP FUNCTIONS",
+    "LAMBDA",
+    "PENDING",
+    "UNDEFINED",
+    "NULL",
+    "NAN",
+)
 
 
 def handler(event, context):
@@ -38,6 +84,11 @@ def handler(event, context):
     if not content_id:
         return {"status": "skipped", "reason": "target_missing_id"}
 
+    metadata_error = _metadata_safety_error(target)
+    if metadata_error:
+        _block_upload(metadata, metadata_key, target, content_id, metadata_error)
+        return {"status": "blocked", "reason": metadata_error, "content_id": content_id}
+
     youtube_config = _youtube_config()
     if not youtube_config:
         _mark_content(content_id, "UPLOAD_BLOCKED", {"upload_error": "youtube_oauth_missing"})
@@ -49,21 +100,8 @@ def handler(event, context):
         resolved_key = _download_video(video_key, content_id, local_path)
         valid_upload, block_reason = _validate_upload_candidate(local_path)
         if not valid_upload:
-            target["status"] = "UPLOAD_BLOCKED"
-            target["upload_status"] = "UPLOAD_BLOCKED"
-            target["upload_error"] = block_reason
             target["video_key"] = resolved_key
-            target["updated_at"] = int(time.time())
-            _save_metadata(metadata, metadata_key)
-            _mark_content(
-                content_id,
-                "UPLOAD_BLOCKED",
-                {
-                    "upload_error": block_reason,
-                    "video_key": resolved_key,
-                    "upload_status": "UPLOAD_BLOCKED",
-                },
-            )
+            _block_upload(metadata, metadata_key, target, content_id, block_reason, {"video_key": resolved_key})
             return {"status": "blocked", "reason": block_reason, "content_id": content_id}
         youtube_id = _upload_youtube(local_path, target, youtube_config)
 
@@ -191,6 +229,24 @@ def _validate_upload_candidate(local_path: str) -> tuple[bool, str]:
     return True, "ok"
 
 
+def _block_upload(
+    metadata: list[dict[str, Any]],
+    metadata_key: str,
+    target: dict[str, Any],
+    content_id: str,
+    reason: str,
+    extra: dict[str, Any] | None = None,
+) -> None:
+    target["status"] = "UPLOAD_BLOCKED"
+    target["upload_status"] = "UPLOAD_BLOCKED"
+    target["upload_error"] = reason
+    target["updated_at"] = int(time.time())
+    _save_metadata(metadata, metadata_key)
+    payload = {"upload_error": reason, "upload_status": "UPLOAD_BLOCKED"}
+    payload.update(extra or {})
+    _mark_content(content_id, "UPLOAD_BLOCKED", payload)
+
+
 def _youtube_config() -> dict[str, str] | None:
     names = {
         "client_id": f"{SSM_PREFIX}/YOUTUBE_CLIENT_ID",
@@ -237,14 +293,12 @@ def _refresh_access_token(config: dict[str, str]) -> str:
 def _upload_youtube(file_path: str, item: dict[str, Any], config: dict[str, str]) -> str:
     access_token = _refresh_access_token(config)
     size = os.path.getsize(file_path)
-    title = str(item.get("title") or "Untitled Short")[:100]
-    description = str(item.get("description") or "")
-    tags = item.get("tags") or []
+    metadata = _sanitize_upload_metadata(item)
     body = {
         "snippet": {
-            "title": title,
-            "description": description,
-            "tags": tags,
+            "title": metadata["title"],
+            "description": metadata["description"],
+            "tags": metadata["tags"],
             "categoryId": _setting("YOUTUBE_CATEGORY_ID", "22"),
         },
         "status": {
@@ -276,6 +330,113 @@ def _upload_youtube(file_path: str, item: dict[str, Any], config: dict[str, str]
         with urllib.request.urlopen(upload_request, timeout=900) as response:
             payload = json.loads(response.read().decode("utf-8"))
     return payload["id"]
+
+
+def _metadata_safety_error(item: dict[str, Any]) -> str:
+    fields = {
+        "title": item.get("title", ""),
+        "description": item.get("description", ""),
+        "tags": " ".join(str(tag or "") for tag in item.get("tags") or []),
+        "script": " ".join(str(line or "") for line in item.get("script") or []),
+    }
+    for field_name, value in fields.items():
+        reason = _unsafe_public_text_reason(str(value or ""))
+        if reason:
+            return f"unsafe_metadata:{field_name}:{reason}"
+    try:
+        _sanitize_upload_metadata(item)
+    except ValueError as exc:
+        return str(exc)
+    return ""
+
+
+def _sanitize_upload_metadata(item: dict[str, Any]) -> dict[str, Any]:
+    title = _format_youtube_title(str(item.get("title") or "Untitled Short"))
+    description = _clean_public_text(str(item.get("description") or ""))[:MAX_DESCRIPTION_CHARS].strip()
+    tags = _merge_youtube_tags(item.get("tags") or [])
+    if not title.strip():
+        raise ValueError("unsafe_metadata:title:empty")
+    if not description:
+        description = _format_youtube_description("A fast storytime Short about a relatable everyday conflict.")
+    return {"title": title, "description": description, "tags": tags}
+
+
+def _format_youtube_title(title: str) -> str:
+    clean_title = _strip_hashtags(_clean_public_text(title)).strip(" .,-")
+    clean_title = _SPACE_RE.sub(" ", clean_title).strip() or "Reddit Story"
+    suffix = " ".join(_normalize_hashtag(tag) for tag in TITLE_HASHTAGS if _normalize_hashtag(tag))
+    budget = min(MAX_TITLE_CONFLICT_CHARS, MAX_TITLE_CHARS - len(suffix) - 1)
+    if len(clean_title) > budget:
+        clean_title = _truncate_at_word(clean_title, budget).strip(" .,-")
+    return f"{clean_title} {suffix}".strip()[:MAX_TITLE_CHARS]
+
+
+def _format_youtube_description(description: str) -> str:
+    clean_description = _strip_hashtags(_clean_public_text(description)).strip()
+    hashtag_line = " ".join(_normalize_hashtag(tag) for tag in TITLE_HASHTAGS if _normalize_hashtag(tag))
+    return "\n\n".join(part for part in (clean_description, hashtag_line) if part).strip()[:MAX_DESCRIPTION_CHARS]
+
+
+def _merge_youtube_tags(tags: list[Any]) -> list[str]:
+    merged: list[str] = []
+    for tag in list(tags or []) + list(DEFAULT_VIDEO_TAGS):
+        normalized = _normalize_tag(tag)
+        if not normalized or normalized in merged:
+            continue
+        merged.append(normalized)
+        if len(merged) >= MAX_TAGS:
+            break
+    return merged
+
+
+def _strip_hashtags(text: str) -> str:
+    return _SPACE_RE.sub(" ", _HASHTAG_RE.sub("", str(text or ""))).strip()
+
+
+def _normalize_hashtag(tag: str) -> str:
+    normalized = _normalize_tag(tag)
+    if not normalized:
+        return ""
+    return "#" + normalized.replace(" ", "")
+
+
+def _normalize_tag(tag: Any) -> str:
+    normalized = _clean_public_text(tag).strip().lower().lstrip("#")
+    normalized = _SPACE_RE.sub(" ", normalized)
+    normalized = re.sub(r"[^a-z0-9 #_-]", "", normalized)
+    return normalized[:100].strip()
+
+
+def _clean_public_text(text: Any) -> str:
+    cleaned = str(text or "").replace("\x00", " ")
+    cleaned = _SECRET_VALUE_RE.sub("[removed]", cleaned)
+    cleaned = _SPACE_RE.sub(" ", cleaned).strip()
+    return cleaned
+
+
+def _unsafe_public_text_reason(text: str) -> str:
+    if _SECRET_VALUE_RE.search(text):
+        return "secret_like_value"
+    upper = text.upper()
+    for marker in _INTERNAL_MARKERS:
+        if "_" in marker or " " in marker:
+            matched = marker in upper
+        else:
+            matched = bool(re.search(rf"\b{re.escape(marker)}\b", upper))
+        if matched:
+            return marker.lower().replace(" ", "_")
+    return ""
+
+
+def _truncate_at_word(text: str, limit: int) -> str:
+    if limit <= 0:
+        return ""
+    if len(text) <= limit:
+        return text
+    truncated = text[:limit].rstrip()
+    if " " in truncated:
+        truncated = truncated.rsplit(" ", 1)[0]
+    return truncated or text[:limit].rstrip()
 
 
 def _mark_content(content_id: str, status: str, extra: dict[str, Any] | None = None) -> None:

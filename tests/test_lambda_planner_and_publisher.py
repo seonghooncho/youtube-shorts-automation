@@ -102,3 +102,36 @@ def test_publisher_uses_ssm_upload_threshold(monkeypatch, tmp_path):
 
     assert valid is False
     assert reason == "video_too_small:14<100"
+
+
+def test_publisher_blocks_internal_upload_metadata(monkeypatch):
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "ap-northeast-2")
+    publisher = _load_module("publisher_metadata_safety_test_module", "infra/terraform/lambda/publisher.py")
+
+    reason = publisher._metadata_safety_error(
+        {
+            "title": "PENDING",
+            "description": "A normal story.",
+            "tags": ["storytime"],
+            "script": ["A normal caption line."],
+        }
+    )
+
+    assert reason == "unsafe_metadata:title:pending"
+
+
+def test_publisher_sanitizes_upload_metadata(monkeypatch):
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "ap-northeast-2")
+    publisher = _load_module("publisher_metadata_sanitize_test_module", "infra/terraform/lambda/publisher.py")
+
+    metadata = publisher._sanitize_upload_metadata(
+        {
+            "title": "My neighbor used my driveway #shorts",
+            "description": "A boundary conflict.",
+            "tags": ["Neighbor!", "#Storytime"],
+        }
+    )
+
+    assert metadata["title"].endswith("#shorts #story #reddit #viral")
+    assert metadata["description"] == "A boundary conflict."
+    assert metadata["tags"][:2] == ["neighbor", "storytime"]
