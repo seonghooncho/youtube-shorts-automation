@@ -1,5 +1,5 @@
 import os
-from typing import List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 from dotenv import load_dotenv, find_dotenv
 import openai
 from pydantic import BaseModel, Field, ValidationError
@@ -56,7 +56,24 @@ class ReturnScript(BaseModel):
     cut_plan: List[str] = Field(default_factory=list, description="A concise list of visual cut intentions for hook, context, escalation, decision, and question.")
     bg_strategy: Literal["story", "asmr", "hybrid"] = "hybrid"
     rewrite_notes: str = Field("", description="Short note explaining what was tightened for retention.")
+    style_variant: str = Field("", description="The concrete storytelling style variant selected for this source.")
+    critic_scores: Dict[str, Any] = Field(default_factory=dict)
+    critic_problems: List[str] = Field(default_factory=list)
+    critic_rewrite_instructions: List[str] = Field(default_factory=list)
     script: List[str]
+
+
+class NativeViewerCritic(BaseModel):
+    ai_smell_score: int = Field(..., ge=1, le=10)
+    native_naturalness_score: int = Field(..., ge=1, le=10)
+    retention_score: int = Field(..., ge=1, le=10)
+    specificity_score: int = Field(..., ge=1, le=10)
+    hook_score: int = Field(..., ge=1, le=10)
+    payoff_score: int = Field(..., ge=1, le=10)
+    comment_potential_score: int = Field(..., ge=1, le=10)
+    problems: List[str] = Field(default_factory=list)
+    rewrite_instructions: List[str] = Field(default_factory=list)
+
 
 def _assert_no_nulls(rs: ReturnScript) -> None:
     data = rs.model_dump(exclude_none=False)
@@ -136,6 +153,89 @@ def _fallback_json_mode(client: openai.OpenAI, prompt: str, max_output_tokens: i
             return ReturnScript.model_validate_json(sliced)
         raise
 
+
+def _critic_enabled() -> bool:
+    return os.getenv("SCRIPT_CRITIC_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _critic_hard_failure(critic: NativeViewerCritic) -> str:
+    failures = []
+    if critic.ai_smell_score > 3:
+        failures.append(f"ai_smell_score>{3} ({critic.ai_smell_score})")
+    if critic.native_naturalness_score < 8:
+        failures.append(f"native_naturalness_score<8 ({critic.native_naturalness_score})")
+    if critic.retention_score < 8:
+        failures.append(f"retention_score<8 ({critic.retention_score})")
+    if critic.specificity_score < 8:
+        failures.append(f"specificity_score<8 ({critic.specificity_score})")
+    if critic.hook_score < 8:
+        failures.append(f"hook_score<8 ({critic.hook_score})")
+    if critic.payoff_score < 8:
+        failures.append(f"payoff_score<8 ({critic.payoff_score})")
+    return "; ".join(failures)
+
+
+def _critic_scores(critic: NativeViewerCritic) -> dict:
+    return {
+        "ai_smell_score": critic.ai_smell_score,
+        "native_naturalness_score": critic.native_naturalness_score,
+        "retention_score": critic.retention_score,
+        "specificity_score": critic.specificity_score,
+        "hook_score": critic.hook_score,
+        "payoff_score": critic.payoff_score,
+        "comment_potential_score": critic.comment_potential_score,
+    }
+
+
+def _critic_prompt(source_prompt: str, draft: ReturnScript) -> str:
+    return (
+        "Evaluate this draft as a native English-speaking YouTube Shorts viewer.\n"
+        "Return only JSON matching the requested schema.\n\n"
+        "Hard-check whether it sounds like a real person, has a clear first sentence, avoids generic AI Reddit phrasing, "
+        "uses concrete source-grounded details, creates a visual picture each line, and has a payoff before the final question.\n\n"
+        "[Source and generation brief]\n"
+        f"{source_prompt[-6000:]}\n\n"
+        "[Draft JSON]\n"
+        f"{draft.model_dump_json()}"
+    )
+
+
+def critique_script(prompt: str, draft: ReturnScript) -> NativeViewerCritic:
+    client = _get_client()
+    resp = client.responses.parse(
+        model=os.getenv("SCRIPT_CRITIC_MODEL") or _default_model(),
+        input=[
+            {"role": "system", "content": "You are a ruthless native English Shorts viewer critic."},
+            {"role": "user", "content": _critic_prompt(prompt, draft)},
+        ],
+        text_format=NativeViewerCritic,
+        max_output_tokens=int(os.getenv("SCRIPT_CRITIC_MAX_OUTPUT_TOKENS", "1400")),
+        text={"verbosity": "low"},
+    )
+    parsed: NativeViewerCritic = resp.output_parsed
+    if parsed is None:
+        raise ValueError("critic output_parsed가 비었습니다.")
+    return parsed
+
+
+def _apply_critic_metadata(script: ReturnScript, critic: NativeViewerCritic) -> ReturnScript:
+    data = script.model_dump()
+    data["critic_scores"] = _critic_scores(critic)
+    data["critic_problems"] = list(critic.problems or [])
+    data["critic_rewrite_instructions"] = list(critic.rewrite_instructions or [])
+    return ReturnScript.model_validate(data)
+
+
+def _rewrite_prompt(prompt: str, critic: NativeViewerCritic) -> str:
+    instructions = "\n".join(f"- {item}" for item in critic.rewrite_instructions or critic.problems or [])
+    return (
+        f"{prompt}\n\n[NATIVE VIEWER CRITIC REWRITE]\n"
+        "The previous draft failed the native-viewer critic. Regenerate the full JSON using the same source conflict.\n"
+        "Make it more concrete, native-sounding, fast, specific, and payoff-driven. Do not invent unsupported major facts.\n"
+        f"Critic failures: {_critic_hard_failure(critic)}\n"
+        f"Rewrite instructions:\n{instructions}\n"
+    )
+
 # --- Public API ---
 def generate_script(prompt: str) -> ReturnScript:
     """
@@ -150,7 +250,8 @@ def generate_script(prompt: str) -> ReturnScript:
     for i, max_tokens in enumerate(budgets, start=1):
         try:
             # 1차: Structured
-            return _try_structured(client, prompt, max_tokens)
+            draft = _try_structured(client, prompt, max_tokens)
+            return _run_critic_rewrite_flow(prompt, draft, max_tokens)
         except Exception as e1:
             last_err = e1
             print(f"⚠️ Structured 실패 (시도 {i}/{len(budgets)} | tokens={max_tokens}): {e1}")
@@ -158,9 +259,30 @@ def generate_script(prompt: str) -> ReturnScript:
                 # 2차: 폴백(JSON 모드)
                 rs = _fallback_json_mode(client, prompt, max_tokens)
                 _assert_no_nulls(rs)
-                return rs
+                return _run_critic_rewrite_flow(prompt, rs, max_tokens)
             except Exception as e2:
                 last_err = e2
                 print(f"⚠️ JSON 폴백 실패 (시도 {i}/{len(budgets)} | tokens={max_tokens}): {e2}")
 
     raise RuntimeError(f"GPT 호출/검증 최종 실패: {last_err}")
+
+
+def _run_critic_rewrite_flow(prompt: str, draft: ReturnScript, max_output_tokens: int) -> ReturnScript:
+    if not _critic_enabled():
+        return draft
+    critic = critique_script(prompt, draft)
+    failure = _critic_hard_failure(critic)
+    if not failure:
+        return _apply_critic_metadata(draft, critic)
+
+    print(f"⚠️ native-viewer critic failed draft: {failure}")
+    client = _get_client()
+    rewrite = _try_structured(client, _rewrite_prompt(prompt, critic), max_output_tokens)
+    rewrite_critic = critique_script(prompt, rewrite)
+    rewrite_failure = _critic_hard_failure(rewrite_critic)
+    if rewrite_failure:
+        raise ValueError(
+            "native_viewer_critic_failed: "
+            f"{rewrite_failure}; problems={rewrite_critic.problems}; rewrite_instructions={rewrite_critic.rewrite_instructions}"
+        )
+    return _apply_critic_metadata(rewrite, rewrite_critic)

@@ -120,6 +120,36 @@ def test_publisher_blocks_internal_upload_metadata(monkeypatch):
     assert reason == "unsafe_metadata:title:pending"
 
 
+def test_publisher_blocks_synthetic_and_local_template_by_default(monkeypatch):
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "ap-northeast-2")
+    monkeypatch.delenv("SCRIPT_ALLOW_SYNTHETIC_SOURCES", raising=False)
+    monkeypatch.delenv("SCRIPT_LOCAL_FALLBACK_ENABLED", raising=False)
+    publisher = _load_module("publisher_source_safety_test_module", "infra/terraform/lambda/publisher.py")
+    monkeypatch.setattr(publisher, "_setting", lambda name, default: default)
+
+    synthetic_reason = publisher._metadata_safety_error(
+        {
+            "title": "Neighbor Used My Driveway",
+            "description": "A normal story.",
+            "tags": ["storytime"],
+            "script": ["A normal caption line."],
+            "source_provider": "synthetic",
+        }
+    )
+    fallback_reason = publisher._metadata_safety_error(
+        {
+            "title": "Neighbor Used My Driveway",
+            "description": "A normal story.",
+            "tags": ["storytime"],
+            "script": ["A normal caption line."],
+            "generation_fallback": "local_template",
+        }
+    )
+
+    assert synthetic_reason == "unsafe_metadata:source_provider:synthetic_disabled"
+    assert fallback_reason == "unsafe_metadata:generation_fallback:local_template_disabled"
+
+
 def test_publisher_sanitizes_upload_metadata(monkeypatch):
     monkeypatch.setenv("AWS_DEFAULT_REGION", "ap-northeast-2")
     publisher = _load_module("publisher_metadata_sanitize_test_module", "infra/terraform/lambda/publisher.py")
@@ -132,7 +162,8 @@ def test_publisher_sanitizes_upload_metadata(monkeypatch):
         }
     )
 
-    assert metadata["title"].endswith("#shorts #story #reddit #viral")
+    assert metadata["title"].endswith("#shorts #story")
+    assert "#viral" not in metadata["title"]
     assert metadata["description"] == "A boundary conflict."
     assert metadata["tags"][:2] == ["neighbor", "storytime"]
 

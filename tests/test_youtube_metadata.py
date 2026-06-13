@@ -1,6 +1,7 @@
 from generator.text.youtube_metadata import (
     TITLE_HASHTAGS,
     apply_youtube_metadata_style,
+    build_public_title,
     format_youtube_description,
     format_youtube_title,
     merge_youtube_tags,
@@ -45,8 +46,8 @@ def test_merge_youtube_tags_preserves_specific_tags_and_adds_defaults():
 
     assert tags[:2] == ["roommate", "cat"]
     assert "shorts" in tags
-    assert "reddit" in tags
-    assert "viral" in tags
+    assert "reddit" not in tags
+    assert "viral" not in tags
     assert len(tags) <= 15
 
 
@@ -61,9 +62,21 @@ def test_apply_youtube_metadata_style_updates_upload_fields():
     apply_youtube_metadata_style(metadata)
 
     assert metadata["title"].endswith(" ".join(TITLE_HASHTAGS))
+    assert metadata["public_title"] == "My coworker lied to HR"
+    assert metadata["source_title"] == "My coworker lied to HR"
     assert "Would you show the screenshots?" in metadata["description"]
     assert metadata["tags"][:1] == ["workplace"]
     assert "shorts" in metadata["tags"]
+
+
+def test_public_title_removes_aita_prefix_and_viral_hashtag():
+    public_title = build_public_title("AITA for refusing to cover my mom's birthday dinner bill?")
+    formatted = format_youtube_title(public_title)
+
+    assert not public_title.lower().startswith("aita")
+    assert not formatted.lower().startswith("aita")
+    assert "#viral" not in formatted
+    assert formatted.endswith("#shorts #story")
 
 
 def test_sanitize_upload_metadata_blocks_internal_values():

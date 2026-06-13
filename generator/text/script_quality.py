@@ -77,6 +77,7 @@ _HOOK_STAKES_TERMS = {
     "paying",
     "parked",
     "pressured",
+    "presented",
     "promised",
     "punctured",
     "refused",
@@ -91,6 +92,7 @@ _HOOK_STAKES_TERMS = {
     "threatened",
     "told everyone",
     "took",
+    "took credit",
     "trashed",
     "turned",
     "used",
@@ -203,6 +205,153 @@ _SCRIPT_META_PHRASES = (
     "this reddit post",
     "the original post",
     "viewer engagement",
+)
+_AI_TEMPLATE_PHRASES = (
+    "acted like i was the problem",
+    "the unreasonable one",
+    "people are split",
+    "half the people",
+    "keep the peace",
+    "let it go",
+    "crossed a boundary",
+    "crossed the line",
+    "the situation",
+    "the issue",
+    "the conflict",
+    "the drama",
+    "what changed everything",
+    "that was when",
+    "instead of owning it",
+    "i decided to stand my ground",
+    "i set a boundary",
+    "i held the boundary",
+    "the boundary was simple",
+    "i had one clear boundary in this situation",
+    "what made it worse was",
+    "the proof was clear",
+    "now people are split",
+    "smooth it over",
+    "without asking me first",
+    "i tried to keep it calm",
+    "my limit did not matter",
+    "in this situation",
+)
+_ABSTRACT_CONFLICT_TERMS = {
+    "boundary",
+    "situation",
+    "issue",
+    "conflict",
+    "drama",
+    "proof",
+    "evidence",
+    "disrespect",
+    "respect",
+    "uncomfortable",
+    "unreasonable",
+    "overreacting",
+    "consequence",
+    "decision",
+    "pressure",
+}
+_CONCRETE_SIGNAL_TERMS = {
+    "app",
+    "bill",
+    "birthday",
+    "blender",
+    "camera",
+    "car",
+    "card",
+    "chat",
+    "coffee",
+    "concrete",
+    "counter",
+    "deposit",
+    "dinner",
+    "door",
+    "doorbell",
+    "driveway",
+    "email",
+    "file",
+    "food",
+    "fund",
+    "gate",
+    "group chat",
+    "hallway",
+    "invoice",
+    "kitchen",
+    "laundry",
+    "lid",
+    "manager",
+    "message",
+    "messages",
+    "parking",
+    "photo",
+    "receipt",
+    "rental",
+    "restaurant",
+    "room",
+    "screenshot",
+    "screenshots",
+    "server",
+    "storage",
+    "table",
+    "text",
+    "texts",
+    "timestamp",
+    "video",
+    "washer",
+}
+_CONCRETE_ACTION_TERMS = {
+    "accused",
+    "asked",
+    "borrowed",
+    "broke",
+    "called",
+    "charged",
+    "complained",
+    "deleted",
+    "demanded",
+    "left",
+    "lied",
+    "messaged",
+    "paid",
+    "parked",
+    "posted",
+    "refused",
+    "sent",
+    "showed",
+    "spent",
+    "told",
+    "took",
+    "trashed",
+    "used",
+}
+_DANGLING_TRAILING_WORDS = {
+    "a",
+    "an",
+    "and",
+    "because",
+    "but",
+    "her",
+    "his",
+    "like",
+    "my",
+    "our",
+    "that",
+    "the",
+    "their",
+    "then",
+    "without",
+    "your",
+}
+_INCOMPLETE_TRAILING_PHRASES = (
+    "used my",
+    "felt like",
+    "made the",
+    "stopped taking",
+    "answering his",
+    "answering her",
+    "answering their",
 )
 _STOPWORDS = {
     "about",
@@ -326,6 +475,57 @@ def validate_script_quality(metadata: Dict[str, Any], post: Dict[str, Any]) -> L
                 "many_script_paragraphs",
                 f"script is valid but has {len(lines)} paragraphs; 5 to 7 is usually tighter for Shorts",
                 hard=False,
+            )
+        )
+
+    ai_template_phrase = _first_ai_template_phrase(metadata, lines)
+    if ai_template_phrase:
+        issues.append(
+            ScriptQualityIssue(
+                "ai_template_phrase",
+                f"script uses generic AI-storytelling phrase: {ai_template_phrase}",
+            )
+        )
+
+    dangling = _first_incomplete_sentence_issue(metadata, lines)
+    if dangling:
+        issues.append(ScriptQualityIssue("template_storytelling", f"incomplete or dangling sentence: {dangling}"))
+
+    abstract_count, concrete_signal_count, abstract_ratio = _abstract_language_profile(text)
+    if abstract_count >= 5 and (
+        abstract_ratio > 0.045
+        or abstract_count > max(3, concrete_signal_count + 2)
+    ):
+        issues.append(
+            ScriptQualityIssue(
+                "abstract_language_overload",
+                f"abstract conflict wording dominates concrete detail ({abstract_count} abstract terms, {concrete_signal_count} concrete signals)",
+            )
+        )
+
+    if source.content:
+        concrete_detail_count = _source_grounded_detail_count(source.title, source.content, text)
+        if concrete_detail_count < 4:
+            issues.append(
+                ScriptQualityIssue(
+                    "missing_concrete_details",
+                    f"script includes too few source-grounded concrete details ({concrete_detail_count}/4)",
+                )
+            )
+        elif concrete_detail_count < 6:
+            issues.append(
+                ScriptQualityIssue(
+                    "low_specificity",
+                    f"script has limited source-specific detail density ({concrete_detail_count} concrete details)",
+                )
+            )
+
+    generic_line_count = _generic_reusable_line_count(lines, source.title, source.content)
+    if lines and generic_line_count / len(lines) > 0.4:
+        issues.append(
+            ScriptQualityIssue(
+                "generic_reusable_line",
+                f"too many lines could be reused for any generic conflict ({generic_line_count}/{len(lines)})",
             )
         )
 
@@ -611,3 +811,139 @@ def _repeated_sentence_start_count(lines: List[str]) -> int:
         key = " ".join(words[:3])
         starts[key] = starts.get(key, 0) + 1
     return max(starts.values(), default=0)
+
+
+def _first_ai_template_phrase(metadata: Dict[str, Any], lines: List[str]) -> str:
+    fields = [
+        str(metadata.get("title") or ""),
+        str(metadata.get("public_title") or ""),
+        str(metadata.get("first_2_seconds") or ""),
+        str(metadata.get("payoff_line") or ""),
+        str(metadata.get("viewer_question") or ""),
+        " ".join(lines),
+    ]
+    combined = "\n".join(fields).lower()
+    for phrase in _AI_TEMPLATE_PHRASES:
+        if phrase == "crossed the line":
+            if _phrase_outside_dialogue(combined, phrase):
+                return phrase
+            continue
+        if phrase in combined:
+            return phrase
+    return ""
+
+
+def _phrase_outside_dialogue(text: str, phrase: str) -> bool:
+    search_from = 0
+    while True:
+        idx = text.find(phrase, search_from)
+        if idx == -1:
+            return False
+        before = text[:idx]
+        double_quotes = before.count('"')
+        in_quote = double_quotes % 2 == 1
+        if not in_quote:
+            return True
+        search_from = idx + len(phrase)
+
+
+def _first_incomplete_sentence_issue(metadata: Dict[str, Any], lines: List[str]) -> str:
+    candidates = [
+        str(metadata.get("title") or ""),
+        str(metadata.get("public_title") or ""),
+        str(metadata.get("first_2_seconds") or ""),
+        str(metadata.get("turning_point") or ""),
+        str(metadata.get("payoff_line") or ""),
+        str(metadata.get("viewer_question") or ""),
+        *lines,
+    ]
+    for candidate in candidates:
+        if _has_incomplete_sentence(candidate):
+            return candidate.strip()
+    return ""
+
+
+def _has_incomplete_sentence(text: str) -> bool:
+    cleaned = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not cleaned:
+        return False
+    for segment in re.split(r"(?<=[.!?])\s+|$", cleaned):
+        segment = segment.strip()
+        if not segment:
+            continue
+        tail = segment.rstrip(" .,!?:;").lower()
+        if not tail:
+            continue
+        if any(tail.endswith(phrase) for phrase in _INCOMPLETE_TRAILING_PHRASES):
+            return True
+        last_word = tail.split()[-1]
+        if last_word in _DANGLING_TRAILING_WORDS:
+            return True
+        if re.search(r"\b(?:made|used|took|paid|charged|asked for|posted)\s+(?:the|my|his|her|their|our)\s*,", tail):
+            return True
+    return False
+
+
+def _abstract_language_profile(text: str) -> tuple[int, int, float]:
+    lowered = str(text or "").lower()
+    words = _WORD_RE.findall(lowered)
+    word_count = max(1, len(words))
+    abstract_count = sum(len(re.findall(rf"\b{re.escape(term)}\b", lowered)) for term in _ABSTRACT_CONFLICT_TERMS)
+    concrete_count = _concrete_signal_count(lowered)
+    return abstract_count, concrete_count, abstract_count / word_count
+
+
+def _concrete_signal_count(text: str) -> int:
+    lowered = str(text or "").lower()
+    count = 0
+    count += sum(len(re.findall(rf"\b{re.escape(term)}\b", lowered)) for term in _CONCRETE_SIGNAL_TERMS)
+    count += len(re.findall(r"\$?\b\d+(?:\.\d+)?\b|\b(?:one|two|three|four|five|six|seven|eight|nine|ten|twelve)\b", lowered))
+    count += len(re.findall(r"\b(?:am|pm|minutes?|hours?|days?|weeks?|months?|years?)\b", lowered))
+    count += sum(len(re.findall(rf"\b{re.escape(term)}\b", lowered)) for term in _CONCRETE_ACTION_TERMS)
+    return count
+
+
+def _source_grounded_detail_count(title: str, content: str, script: str) -> int:
+    source_text = f"{title} {content}".lower()
+    script_lower = str(script or "").lower()
+    details: set[str] = set()
+    for term in _CONCRETE_SIGNAL_TERMS | _CONCRETE_ACTION_TERMS:
+        if re.search(rf"\b{re.escape(term)}\b", source_text) and re.search(rf"\b{re.escape(term)}\b", script_lower):
+            details.add(term)
+    for token in _source_concrete_tokens(source_text):
+        if re.search(rf"\b{re.escape(token)}\b", script_lower):
+            details.add(token)
+    for match in re.finditer(r"\$?\b\d+(?:\.\d+)?\b|\b(?:one|two|three|four|five|six|seven|eight|nine|ten|twelve)\b", source_text):
+        if match.group(0) in script_lower:
+            details.add(match.group(0))
+    return len(details)
+
+
+def _source_concrete_tokens(source_text: str) -> set[str]:
+    tokens: set[str] = set()
+    for match in _WORD_RE.finditer(source_text.lower()):
+        token = match.group(0).strip("'")
+        if len(token) < 5:
+            continue
+        if token in _STOPWORDS or token in _ABSTRACT_CONFLICT_TERMS:
+            continue
+        tokens.add(token)
+    return tokens
+
+
+def _generic_reusable_line_count(lines: List[str], title: str, content: str) -> int:
+    source_tokens = _source_concrete_tokens(f"{title} {content}")
+    generic_count = 0
+    for line in lines:
+        lowered = str(line or "").lower()
+        if not lowered.strip():
+            continue
+        concrete_signals = _concrete_signal_count(lowered)
+        grounded_tokens = sum(1 for token in source_tokens if re.search(rf"\b{re.escape(token)}\b", lowered))
+        abstract_terms = sum(1 for term in _ABSTRACT_CONFLICT_TERMS if re.search(rf"\b{re.escape(term)}\b", lowered))
+        line_words = _WORD_RE.findall(lowered)
+        if concrete_signals + grounded_tokens >= 2:
+            continue
+        if abstract_terms >= 1 or len(line_words) < 9:
+            generic_count += 1
+    return generic_count

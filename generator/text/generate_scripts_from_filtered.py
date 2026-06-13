@@ -3,8 +3,15 @@
 import json
 import os
 import re
+from pathlib import Path
 from typing import Any, Dict
 from generator.text.generate_script import generate_script, ReturnScript
+from generator.text.script_fingerprint import (
+    STYLE_VARIANTS,
+    apply_script_fingerprint,
+    batch_diversity_issues,
+    diversity_issues_to_reason,
+)
 from generator.text.script_quality import (
     MAX_SCRIPT_CHARS,
     TARGET_MAX_SCRIPT_CHARS,
@@ -18,6 +25,7 @@ from generator.text.script_quality import (
 )
 from generator.text.youtube_metadata import apply_youtube_metadata_style
 from shared.state import ContentRepository
+from shared.storage import S3Store
 from shared.utils.config import VIABLE_POSTS_FILE, FINAL_METADATA_FILE, FAILED_POSTS_FILE
 
 _PERFORMANCE_CONTEXT_CACHE: str | None = None
@@ -48,9 +56,10 @@ EXAMPLE_JSON = """
         "retention_risk": "The source has repeated incidents, so the rewrite compresses them into one camera-alert scene before the neighbor response.",
         "cut_plan": ["driveway hook", "phone camera alert", "kids running", "owner text message", "final boundary question"],
         "bg_strategy": "hybrid",
+        "style_variant": "neighbor_dispute",
         "rewrite_notes": "Removed slow vacation-rental context and led with the crossed boundary.",
         "script": [
-                "A dozen kids turned my driveway into their playground, and their parents acted like I was the problem.",
+                "A dozen kids turned my driveway into their playground, and their parents complained when I told them to leave.",
                 "I own a small townhouse near the beach, and the unit next door is a short-term rental. At first, the guests were just cutting across my yard. Annoying, but whatever.",
                 "Then one night my security camera kept pinging. I opened the app and saw kids running across my driveway, doing flips, screaming, and using my property like a party space.",
                 "I waited a few minutes, hoping an adult would step in. Nobody did. When one kid wiped out hard on the concrete, I used the camera speaker and told them they needed to leave.",
@@ -83,6 +92,7 @@ def call_gpt_generate_script(title, content, post=None, regenerate_reason=None):
         "- Fill `adaptation_strategy` with a transparent note about what you compressed or plausibly dramatized to make the story more watchable.",
         "- Fill `retention_angle` with the specific reason this story is clickable and watchable: boundary crossed, unfair accusation, betrayal, public embarrassment, money/property conflict, workplace/family pressure, or a hard moral split.",
         "- Fill `hook_type` with a short snake_case label such as unfair_accusation, crossed_boundary, money_pressure, public_embarrassment, betrayal, villain_framing, or family_pressure.",
+        f"- Fill `style_variant` with one of: {', '.join(STYLE_VARIANTS)}. Choose the most concrete variant for this source, and avoid repeating the same style in a batch.",
         "- Fill `first_2_seconds` with the exact opening phrase that carries the first two seconds of attention. It must be concrete, not context.",
         "- Fill `turning_point` with the moment where the situation gets worse, not just a summary.",
         "- Fill `payoff_line` with the final conflict statement before the viewer question.",
@@ -93,8 +103,11 @@ def call_gpt_generate_script(title, content, post=None, regenerate_reason=None):
         "- Fill `bg_strategy` as `story`, `asmr`, or `hybrid`. Use `hybrid` for most stories, `story` when concrete visual scenes matter, and `asmr` only when the source is mostly emotional or abstract.",
         "- Fill `rewrite_notes` with one short note about what you tightened for retention.",
         "- Use a title that names the concrete conflict. Avoid generic titles like 'Did I Overreact?' unless paired with the specific action. Do not add hashtags; the uploader adds the channel hashtag style.",
+        "- Do not use AITA-style public titles. Never start the title with AITA, Am I the Asshole, Am I wrong, or Did I overreact.",
         "- Write in a **casual, conversational tone**, as if you're sharing a story with a friend.",
         "- Avoid formal or stiff language. Use expressions and tones that are commonly seen in successful YouTube Shorts.",
+        "- Avoid generic AI-storytelling phrases: acted like I was the problem, the unreasonable one, people are split, half the people, keep the peace, let it go, crossed a boundary, the situation, the issue, the conflict, the drama, what changed everything, that was when, instead of owning it, I decided to stand my ground, I set a boundary, I held the boundary, The proof was clear, What made it worse was.",
+        "- Prefer concrete receipts and actions over abstract labels. Each accepted script needs at least four source-grounded details such as a specific object, place, message, receipt, bill, camera, app, photo, timestamp, money amount, count, or exact action someone took.",
         "- The first sentence must be a strong hook with a concrete crossed line. Start with what someone did wrong, what it cost, or why the narrator looked like the villain. Do not start with age, backstory, relationship length, 'So, get this', or 'A little backstory'.",
         "- The first 3 paragraphs must follow this rhythm: hook result, quick context, then unexpected escalation. Do not explain every detail chronologically.",
         "- Every paragraph should either add a new problem, raise the stakes, or move toward the final decision. Cut neutral reflection.",
@@ -201,6 +214,7 @@ def validate_and_parse_metadata(result: ReturnScript, idx, post) -> Dict[str, An
             "cut_plan",
             "bg_strategy",
             "rewrite_notes",
+            "style_variant",
             "script",
         ]
         if not all(k in metadata for k in required_keys):
@@ -226,6 +240,9 @@ def validate_and_parse_metadata(result: ReturnScript, idx, post) -> Dict[str, An
         metadata["script"] = [line.strip() for line in metadata["script"] if line.strip()]
         metadata["story_beats"] = [beat.strip() for beat in metadata["story_beats"] if beat.strip()]
         metadata["cut_plan"] = [cut.strip() for cut in metadata["cut_plan"] if cut.strip()][:6]
+        metadata.setdefault("critic_scores", {})
+        metadata.setdefault("critic_problems", [])
+        metadata.setdefault("critic_rewrite_instructions", [])
 
         if post and post.get("content"):
             marketability_reject = source_reject_reason_for_marketability(post)
@@ -244,6 +261,8 @@ def validate_and_parse_metadata(result: ReturnScript, idx, post) -> Dict[str, An
         metadata["source_score"] = (post or {}).get("source_score")
         metadata["source_archetype"] = (post or {}).get("source_archetype") or metadata.get("hook_type") or ""
         metadata["source_provider"] = (post or {}).get("source_provider", "")
+        metadata["source_title"] = (post or {}).get("title") or metadata.get("source_title") or metadata.get("title") or ""
+        metadata["public_title"] = metadata.get("public_title") or metadata.get("title") or metadata["source_title"]
         metadata["source_subreddit"] = (post or {}).get("subreddit", "")
         metadata["source_url"] = (post or {}).get("source_url", "")
         metadata["source_hash"] = (post or {}).get("content_hash", "")
@@ -260,6 +279,7 @@ def validate_and_parse_metadata(result: ReturnScript, idx, post) -> Dict[str, An
             ]
 
         apply_youtube_metadata_style(metadata)
+        apply_script_fingerprint(metadata)
         return metadata
     except Exception as e:
         raise ValueError(f"post {idx} 오류: {e}")
@@ -267,6 +287,10 @@ def validate_and_parse_metadata(result: ReturnScript, idx, post) -> Dict[str, An
 
 def _source_preflight_error(post: Dict[str, Any]) -> str:
     source = build_source_profile(post)
+    if str(post.get("source_provider") or "").strip().lower() == "synthetic" and not _synthetic_sources_allowed():
+        return "synthetic source is disabled in production; set SCRIPT_ALLOW_SYNTHETIC_SOURCES=1 to allow it explicitly"
+    if post.get("generation_fallback") == "local_template" and not _local_fallback_enabled():
+        return "local-template script fallback is disabled in production; set SCRIPT_LOCAL_FALLBACK_ENABLED=1 to allow it explicitly"
     if source.is_truncated:
         return f"source content may be truncated: {source.truncation_reason or 'unknown reason'}"
     marketability_reject = source_reject_reason_for_marketability(post)
@@ -278,6 +302,13 @@ def _source_preflight_error(post: Dict[str, Any]) -> str:
 
 
 def _regenerate_reason_from_error(message: str) -> str:
+    if "batch_diversity_failed" in message:
+        return (
+            "The previous draft was too similar to another accepted script in this batch or recent history. "
+            "Change the opening structure, transition rhythm, ending question, title opening, and style_variant. "
+            f"Use a different style_variant from this list: {', '.join(STYLE_VARIANTS)}. "
+            f"Details: {message}"
+        )
     if "너무 짧음" in message or "너무 긺" in message or "character" in message:
         target_min_chars, target_max_chars = _script_target_window()
         current_chars = _extract_current_char_count(message)
@@ -322,7 +353,15 @@ def _extract_current_char_count(message: str) -> int | None:
 
 
 def _local_fallback_enabled() -> bool:
-    return os.getenv("SCRIPT_LOCAL_FALLBACK_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
+    return _truthy_env("SCRIPT_LOCAL_FALLBACK_ENABLED")
+
+
+def _synthetic_sources_allowed() -> bool:
+    return _truthy_env("SCRIPT_ALLOW_SYNTHETIC_SOURCES") or _truthy_env("ALLOW_SYNTHETIC_SOURCES")
+
+
+def _truthy_env(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _is_llm_quota_error(message: str) -> bool:
@@ -332,18 +371,22 @@ def _is_llm_quota_error(message: str) -> bool:
 
 def _build_local_fallback_metadata(post: Dict[str, Any], reason: str = "") -> Dict[str, Any]:
     """Create a conservative script from source text when the LLM API is unavailable."""
+    if not _local_fallback_enabled():
+        raise RuntimeError("local-template script fallback is disabled in production; set SCRIPT_LOCAL_FALLBACK_ENABLED=1 to allow it explicitly")
+    if str(post.get("source_provider") or "").strip().lower() == "synthetic" and not _synthetic_sources_allowed():
+        raise RuntimeError("synthetic source is disabled in production; set SCRIPT_ALLOW_SYNTHETIC_SOURCES=1 to allow it explicitly")
     source_title = _clean_sentence(post.get("title") or "Boundary Story", max_chars=92)
     content = str(post.get("content") or "")
     title = _fallback_public_title(source_title, content)
     parts = _extract_source_parts(content)
-    boundary = parts.get("boundary") or "I was clear about the boundary before anything happened"
+    boundary = _sanitize_fallback_detail(parts.get("boundary") or "I had already said yes only to a small favor")
     setup = parts.get("setup") or _fallback_setup_sentence(content) or "At first, I tried to handle it calmly."
-    crossed_line = parts.get("crossed_line") or _sentence_at(content, 1) or "someone crossed the line and acted like I was the problem"
-    public_pressure = parts.get("public_pressure") or _sentence_at(content, 2) or "people around us started taking sides"
-    escalation = parts.get("escalation") or _sentence_at(content, 3) or "the pressure kept building instead of anyone owning the mistake"
-    proof = parts.get("proof") or _sentence_at(content, 4) or "the messages showed exactly what I had agreed to"
-    consequence = parts.get("consequence") or _sentence_at(content, 5) or "I held the boundary and stopped covering for it"
-    debate = parts.get("debate") or "Was I wrong to hold the boundary?"
+    crossed_line = _sanitize_fallback_detail(parts.get("crossed_line") or _sentence_at(content, 1) or "someone turned the favor into a demand")
+    public_pressure = _sanitize_fallback_detail(parts.get("public_pressure") or _sentence_at(content, 2) or "people around us started texting me about it")
+    escalation = _sanitize_fallback_detail(parts.get("escalation") or _sentence_at(content, 3) or "the pressure kept building after I said no")
+    proof = _sanitize_fallback_detail(parts.get("proof") or _sentence_at(content, 4) or "the messages showed exactly what I had agreed to")
+    consequence = _sanitize_fallback_detail(parts.get("consequence") or _sentence_at(content, 5) or "I said no and stopped covering for it")
+    debate = _sanitize_fallback_detail(parts.get("debate") or "Was I wrong to say no?")
 
     hook = _fallback_opening_hook(source_title, crossed_line, content)
     if not hook.endswith((".", "?", "!")):
@@ -354,7 +397,7 @@ def _build_local_fallback_metadata(post: Dict[str, Any], reason: str = "") -> Di
     source_summary = _clean_sentence(f"{setup} {crossed_line}", max_chars=220)
     story_beats = [
         _clean_sentence(setup, max_chars=120),
-        f"The boundary was: {_clean_sentence(boundary, max_chars=110)}",
+        f"The original agreement was: {_clean_sentence(boundary, max_chars=110)}",
         _clean_sentence(crossed_line, max_chars=130),
         _clean_sentence(public_pressure, max_chars=130),
         _clean_sentence(proof, max_chars=130),
@@ -364,12 +407,12 @@ def _build_local_fallback_metadata(post: Dict[str, Any], reason: str = "") -> Di
 
     script = [
         _finish_sentence(hook),
-        _finish_sentence(_clean_sentence(f"I had already made the boundary clear: {boundary}.", max_chars=185)),
+        _finish_sentence(_clean_sentence(f"I had already told them the agreement: {boundary}.", max_chars=185)),
         _finish_sentence(_clean_sentence(f"At first, {_sentence_fragment(setup)}", max_chars=185)),
         _finish_sentence(_clean_sentence(f"Then {crossed_line}.", max_chars=185)),
-        _finish_sentence(_clean_sentence(f"Instead of owning it, {public_pressure}.", max_chars=185)),
-        _finish_sentence(_clean_sentence(f"What made it worse was that {_sentence_fragment(escalation)}", max_chars=185)),
-        _finish_sentence(_clean_sentence(f"The proof was clear: {proof}.", max_chars=185)),
+        _finish_sentence(_clean_sentence(f"After that, {public_pressure}.", max_chars=185)),
+        _finish_sentence(_clean_sentence(f"By then, {_sentence_fragment(escalation)}", max_chars=185)),
+        _finish_sentence(_clean_sentence(f"The receipt I had was simple: {proof}.", max_chars=185)),
         _finish_sentence(_clean_sentence(f"So {consequence}.", max_chars=185)),
         viewer_question,
     ]
@@ -394,6 +437,7 @@ def _build_local_fallback_metadata(post: Dict[str, Any], reason: str = "") -> Di
         retention_risk="A local fallback can feel summarized, so the script opens on the crossed line and moves quickly to proof.",
         cut_plan=visual_keywords[:6],
         bg_strategy="hybrid",
+        style_variant=_fallback_style_variant(title, content),
         rewrite_notes=f"Local fallback used after LLM generation became unavailable: {_clean_sentence(reason, max_chars=120)}",
         script=script,
     )
@@ -425,6 +469,42 @@ def _extract_source_parts(content: str) -> Dict[str, str]:
     if questions:
         parts["debate"] = _clean_sentence(questions[-1], max_chars=160)
     return parts
+
+
+def _sanitize_fallback_detail(text: str) -> str:
+    cleaned = str(text or "")
+    replacements = {
+        "acted like I was the problem": "complained when I pushed back",
+        "the unreasonable one": "too picky",
+        "people are split": "people keep arguing about it",
+        "half the people": "some people",
+        "keep the peace": "avoid another argument",
+        "let it go": "drop it",
+        "crossed a boundary": "ignored what I had already said",
+        "crossed the line": "went too far",
+        "the situation": "what happened",
+        "the issue": "the actual problem",
+        "the conflict": "the argument",
+        "the drama": "the mess",
+        "what changed everything": "the detail that mattered",
+        "instead of owning it": "instead of apologizing",
+        "I decided to stand my ground": "I said no",
+        "I set a boundary": "I said no",
+        "I held the boundary": "I stuck with my no",
+        "The boundary was simple": "The original agreement was simple",
+        "I had one clear boundary in this situation": "I had already said exactly what I would allow",
+        "What made it worse was": "The worst part was",
+        "The proof was clear": "The receipt was right there",
+        "Now people are split": "Now people keep arguing",
+        "smooth it over": "drop it",
+        "without asking me first": "before I said yes",
+        "I tried to keep it calm": "I answered once without raising my voice",
+        "my limit did not matter": "what I had said did not matter",
+        "in this situation": "here",
+    }
+    for old, new in replacements.items():
+        cleaned = re.sub(re.escape(old), new, cleaned, flags=re.IGNORECASE)
+    return _clean_sentence(cleaned, max_chars=190).rstrip(".")
 
 
 def _fallback_setup_sentence(content: str) -> str:
@@ -465,7 +545,7 @@ def _fallback_public_title(title: str, content: str) -> str:
 
 def _fallback_opening_hook(title: str, crossed_line: str, content: str) -> str:
     action = _fallback_hook_action(title, crossed_line, content)
-    return _clean_sentence(f"{action}, then acted like I was the problem", max_chars=132)
+    return _clean_sentence(f"{action}, then complained when I asked them to stop", max_chars=132)
 
 
 def _fallback_hook_action(title: str, crossed_line: str, content: str) -> str:
@@ -641,6 +721,23 @@ def _fallback_hook_type(content: str) -> str:
     return "boundary_conflict"
 
 
+def _fallback_style_variant(title: str, content: str) -> str:
+    lowered = f"{title} {content}".lower()
+    if any(term in lowered for term in ("receipt", "screenshot", "camera", "message", "chat")):
+        return "receipt_reveal"
+    if any(term in lowered for term in ("bill", "card", "invoice", "deposit", "pay")):
+        return "money_trap"
+    if any(term in lowered for term in ("coworker", "office", "manager", "work")):
+        return "workplace_receipt"
+    if any(term in lowered for term in ("neighbor", "driveway", "walkway", "parking")):
+        return "neighbor_dispute"
+    if any(term in lowered for term in ("family", "aunt", "uncle", "sister", "brother", "cousin")):
+        return "family_pressure"
+    if any(term in lowered for term in ("accused", "blamed")):
+        return "false_blame"
+    return "last_straw"
+
+
 def _fit_fallback_script(script: list[str], story_beats: list[str]) -> list[str]:
     joined_len = len(" ".join(script))
     if joined_len < TARGET_MIN_SCRIPT_CHARS and len(script) < 8:
@@ -658,6 +755,49 @@ def _fit_fallback_script(script: list[str], story_beats: list[str]) -> list[str]
     return script
 
 
+def _accept_metadata(
+    metadata: Dict[str, Any],
+    metadata_list: list[Dict[str, Any]],
+    previous_history: list[Dict[str, Any]],
+) -> None:
+    apply_script_fingerprint(metadata)
+    diversity_issues = batch_diversity_issues(metadata, metadata_list, previous_history)
+    if diversity_issues:
+        raise ValueError(f"batch_diversity_failed: {diversity_issues_to_reason(diversity_issues)}")
+    metadata_list.append(metadata)
+
+
+def _load_previous_accepted_metadata(limit: int = 50) -> list[Dict[str, Any]]:
+    if os.getenv("SCRIPT_DIVERSITY_HISTORY_ENABLED", "1").strip().lower() in {"0", "false", "no", "off"}:
+        return []
+    local_candidates = [
+        Path(os.getenv("SCRIPT_DIVERSITY_HISTORY_FILE", "")),
+        FINAL_METADATA_FILE,
+    ]
+    for path in local_candidates:
+        if path and str(path) != "." and path.exists():
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    items = json.load(f)
+                if isinstance(items, list):
+                    return [item for item in items if isinstance(item, dict)][-limit:]
+            except Exception as exc:
+                print(f"⚠️ previous metadata history load failed: {path}: {exc}")
+
+    try:
+        from shared.utils.config import get_temp_file
+
+        tmp_path = get_temp_file("previous_publish_ready_metadata.json")
+        if S3Store().download_file("publish-ready/final_metadata.json", tmp_path):
+            with open(tmp_path, "r", encoding="utf-8") as f:
+                items = json.load(f)
+            if isinstance(items, list):
+                return [item for item in items if isinstance(item, dict)][-limit:]
+    except Exception as exc:
+        print(f"⚠️ previous S3 metadata history unavailable: {exc}")
+    return []
+
+
 def generate_scripts_from_filtered():
     if not VIABLE_POSTS_FILE.exists():
         print("❌ viable_posts.json이 없습니다.")
@@ -669,6 +809,7 @@ def generate_scripts_from_filtered():
     metadata_list = []
     failed_items = []
     llm_unavailable_reason = None
+    previous_history = _load_previous_accepted_metadata()
 
     for idx, post in enumerate(posts):
         title = post.get("title", "")
@@ -684,7 +825,8 @@ def generate_scripts_from_filtered():
             continue
         if llm_unavailable_reason and _local_fallback_enabled():
             try:
-                metadata_list.append(_build_local_fallback_metadata(post, llm_unavailable_reason))
+                metadata = _build_local_fallback_metadata(post, llm_unavailable_reason)
+                _accept_metadata(metadata, metadata_list, previous_history)
                 print(f"🧩 로컬 fallback 대본 생성 완료 (post {idx}): {origin_id}")
             except Exception as fallback_error:
                 failed_items.append({"idx": idx, "id": origin_id, "title": title, "error": str(fallback_error)})
@@ -722,7 +864,7 @@ def generate_scripts_from_filtered():
                     metadata["id"] = origin_id
                     metadata["uploaded"] = False
 
-                metadata_list.append(metadata)
+                _accept_metadata(metadata, metadata_list, previous_history)
                 break  # 성공 시 루프 종료
 
             except Exception as e:
@@ -733,7 +875,8 @@ def generate_scripts_from_filtered():
                 if _is_llm_quota_error(msg) and _local_fallback_enabled():
                     llm_unavailable_reason = msg
                     try:
-                        metadata_list.append(_build_local_fallback_metadata(post, msg))
+                        metadata = _build_local_fallback_metadata(post, msg)
+                        _accept_metadata(metadata, metadata_list, previous_history)
                         print(f"🧩 OpenAI quota 오류로 로컬 fallback 대본 생성 완료 (post {idx}): {origin_id}")
                         break
                     except Exception as fallback_error:
