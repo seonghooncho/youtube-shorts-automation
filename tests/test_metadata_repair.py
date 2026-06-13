@@ -361,6 +361,7 @@ def test_ex_bills_story_repairs_to_message_and_bill_metadata():
         "I asked why his name was still pinned, and she said I was insecure for reading the preview.",
         "Then I saw she had complained to him that I was boring because I cared about money.",
         "I stopped covering the extra bills until she could explain why he knew more than I did.",
+        "I packed a bag and left our apartment before the argument turned into another loop.",
         "Now she says I am punishing her for a harmless conversation.",
         "Would you keep paying the bills after seeing those messages?",
     ]
@@ -414,3 +415,36 @@ def test_dinner_job_story_repairs_to_insult_metadata():
     assert repaired["public_title"] == "Her Boyfriend Mocked My Job At Dinner"
     assert repaired["first_frame_text"] == "HE MOCKED MY JOB AT DINNER"
     assert repaired["opening_visual_query"] == "dinner table job argument"
+
+
+def test_phone_contract_story_repairs_to_phone_bill_metadata():
+    lines = [
+        "My stepmum rang me raging because she thought my dad was secretly paying my £20 phone bill.",
+        "Since I was 18, my mobile contract has stayed in my dad's name because his account gets better deals.",
+        "Every month I send him the balance, usually about £20, so nobody is covering my bill.",
+        "She demanded I switch the contract into my name, so I asked my dad about doing it.",
+        "He said it was a credit agreement and he could not just change it over.",
+        "Now she says I am out of order for keeping it there, even though my dad wants it left alone.",
+        "Am I wrong for leaving my phone contract in my dad's name?",
+    ]
+    metadata = _short_cat_metadata() | {
+        "voiceover_lines": lines,
+        "script": lines,
+        "tts_text": " ".join(lines),
+        "title": "AITA for keeping a phone contract?",
+        "public_title": "AITA for keeping a phone contract?",
+        "viewer_question": lines[-1],
+    }
+    post = {
+        "title": "AITA for keeping my phone contract in my dad's name?",
+        "content": " ".join(lines),
+        "source_provider": "pullpush",
+    }
+
+    repaired, _actions = repair_metadata(metadata, post)
+
+    assert repaired["public_title"] == "My Stepmum Accused Me Over A Phone Bill"
+    assert repaired["first_frame_text"] == "SHE ACCUSED ME OVER A PHONE BILL"
+    assert repaired["opening_visual_query"] == "phone bill contract"
+    assert repaired["caption_chunks"][0] == "My stepmum rang me raging"
+    assert caption_chunks_align_with_tts_text(repaired)[0] is True

@@ -33,6 +33,8 @@ _CAPTION_ACTOR_TERMS = {
     "manager",
     "owner",
     "sister",
+    "stepmum",
+    "stepmom",
 }
 _CAPTION_OBJECT_TERMS = {
     "account",
@@ -52,6 +54,8 @@ _CAPTION_OBJECT_TERMS = {
     "card",
     "cat",
     "childcare",
+    "contract",
+    "contracts",
     "daycare",
     "dent",
     "dinner",
@@ -71,6 +75,8 @@ _CAPTION_OBJECT_TERMS = {
     "number",
     "package",
     "phone",
+    "phone bill",
+    "phone contract",
     "receipt",
     "rent",
     "screenshot",
@@ -105,6 +111,7 @@ _CAPTION_ACTION_TERMS = {
     "posted",
     "refused",
     "returned",
+    "rang",
     "snapped",
     "sending",
     "spent",
@@ -183,6 +190,7 @@ _OPENING_QUERY_STRONG_TOKENS = {
     "cat",
     "chat",
     "childcare",
+    "contract",
     "dent",
     "dented",
     "dinner",
@@ -200,6 +208,8 @@ _OPENING_QUERY_STRONG_TOKENS = {
     "order",
     "package",
     "phone",
+    "phone bill",
+    "phone contract",
     "receipt",
     "restaurant",
     "rent",
@@ -574,13 +584,14 @@ def opening_visual_query_relevance_reason(item: dict[str, Any]) -> str:
     query_tokens = _meaningful_opening_tokens(str(item.get("opening_visual_query") or ""))
     if not query_tokens:
         return "opening_visual_query_mismatch"
+    # Validate against source/hook text, not derived title fields. Derived titles and
+    # first-frame text can be repaired incorrectly, and using them here would let a
+    # wrong visual query validate itself.
     reference_text = " ".join(
         [
             voiceover_lines(item)[0] if voiceover_lines(item) else "",
             str(item.get("first_2_seconds") or ""),
-            str(item.get("first_frame_text") or ""),
             str(item.get("source_title") or ""),
-            str(item.get("public_title") or ""),
         ]
     )
     reference_tokens = _meaningful_opening_tokens(reference_text)

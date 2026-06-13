@@ -100,6 +100,7 @@ def test_common_conflict_titles_pass_quality_validation():
     assert title_quality_reason("My Sister Called Me A Bad Aunt") == ""
     assert title_quality_reason("She Texted Her Ex While I Paid Bills") == ""
     assert title_quality_reason("Her Boyfriend Mocked My Job At Dinner") == ""
+    assert title_quality_reason("My Stepmum Accused Me Over A Phone Bill") == ""
 
 
 def test_sanitize_upload_metadata_blocks_internal_values():

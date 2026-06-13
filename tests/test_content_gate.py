@@ -260,6 +260,7 @@ def test_caption_quality_uses_caption_specific_rules():
     assert caption_quality_reason("My sister gave me two hours notice", is_first=True) == ""
     assert caption_quality_reason("She was sending flirty messages", is_first=True) == ""
     assert caption_quality_reason("My sister's boyfriend mocked my job", is_first=True) == ""
+    assert caption_quality_reason("My stepmum rang me raging because she thought", is_first=True) == ""
     assert caption_quality_reason("Things got worse", is_first=True) == "generic_filler"
     assert caption_quality_reason("The boundary was simple", is_first=True) == "generic_filler"
 
@@ -300,6 +301,19 @@ def test_opening_visual_query_must_match_hook():
     assert "opening_visual_query_mismatch" in evaluate_content_gate(mismatched)["hard_errors"]
 
 
+def test_opening_visual_query_cannot_self_validate_against_wrong_repaired_title():
+    wrong = _safe_item(
+        voiceover_lines=["My fiancée was sending flirty messages to her ex while I was paying most of our bills."],
+        tts_text="My fiancée was sending flirty messages to her ex while I was paying most of our bills.",
+        source_title="AITAH for leaving my ex-fiancé behind?",
+        public_title="My Landlord Walked Into My Apartment",
+        first_frame_text="MY LANDLORD WALKED INTO MY APARTMENT",
+        opening_visual_query="apartment landlord door",
+    )
+
+    assert opening_visual_query_relevance_reason(wrong) == "opening_visual_query_mismatch"
+
+
 def test_opening_visual_query_matches_current_candidate_hooks():
     bank_item = _safe_item(
         voiceover_lines=["My boyfriend deleted my bank alert before I woke up.", "Would you trust him after that?"],
@@ -329,11 +343,19 @@ def test_opening_visual_query_matches_current_candidate_hooks():
         public_title="Her Boyfriend Mocked My Job At Dinner",
         opening_visual_query="dinner table job argument",
     )
+    phone_item = _safe_item(
+        voiceover_lines=["My stepmum rang me raging because she thought my dad was secretly paying my £20 phone bill.", "Was I wrong?"],
+        tts_text="My stepmum rang me raging because she thought my dad was secretly paying my £20 phone bill. Was I wrong?",
+        first_frame_text="SHE ACCUSED ME OVER A PHONE BILL",
+        public_title="My Stepmum Accused Me Over A Phone Bill",
+        opening_visual_query="phone bill contract",
+    )
 
     assert opening_visual_query_relevance_reason(bank_item) == ""
     assert opening_visual_query_relevance_reason(childcare_item) == ""
     assert opening_visual_query_relevance_reason(ex_item) == ""
     assert opening_visual_query_relevance_reason(dinner_item) == ""
+    assert opening_visual_query_relevance_reason(phone_item) == ""
 
 
 def test_childcare_opening_visual_query_is_not_generic():

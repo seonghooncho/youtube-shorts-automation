@@ -83,6 +83,8 @@ _TITLE_ACTOR_TERMS = {
     "roommate",
     "she",
     "sister",
+    "stepmum",
+    "stepmom",
     "uncle",
 }
 _TITLE_OBJECT_TERMS = {
@@ -102,6 +104,8 @@ _TITLE_OBJECT_TERMS = {
     "cat",
     "chat",
     "childcare",
+    "contract",
+    "contracts",
     "coffee",
     "dinner",
     "dinners",
@@ -124,6 +128,7 @@ _TITLE_OBJECT_TERMS = {
     "number",
     "package",
     "password",
+    "phone",
     "printer",
     "receipt",
     "rental",
@@ -193,6 +198,7 @@ _TITLE_ACTION_TERMS = {
     "refused",
     "reported",
     "returned",
+    "rang",
     "shared",
     "sending",
     "showed",
