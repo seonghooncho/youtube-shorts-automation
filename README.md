@@ -1,262 +1,132 @@
 # YouTube Shorts Automation
 
-Reddit story 기반 YouTube Shorts를 자동으로 생성하고 업로드하는 AWS 배치 파이프라인입니다.
+Reddit 사연을 쇼츠용 영상으로 각색하고, 음성/자막/배경 영상까지 합성한 뒤 YouTube에 자동 업로드하는 파이프라인입니다.
 
-현재 운영 구조는 월 2회 publish-ready 재고를 채우고, 매일 1개씩 YouTube에 public 업로드하는 방식입니다.
+이 프로젝트의 핵심은 **영상 재고를 주기적으로 채워두고, 매일 정해진 시간에 1개씩 공개 업로드하는 자동화**입니다.
 
-## What It Does
+## 한눈에 보는 흐름
 
 ```text
-Reddit/PullPush source
-  -> story filtering
-  -> OpenAI script adaptation
-  -> AWS Polly TTS
-  -> speech-mark subtitles
-  -> Pixabay background video selection
-  -> FFmpeg Shorts render
-  -> S3 publish-ready inventory
-  -> YouTube public upload
+Reddit/PullPush 사연 수집
+  -> 업로드 가치가 있는 사연 필터링
+  -> OpenAI로 쇼츠용 대본 각색
+  -> AWS Polly로 TTS 생성
+  -> speech marks 기반 자막 생성
+  -> Pixabay에서 배경 영상 수집
+  -> FFmpeg로 9:16 쇼츠 렌더링
+  -> S3에 publish-ready 재고 저장
+  -> 매일 YouTube에 public 업로드
 ```
 
-핵심 목표는 사람이 매번 개입하지 않아도 9:16 Shorts 영상을 주기적으로 만들고, 예약된 시간에 YouTube 채널로 올리는 것입니다.
+## 전체 운영 구조
 
-## Current AWS Runtime
+자동화는 AWS managed service를 중심으로 역할을 나눠 운영됩니다.
 
-| Area | Resource |
-| --- | --- |
-| Artifact bucket | `youtube-shorts-automation-160885253413-apne2` |
-| Terraform state bucket | `ytshorts-terraform-state-160885253413-apne2` |
-| Terraform lock table | `ytshorts-terraform-locks` |
-| DynamoDB content table | `ytshorts-content` |
-| ECR repository | `ytshorts-app` |
-| CodeBuild project | `ytshorts-image-build` |
-| Batch compute environment | `ytshorts-fargate` |
-| Batch queue | `ytshorts-pipeline` |
-| Batch job definitions | `ytshorts-stage`, `ytshorts-script`, `ytshorts-render` |
-| Step Functions | `ytshorts-pipeline` |
-| Planner Lambda | `ytshorts-planner` |
-| Publisher Lambda | `ytshorts-publisher` |
-| Generate schedule | `ytshorts-generate-refill` |
-| Upload schedule | `ytshorts-upload-daily` |
+- **EventBridge Scheduler**: 월 2회 생성, 매일 업로드 트리거
+- **Step Functions**: 수집부터 렌더링까지 단계별 오케스트레이션
+- **AWS Batch/Fargate**: 오래 걸리는 ffmpeg 렌더링과 생성 작업 실행
+- **Lambda**: 재고 계산과 YouTube 업로드처럼 가벼운 작업 담당
+- **S3**: 원본, 대본, 음성, 자막, 최종 영상, publish-ready metadata 저장
+- **DynamoDB**: 콘텐츠 상태, 예약 시각, 업로드 결과 저장
+- **SSM Parameter Store**: 런타임 설정과 credential 관리
 
-## Schedules
+## 자동화 주기
 
 ```text
-Generate refill: cron(0 2 1,15 * ? *) Asia/Seoul
-Daily upload:    cron(0 8 * * ? *) Asia/Seoul
+생성 refill: 매월 1일, 15일 02:00 KST
+업로드:      매일 08:00 KST
 ```
 
-Generation is inventory-based, not fixed-count. The planner reads `/ytshorts/GENERATION_BATCH_DAYS`, `/ytshorts/GENERATION_BUFFER_DAYS`, and `/ytshorts/GENERATION_MAX_NEW_ITEMS` from SSM, then calculates:
+생성은 “무조건 14개 생성”이 아니라 **재고 보충 방식**입니다.
 
 ```text
-needed_new_items = min(max_new_items, max(0, batch_days + buffer_days - current_publish_ready_count))
+목표 재고 = 14일치 + 버퍼 3일 = 17개
+신규 생성 수 = 목표 재고 - 현재 publish-ready 미업로드 재고
+최대 신규 생성 cap = 21개
 ```
 
-Current defaults:
+즉, 이미 업로드 대기 영상이 충분하면 생성 작업을 스킵하고, 부족하면 부족한 만큼만 생성합니다. 생성 중 일부 단계가 실패해 재고가 모자라면 다음 refill에서 다시 채웁니다.
+
+## 결과물이 저장되는 곳
+
+생성된 파일은 S3 bucket `youtube-shorts-automation-160885253413-apne2`에 저장됩니다.
 
 ```text
-batch_days=14
-buffer_days=3
-max_new_items=21
-```
-
-So the pipeline tries to keep 17 publish-ready videos available. If Reddit candidates, script validation, TTS, Pixabay, or FFmpeg fail, fewer videos may be produced; the next refill run fills the shortfall.
-
-## Where Outputs Go
-
-All generated artifacts are stored in S3:
-
-```text
-raw/                  collected Reddit/PullPush data
-scripts/              viable posts, generated scripts, metadata, failed posts
-audio/mp3/            Polly MP3 files
+raw/                  수집된 Reddit/PullPush 원본
+scripts/              필터링 결과, 대본, 메타데이터
+audio/mp3/            Polly TTS 음성
 audio/marks/          Polly speech marks
-audio/subtitles/      SRT subtitle files
-videos/sources/       merged background video sources
-videos/final/         final rendered MP4 files
-publish-ready/        upload queue metadata
-state/                dedupe and compatibility state
-state/render-used-pixabay/
-                      array-render Pixabay usage shards
+audio/subtitles/      SRT 자막
+videos/sources/       배경 영상 소스
+videos/final/         최종 MP4
+publish-ready/        업로드 대기 metadata
+state/                중복 방지와 상태 파일
 ```
 
-DynamoDB `ytshorts-content` keeps content status, scheduled publish time, video key, upload status, and YouTube platform IDs.
+콘텐츠별 상태와 YouTube 업로드 결과는 DynamoDB `ytshorts-content`에 기록됩니다.
 
-## Configuration
+## YouTube 업로드
 
-Runtime configuration is managed through AWS SSM Parameter Store under `/ytshorts/*`.
+업로드 대상은 YouTube 채널이며, 현재 자동 업로드 기본값은 `public`입니다.
 
-Batch jobs receive SSM parameters as container secrets. Planner/publisher Lambda functions keep only `SSM_PARAMETER_PREFIX=/ytshorts` in their environment and read the rest at runtime. EventBridge Scheduler passes only `{"mode":"generate"}` or `{"mode":"upload"}`.
+업로드는 API key가 아니라 YouTube OAuth refresh token으로 수행합니다. 업로드가 끝나면 metadata와 DynamoDB에 YouTube video ID가 기록됩니다.
 
-Important runtime config:
+## 영상 품질 처리
+
+쇼츠 화면에서 자막과 배경이 흐려지는 문제를 줄이기 위해 렌더링 구조를 조정했습니다.
+
+- 최종 영상은 1080x1920 세로형으로 정규화
+- 자막은 중앙 배치, Anton 폰트, 굵은 외곽선 스타일
+- 자막은 4:4:4 중간 프레임에 burn-in 후 최종 H.264 MP4로 인코딩
+- Pixabay 영상은 FHD 이상 소스만 기본 사용
+- 다운로드한 배경 영상은 선명도 점수로 한 번 더 필터링
+- 최종 MP4는 업로드 전 파일 크기, 길이, 해상도, 오디오/비디오 스트림을 검증
+
+## 코드 구조
 
 ```text
-/ytshorts/YOUTUBE_PRIVACY_STATUS=public
-/ytshorts/GENERATION_BATCH_DAYS=14
-/ytshorts/GENERATION_BUFFER_DAYS=3
-/ytshorts/GENERATION_MAX_NEW_ITEMS=21
-/ytshorts/SCHEDULE_TIMEZONE=Asia/Seoul
-/ytshorts/PUBLISH_HOUR_LOCAL=8
-/ytshorts/CAPTION_FONT_SIZE=114
-/ytshorts/FINAL_RENDER_CRF=17
-/ytshorts/PIXABAY_MIN_SOURCE_LONG_EDGE=1920
-/ytshorts/PIXABAY_MIN_SOURCE_SHORT_EDGE=1080
-/ytshorts/PIXABAY_MIN_SHARPNESS_SCORE=60
+generator/text        사연 수집, 필터링, 대본 생성
+generator/tts         Polly TTS와 음성 길이 처리
+generator/video       배경 영상 선택, 자막, 최종 렌더링
+shared/jobs           생성/업로드 stage runner
+shared/storage        S3 저장소 추상화
+shared/state          DynamoDB 상태 저장
+uploader              YouTube 업로드/OAuth helper
+infra/terraform       AWS 인프라 정의
+infra/terraform/lambda
+                      planner, publisher, budget notifier Lambda
+docs                  기획, 구조, 운영, 품질 문서
+tests                 핵심 로직 회귀 테스트
 ```
 
-Required credentials:
+## 주요 AWS 리소스
 
 ```text
-/ytshorts/OPENAI_API_KEY
-/ytshorts/HF_TOKEN
-/ytshorts/PIXABAY_API_KEY
-/ytshorts/SLACK_WEBHOOK_URL
-/ytshorts/YOUTUBE_CLIENT_ID
-/ytshorts/YOUTUBE_CLIENT_SECRET
-/ytshorts/YOUTUBE_REFRESH_TOKEN
-/ytshorts/YOUTUBE_TOKEN_URI
+Step Functions: ytshorts-pipeline
+Batch queue:    ytshorts-pipeline
+ECR repo:       ytshorts-app
+CodeBuild:      ytshorts-image-build
+Planner Lambda: ytshorts-planner
+Publisher:      ytshorts-publisher
+S3 bucket:      youtube-shorts-automation-160885253413-apne2
+DynamoDB:       ytshorts-content
 ```
 
-YouTube upload uses OAuth refresh tokens, not a YouTube API key.
+Terraform remote state는 S3와 DynamoDB lock table로 관리합니다.
 
-## Implementation Notes
+## 설정 관리
 
-Reddit collection does not depend on Selenium DOM scraping. It uses Reddit OAuth/listing APIs when credentials are available, public JSON when possible, and PullPush fallback when Reddit blocks public access.
+런타임 설정은 `/ytshorts/*` SSM Parameter Store를 기준으로 관리합니다.
 
-Rendering is handled by AWS Batch/Fargate, not Lambda. FFmpeg normalizes the final video to 1080x1920, burns centered ASS captions after scaling, renders captions over a 4:4:4 intermediate frame, and emits YouTube-compatible H.264/AAC MP4.
+예를 들어 공개 범위, 생성 재고 수, 자막 크기, 렌더 품질, Pixabay 필터 기준 같은 값은 SSM에서 바꿀 수 있습니다. Batch 컨테이너는 SSM 값을 주입받고, Lambda는 런타임에 SSM 값을 읽습니다.
 
-Caption quality defaults:
+credential 값은 README에 적지 않습니다. 필요한 파라미터와 운영 방법은 [운영 문서](docs/OPERATIONS.md)와 [인프라 문서](docs/INFRASTRUCTURE.md)에 정리되어 있습니다.
 
-```text
-font: Anton
-font size: 114
-outline: 7
-shadow: 0
-fade: 0
-center position: 540x960
-```
+## 더 자세한 문서
 
-Pixabay selection rejects common low-quality cases:
-
-```text
-minimum source long edge: 1920
-minimum source short edge: 1080
-sharpness gate: Laplacian-variance median score >= 60
-blocked tags: green screen, chroma, abstract, animation, game, logo, VFX, slideshow
-```
-
-Upload safety:
-
-```text
-publisher blocks tiny MP4 files below /ytshorts/YOUTUBE_MIN_UPLOAD_BYTES
-render stage validates final MP4 with ffprobe
-publisher rebases stale queues so old dates do not permanently clog uploads
-```
-
-## Manual Operations
-
-Trigger generation manually:
-
-```bash
-aws stepfunctions start-execution \
-  --state-machine-arn arn:aws:states:ap-northeast-2:160885253413:stateMachine:ytshorts-pipeline \
-  --input '{"mode":"generate"}' \
-  --region ap-northeast-2
-```
-
-Trigger upload manually:
-
-```bash
-aws stepfunctions start-execution \
-  --state-machine-arn arn:aws:states:ap-northeast-2:160885253413:stateMachine:ytshorts-pipeline \
-  --input '{"mode":"upload"}' \
-  --region ap-northeast-2
-```
-
-Check schedules:
-
-```bash
-aws scheduler get-schedule --name ytshorts-generate-refill --region ap-northeast-2
-aws scheduler get-schedule --name ytshorts-upload-daily --region ap-northeast-2
-```
-
-Build and push the Batch image:
-
-```bash
-mkdir -p infra/terraform/.build
-git archive --format=zip -o infra/terraform/.build/source.zip HEAD
-aws s3 cp infra/terraform/.build/source.zip \
-  s3://youtube-shorts-automation-160885253413-apne2/source/source.zip \
-  --region ap-northeast-2
-aws codebuild start-build \
-  --project-name ytshorts-image-build \
-  --region ap-northeast-2
-```
-
-## Local Run
-
-```bash
-python3 -m venv .venv
-. .venv/bin/activate
-pip install -r requirements.txt -r requirements-upload-scheduler.txt
-
-STAGE=collect python runner.py
-STAGE=filter python runner.py
-STAGE=script python runner.py
-STAGE=tts python runner.py
-STAGE=subtitles python runner.py
-STAGE=render python runner.py
-STAGE=finalize python runner.py
-MODE=upload python runner.py
-```
-
-Local runs need the same required credentials in the environment unless you load them from SSM before execution.
-
-## Terraform
-
-Remote state is stored in S3 with DynamoDB locking.
-
-```bash
-cd infra/bootstrap
-terraform init
-terraform apply
-
-cd ../terraform
-terraform init
-terraform plan
-terraform apply
-```
-
-Do not put secret values into Terraform variables. Credential values should be written directly to SSM SecureString parameters.
-
-## Verification
-
-Useful checks:
-
-```bash
-pytest -q
-terraform -chdir=infra/terraform validate
-terraform -chdir=infra/terraform plan -detailed-exitcode
-```
-
-Runtime smoke examples:
-
-```bash
-aws lambda invoke \
-  --function-name ytshorts-planner \
-  --cli-binary-format raw-in-base64-out \
-  --payload '{"mode":"generate"}' \
-  /tmp/ytshorts-planner.json \
-  --region ap-northeast-2
-```
-
-Planner should return `needed_new_items` based on SSM-backed inventory settings.
-
-## Docs
-
-- [Product Spec](docs/PRODUCT_SPEC.md)
-- [Architecture](docs/ARCHITECTURE.md)
-- [Infrastructure](docs/INFRASTRUCTURE.md)
-- [Operations](docs/OPERATIONS.md)
-- [Quality Automation](docs/QUALITY_AUTOMATION.md)
-- [Implementation Checklist](docs/IMPLEMENTATION_CHECKLIST.md)
+- [기획서](docs/PRODUCT_SPEC.md)
+- [전체 구조](docs/ARCHITECTURE.md)
+- [AWS 인프라](docs/INFRASTRUCTURE.md)
+- [운영 문서](docs/OPERATIONS.md)
+- [품질 자동화](docs/QUALITY_AUTOMATION.md)
+- [완료 체크리스트](docs/IMPLEMENTATION_CHECKLIST.md)
