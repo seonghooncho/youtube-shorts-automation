@@ -1,12 +1,15 @@
 import json
 
 import pytest
+from openai.lib._pydantic import to_strict_json_schema
 
 from generator.text import generate_script as generate_script_module
-from generator.text.generate_script import NativeViewerCritic, ReturnScript, _token_budgets
+from generator.text.generate_script import NativeViewerCritic, ReturnScript, _text_verbosity, _token_budgets
 from generator.text.generate_scripts_from_filtered import (
     EXAMPLE_JSON,
     _build_local_fallback_metadata,
+    _clean_first_frame_text,
+    _clean_short_hook_text,
     _is_llm_quota_error,
     _regenerate_reason_from_error,
 )
@@ -19,10 +22,48 @@ def test_token_budgets_default_are_high_enough_for_full_schema(monkeypatch):
     assert _token_budgets() == [3200, 4200, 5200]
 
 
+def test_return_script_schema_is_strict_response_compatible():
+    schema = to_strict_json_schema(ReturnScript)
+    defs = schema["$defs"]
+
+    assert defs["ScriptCriticScores"]["additionalProperties"] is False
+    assert defs["VisualBeatQuery"]["additionalProperties"] is False
+
+
 def test_token_budgets_accept_env_override(monkeypatch):
     monkeypatch.setenv("SCRIPT_OUTPUT_TOKEN_BUDGETS", "2600, bad, 3600, 0")
 
     assert _token_budgets() == [2600, 3600]
+
+
+def test_text_verbosity_uses_medium_for_gpt_41(monkeypatch):
+    monkeypatch.delenv("SCRIPT_TEXT_VERBOSITY", raising=False)
+    monkeypatch.setenv("SCRIPT_MODEL", "gpt-4.1-mini")
+
+    assert _text_verbosity() == "medium"
+    assert _text_verbosity("gpt-4.1") == "medium"
+
+
+def test_text_verbosity_allows_env_override(monkeypatch):
+    monkeypatch.setenv("SCRIPT_MODEL", "gpt-4.1-mini")
+    monkeypatch.setenv("SCRIPT_TEXT_VERBOSITY", "low")
+
+    assert _text_verbosity() == "low"
+
+
+def test_clean_first_frame_text_strips_dangling_tail():
+    assert _clean_first_frame_text("MY LANDLORD WALKED RIGHT INTO MY APARTMENT WITHOUT WARNING") == "MY LANDLORD WALKED INTO MY APARTMENT"
+    assert len(_clean_first_frame_text("MY LANDLORD WALKED RIGHT INTO MY APARTMENT WITHOUT WARNING")) <= 38
+
+
+def test_clean_short_hook_text_truncates_without_dangling_tail():
+    cleaned = _clean_short_hook_text(
+        "My landlord and the bar manager kept strolling into my apartment whenever they felt like it without any warning at all",
+        max_chars=95,
+    )
+
+    assert len(cleaned) <= 95
+    assert not cleaned.endswith((" my", " the", " without"))
 
 
 def test_regenerate_reason_for_overlength_is_strict(monkeypatch):
@@ -33,7 +74,7 @@ def test_regenerate_reason_for_overlength_is_strict(monkeypatch):
 
     assert "1418 characters" in reason
     assert "820-980 characters" in reason
-    assert "7 to 10 complete voiceover lines" in reason
+    assert "8 to 10 complete voiceover lines" in reason
     assert "hard max 1050" in reason
 
 
@@ -55,6 +96,7 @@ def test_prompt_example_uses_consistent_voiceover_line_standard():
 
 def test_critic_failure_causes_rewrite_failure(monkeypatch):
     monkeypatch.setenv("SCRIPT_CRITIC_ENABLED", "1")
+    monkeypatch.setenv("SCRIPT_CRITIC_STAGE", "pre_gate")
     draft = ReturnScript(
         title="Neighbor Used My Driveway",
         description="A driveway conflict.",

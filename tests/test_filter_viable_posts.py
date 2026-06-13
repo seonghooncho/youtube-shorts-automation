@@ -2,11 +2,13 @@ import json
 
 from generator.text.filter_viable_posts import (
     _ask_source_scorecard,
+    _gate_fit_passes,
     _ask_yes_no,
     _is_llm_quota_error,
     _local_fallback_enabled,
     _local_precheck,
     _local_source_scorecard,
+    _text_verbosity,
     filter_viable_posts,
 )
 
@@ -39,6 +41,12 @@ class _ScorecardResponse:
       "debate_potential": 5,
       "safe_adaptability": 5,
       "visualizability": 4,
+      "gate_fit_score": 5,
+      "hook_in_one_sentence": 5,
+      "receipt_strength": 4,
+      "visual_matchability": 5,
+      "length_fit_score": 5,
+      "metadata_repairability": 5,
       "retention_risk": "low",
       "archetype": "roommate_money",
       "reason": "Clear roommate conflict with a debatable bill."
@@ -109,7 +117,21 @@ def test_ask_source_scorecard_returns_structured_fields():
     assert scorecard.decision == "YES"
     assert scorecard.archetype == "roommate_money"
     assert scorecard.retention_risk == "low"
+    assert _gate_fit_passes(scorecard) is True
     assert client.responses.kwargs["text"]["format"]["type"] == "json_object"
+
+
+def test_filter_text_verbosity_uses_medium_for_gpt_41(monkeypatch):
+    monkeypatch.delenv("FILTER_TEXT_VERBOSITY", raising=False)
+
+    assert _text_verbosity("gpt-4.1-mini") == "medium"
+    assert _text_verbosity("gpt-5.4-nano") == "low"
+
+
+def test_filter_text_verbosity_allows_env_override(monkeypatch):
+    monkeypatch.setenv("FILTER_TEXT_VERBOSITY", "high")
+
+    assert _text_verbosity("gpt-4.1-mini") == "high"
 
 
 def test_ask_source_scorecard_raises_on_quota_error():

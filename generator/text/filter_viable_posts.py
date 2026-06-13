@@ -39,6 +39,12 @@ class SourceScorecard(BaseModel):
     debate_potential: int = Field(..., ge=1, le=5)
     safe_adaptability: int = Field(..., ge=1, le=5)
     visualizability: int = Field(..., ge=1, le=5)
+    gate_fit_score: int = Field(3, ge=1, le=5)
+    hook_in_one_sentence: int = Field(3, ge=1, le=5)
+    receipt_strength: int = Field(3, ge=1, le=5)
+    visual_matchability: int = Field(3, ge=1, le=5)
+    length_fit_score: int = Field(3, ge=1, le=5)
+    metadata_repairability: int = Field(3, ge=1, le=5)
     retention_risk: Literal["low", "medium", "high"]
     archetype: str
     reason: str
@@ -88,6 +94,26 @@ def _scorecard_average(scorecard: SourceScorecard) -> float:
     return round(sum(fields) / len(fields), 2)
 
 
+def _source_priority_score(scorecard: SourceScorecard) -> float:
+    fields = [
+        _scorecard_average(scorecard),
+        scorecard.gate_fit_score,
+        scorecard.hook_in_one_sentence,
+        scorecard.receipt_strength,
+    ]
+    return round(sum(fields) / len(fields), 2)
+
+
+def _gate_fit_passes(scorecard: SourceScorecard) -> bool:
+    return (
+        scorecard.gate_fit_score >= 4
+        and scorecard.hook_in_one_sentence >= 4
+        and scorecard.visual_matchability >= 4
+        and scorecard.length_fit_score >= 4
+        and scorecard.receipt_strength >= 3
+    )
+
+
 def _parse_source_scorecard(raw: str) -> SourceScorecard:
     text = _clean_response_text(raw)
     try:
@@ -126,7 +152,7 @@ def _ask_source_scorecard(client: openai.OpenAI, prompt: str, model: str) -> Sou
                 "model": model,
                 "input": messages,
                 "max_output_tokens": 512,
-                "text": {"format": {"type": "json_object"}, "verbosity": "low"},
+                "text": {"format": {"type": "json_object"}, "verbosity": _text_verbosity(model)},
             }
             kwargs.update(_reasoning_kwargs_for_model(model))
             resp = client.responses.create(**kwargs)
@@ -199,6 +225,15 @@ def _reasoning_kwargs_for_model(model: str) -> dict:
     return {}
 
 
+def _text_verbosity(model: str) -> str:
+    configured = os.getenv("FILTER_TEXT_VERBOSITY", "").strip().lower()
+    if configured in {"low", "medium", "high"}:
+        return configured
+    if (model or "").lower().startswith("gpt-4.1"):
+        return "medium"
+    return "low"
+
+
 def _local_precheck(post: dict) -> str:
     source = build_source_profile(post)
     if source.is_truncated:
@@ -253,6 +288,12 @@ def _local_source_scorecard(post: dict, reason: str = "") -> SourceScorecard:
         debate_potential=high,
         safe_adaptability=high,
         visualizability=4 if archetype != "abstract_boundary" else 3,
+        gate_fit_score=4 if has_boundary else 3,
+        hook_in_one_sentence=4 if has_boundary else 3,
+        receipt_strength=4 if any(term in lowered for term in ("receipt", "message", "text", "camera", "bill", "photo")) else 3,
+        visual_matchability=4 if archetype != "abstract_boundary" else 3,
+        length_fit_score=4 if len(content.split()) >= 120 else 3,
+        metadata_repairability=4 if has_boundary else 3,
         retention_risk="medium" if decision == "YES" else "high",
         archetype=archetype,
         reason=(
@@ -320,6 +361,12 @@ def filter_viable_posts():
           "debate_potential": integer 1-5,
           "safe_adaptability": integer 1-5,
           "visualizability": integer 1-5,
+          "gate_fit_score": integer 1-5,
+          "hook_in_one_sentence": integer 1-5,
+          "receipt_strength": integer 1-5,
+          "visual_matchability": integer 1-5,
+          "length_fit_score": integer 1-5,
+          "metadata_repairability": integer 1-5,
           "retention_risk": "low" or "medium" or "high",
           "archetype": short snake_case label such as roommate_money, family_boundary, pet_medical_bill, workplace_accusation, neighbor_property, wedding_drama,
           "reason": one concise sentence
@@ -334,10 +381,14 @@ def filter_viable_posts():
         - The likely narration will not need filler to reach 42 seconds.
         - The ending naturally creates a comment debate where reasonable viewers could disagree.
         - The story feels like a 4/5 or 5/5 retention candidate, not merely "understandable."
+        - gate_fit_score, hook_in_one_sentence, visual_matchability, and length_fit_score are all 4 or 5.
+        - receipt_strength is at least 3.
+        - The story can produce 650-950 narration characters without filler.
 
         Use NO if the source is mostly contextless, a question without a story, rage bait without events,
         low-stakes relationship ambiguity, graphic/sexual content involving minors, teen/high-school romance,
-        explicit hate or slurs, or a post that requires major fabrication.
+        explicit hate or slurs, a post that requires major fabrication, or a source that is understandable
+        but likely to fail title/caption/opening-visual/length gates.
 
         Title: {title}
         Source metadata:
@@ -374,9 +425,15 @@ def filter_viable_posts():
 
             source_score = _scorecard_average(scorecard)
             min_score = float(os.getenv("SOURCE_SCORE_MIN_AVG", "4.0"))
-            if scorecard.decision == "YES" and scorecard.retention_risk != "high" and source_score >= min_score:
+            if (
+                scorecard.decision == "YES"
+                and scorecard.retention_risk != "high"
+                and source_score >= min_score
+                and _gate_fit_passes(scorecard)
+            ):
                 post["source_scorecard"] = scorecard.model_dump()
                 post["source_score"] = source_score
+                post["source_priority_score"] = _source_priority_score(scorecard)
                 post["source_archetype"] = scorecard.archetype.strip().lower()[:80]
                 post["source_quality_status"] = "accepted"
                 post["source_rejection_reason"] = ""
@@ -387,7 +444,9 @@ def filter_viable_posts():
                 print(
                     "⏭️ source scorecard reject: "
                     f"id={post.get('id', 'unknown')} decision={scorecard.decision} "
-                    f"score={source_score} risk={scorecard.retention_risk} reason={scorecard.reason}"
+                    f"score={source_score} gate_fit={scorecard.gate_fit_score} hook={scorecard.hook_in_one_sentence} "
+                    f"visual={scorecard.visual_matchability} length={scorecard.length_fit_score} "
+                    f"risk={scorecard.retention_risk} reason={scorecard.reason}"
                 )
 
         except RuntimeError as e:
@@ -397,9 +456,15 @@ def filter_viable_posts():
                 print(f"🧩 OpenAI quota 오류로 로컬 source scorecard 사용: id={post.get('id', 'unknown')}")
                 source_score = _scorecard_average(scorecard)
                 min_score = float(os.getenv("SOURCE_SCORE_MIN_AVG", "4.0"))
-                if scorecard.decision == "YES" and scorecard.retention_risk != "high" and source_score >= min_score:
+                if (
+                    scorecard.decision == "YES"
+                    and scorecard.retention_risk != "high"
+                    and source_score >= min_score
+                    and _gate_fit_passes(scorecard)
+                ):
                     post["source_scorecard"] = scorecard.model_dump()
                     post["source_score"] = source_score
+                    post["source_priority_score"] = _source_priority_score(scorecard)
                     post["source_archetype"] = scorecard.archetype.strip().lower()[:80]
                     post["source_quality_status"] = "accepted"
                     post["source_rejection_reason"] = ""
@@ -423,7 +488,7 @@ def filter_viable_posts():
             print(f"GPT 판단 오류: {e}")
             continue
 
-    selected_posts.sort(key=lambda item: float(item.get("source_score") or 0), reverse=True)
+    selected_posts.sort(key=lambda item: float(item.get("source_priority_score") or item.get("source_score") or 0), reverse=True)
     with open(VIABLE_POSTS_FILE, "w", encoding="utf-8") as f:
         json.dump(selected_posts, f, ensure_ascii=False, indent=2)
 

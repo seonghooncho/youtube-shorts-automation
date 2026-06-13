@@ -13,7 +13,10 @@ from generator.text.youtube_metadata import title_quality_reason
 
 
 _CAPTION_ACTOR_TERMS = {
+    "dad",
+    "daughter",
     "he",
+    "landlord",
     "she",
     "neighbor",
     "roommate",
@@ -24,29 +27,48 @@ _CAPTION_ACTOR_TERMS = {
     "owner",
 }
 _CAPTION_OBJECT_TERMS = {
+    "apartment",
+    "bank",
+    "banks",
     "bill",
+    "bloodwork",
     "building chat",
     "camera",
     "car",
     "card",
+    "cat",
+    "childcare",
+    "daycare",
+    "dent",
     "door camera",
     "driveway",
     "group chat",
+    "home",
+    "kids",
     "laundry",
     "machine",
+    "number",
     "package",
     "phone",
     "receipt",
+    "rent",
     "screenshot",
     "storage unit",
     "text",
     "timestamp",
+    "van",
+    "vet",
 }
 _CAPTION_ACTION_TERMS = {
     "accused",
+    "bit",
+    "bites",
     "blocked",
+    "called",
+    "calls",
     "charged",
     "changed",
+    "dented",
     "left",
     "locked",
     "moved",
@@ -54,9 +76,13 @@ _CAPTION_ACTION_TERMS = {
     "posted",
     "refused",
     "returned",
+    "snapped",
     "spent",
     "took",
     "used",
+    "walk",
+    "walked",
+    "walking",
 }
 _CAPTION_BAD_PREFIXES = ("so ", "for context", "a little backstory")
 _AI_TEMPLATE_CAPTION_PHRASES = {
@@ -111,15 +137,23 @@ _OPENING_QUERY_STOPWORDS = {
     "with",
 }
 _OPENING_QUERY_STRONG_TOKENS = {
+    "apartment",
+    "bank",
+    "banks",
     "bill",
+    "bloodwork",
     "building",
     "camera",
     "car",
     "card",
+    "cat",
     "chat",
+    "dent",
+    "dented",
     "dinner",
     "driveway",
     "group",
+    "kids",
     "laundry",
     "machine",
     "manager",
@@ -128,11 +162,14 @@ _OPENING_QUERY_STRONG_TOKENS = {
     "phone",
     "receipt",
     "restaurant",
+    "rent",
     "screenshot",
     "storage",
     "text",
     "timestamp",
     "unit",
+    "van",
+    "vet",
     "washer",
 }
 _RECEIPT_TERMS = {
@@ -344,7 +381,11 @@ def normalize_narration_fields(item: dict[str, Any]) -> dict[str, Any]:
     item["voiceover_lines"] = lines
     item["script"] = list(lines)
     item["tts_text"] = tts_text(item)
-    item["caption_chunks"] = caption_chunks(item)
+    provided_chunks = [str(chunk or "").strip() for chunk in item.get("caption_chunks") or [] if str(chunk or "").strip()]
+    item["caption_chunks"] = provided_chunks or derive_caption_chunks(lines)
+    if provided_chunks and _caption_chunks_need_repair(item):
+        item["caption_chunks"] = derive_caption_chunks(lines)
+        item["caption_chunks_repaired"] = True
     _apply_caption_policy_metadata(item)
     return item
 
@@ -439,6 +480,24 @@ def caption_quality_reason(chunk: str, *, is_first: bool = False) -> str:
     if not (has_object or has_action):
         return "no_concrete_object_or_action"
     return ""
+
+
+def _caption_chunks_need_repair(item: dict[str, Any]) -> bool:
+    chunks = [str(chunk or "").strip() for chunk in item.get("caption_chunks") or [] if str(chunk or "").strip()]
+    if not chunks:
+        return True
+    if any(len(chunk) > 42 for chunk in chunks):
+        return True
+    if caption_quality_reason(chunks[0], is_first=True):
+        return True
+    if any(_is_generic_caption(chunk) for chunk in chunks):
+        return True
+    lines = voiceover_lines(item)
+    final_line = lines[-1] if lines else ""
+    if final_line.endswith("?") and not chunks[-1].rstrip().endswith("?"):
+        return True
+    aligned, _reason = caption_chunks_align_with_tts_text(item)
+    return not aligned
 
 
 def _opening_visual_errors(item: dict[str, Any]) -> list[str]:
