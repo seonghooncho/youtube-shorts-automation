@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from generator.text.generate_script import DraftScript, NativeViewerCritic
+from generator.text.generate_script import DraftScript, GenerateScriptError, NativeViewerCritic
 from generator.text.generate_scripts_from_filtered import (
     _finalize_candidate,
     generate_scripts_from_filtered,
@@ -235,6 +235,7 @@ def test_after_local_gate_critic_runs_once(monkeypatch):
 
 def test_strong_candidate_skips_after_local_gate_critic(monkeypatch):
     monkeypatch.setenv("SCRIPT_CRITIC_ENABLED", "1")
+    monkeypatch.delenv("SCRIPT_CRITIC_SAMPLE_RATE", raising=False)
     post = _post() | {"source_priority_score": 4.8}
     metadata = validate_and_parse_metadata(_draft(), 0, post)
     metadata.pop("length_repair_status", None)
@@ -254,6 +255,56 @@ def test_strong_candidate_skips_after_local_gate_critic(monkeypatch):
 
     assert calls["critic"] == 0
     assert accepted["critic_policy"] == "skipped_strong_candidate"
+
+
+def test_strong_candidate_sample_rate_one_runs_critic(monkeypatch):
+    monkeypatch.setenv("SCRIPT_CRITIC_ENABLED", "1")
+    monkeypatch.setenv("SCRIPT_CRITIC_SAMPLE_RATE", "1")
+    post = _post() | {"source_priority_score": 4.8}
+    metadata = validate_and_parse_metadata(_draft(), 0, post)
+    metadata.pop("length_repair_status", None)
+    metadata["script_char_count"] = 760
+    metadata["quality_warnings"] = []
+    metadata["predicted_ai_smell_score"] = 2
+    metadata["repair_actions"] = [
+        {"code": "caption_chunks_rebuilt"},
+        {"code": "first_frame_text_rebuilt"},
+        {"code": "opening_visual_query_rebuilt"},
+        {"code": "public_title_rebuilt"},
+    ]
+    calls = {"critic": 0}
+
+    def fake_critic(*_args, **_kwargs):
+        calls["critic"] += 1
+        return _passing_critic()
+
+    monkeypatch.setattr("generator.text.generate_scripts_from_filtered.critique_script", fake_critic)
+
+    accepted = _finalize_candidate(metadata, [], [], post, append=False)
+
+    assert calls["critic"] == 1
+    assert accepted["critic_policy"] == "sampled_strong_candidate"
+    assert accepted["critic_policy_reason"] == "sample_rate"
+
+
+def test_critic_sample_seed_is_stable(monkeypatch):
+    monkeypatch.setenv("SCRIPT_CRITIC_SAMPLE_RATE", "0.5")
+    monkeypatch.setenv("SCRIPT_CRITIC_SAMPLE_SEED", "stable-test")
+    post = _post() | {"source_priority_score": 4.8}
+    metadata = {
+        "quality_warnings": [],
+        "script_char_count": 820,
+        "marketability_score": 5,
+        "predicted_ai_smell_score": 1,
+        "repair_actions": [],
+        "script_fingerprint": "fingerprint-1",
+        "public_title": "Her Cat Bit Mine Twice",
+    }
+
+    first = should_run_critic(metadata, post)
+    second = should_run_critic(metadata, post)
+
+    assert first == second
 
 
 def test_critic_policy_runs_for_borderline_reasons(monkeypatch):
@@ -305,3 +356,49 @@ def test_critic_failure_causes_at_most_one_rewrite(monkeypatch, tmp_path):
     assert calls["critic"] == 2
     assert len(accepted) == 1
     assert rejected == []
+
+
+def test_failed_generation_telemetry_is_counted_without_result(monkeypatch, tmp_path):
+    viable = tmp_path / "viable_posts.json"
+    final = tmp_path / "final_metadata.json"
+    failed = tmp_path / "failed_posts.json"
+    viable.write_text(json.dumps([_post()]), encoding="utf-8")
+    telemetry = {
+        "structured_attempts": 1,
+        "json_fallback_attempts": 0,
+        "structured_failures": 1,
+        "json_fallback_failures": 0,
+        "estimated_output_token_budget_total": 1600,
+        "structured_retry_skipped_reason": "schema_validation_failure",
+    }
+
+    monkeypatch.setenv("SCRIPT_MAX_LLM_DRAFTS_PER_SOURCE", "1")
+    monkeypatch.setattr("generator.text.generate_scripts_from_filtered.VIABLE_POSTS_FILE", viable)
+    monkeypatch.setattr("generator.text.generate_scripts_from_filtered.FINAL_METADATA_FILE", final)
+    monkeypatch.setattr("generator.text.generate_scripts_from_filtered.FAILED_POSTS_FILE", failed)
+    monkeypatch.setattr("generator.text.generate_scripts_from_filtered._load_previous_accepted_metadata", lambda: [])
+    monkeypatch.setattr(
+        "generator.text.generate_scripts_from_filtered.call_gpt_generate_script",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(GenerateScriptError("schema failed", telemetry)),
+    )
+
+    generate_scripts_from_filtered()
+
+    rejected = json.loads(failed.read_text(encoding="utf-8"))
+    summary = json.loads((tmp_path / "generation_summary.json").read_text(encoding="utf-8"))
+    assert rejected[0]["generation_telemetry"]["structured_attempts"] == 1
+    assert rejected[0]["llm_structured_attempts"] == 1
+    assert summary["structured_attempts"] == 1
+    assert summary["structured_failures"] == 1
+
+
+def test_dry_run_summary_prints_key_metrics(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("SCRIPT_DRY_RUN_SUMMARY_ONLY", "1")
+    monkeypatch.setenv("SCRIPT_CRITIC_ENABLED", "0")
+
+    _run_generation(monkeypatch, tmp_path, [_draft()])
+
+    output = capsys.readouterr().out
+    assert "DRY_RUN_SUMMARY raw=1" in output
+    assert "draft_calls=1" in output
+    assert "accepted=1" in output

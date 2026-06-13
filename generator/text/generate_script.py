@@ -6,7 +6,15 @@ from dotenv import load_dotenv, find_dotenv
 import openai
 from pydantic import BaseModel, Field, ValidationError
 
-_LAST_GENERATION_TELEMETRY: dict[str, int] = {}
+_LAST_GENERATION_TELEMETRY: dict[str, Any] = {}
+
+
+class GenerateScriptError(RuntimeError):
+    def __init__(self, message: str, telemetry: dict[str, Any], cause: Exception | None = None):
+        super().__init__(message)
+        self.telemetry = dict(telemetry or {})
+        if cause is not None:
+            self.__cause__ = cause
 
 # --- ENV & Client ---
 def _get_client() -> openai.OpenAI:
@@ -44,26 +52,40 @@ def _json_fallback_enabled() -> bool:
     return os.getenv("SCRIPT_ENABLE_JSON_FALLBACK", "0").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _new_generation_telemetry() -> dict[str, int]:
+def _max_structured_attempts() -> int:
+    raw = os.getenv("SCRIPT_MAX_STRUCTURED_ATTEMPTS", "1").strip()
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 1
+
+
+def _retry_on_token_limit_only() -> bool:
+    return os.getenv("SCRIPT_RETRY_ON_TOKEN_LIMIT_ONLY", "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _new_generation_telemetry() -> dict[str, Any]:
     return {
         "structured_attempts": 0,
         "json_fallback_attempts": 0,
         "structured_failures": 0,
         "json_fallback_failures": 0,
         "estimated_output_token_budget_total": 0,
+        "structured_retry_reason": "",
+        "structured_retry_skipped_reason": "",
     }
 
 
-def get_last_generation_telemetry() -> dict[str, int]:
+def get_last_generation_telemetry() -> dict[str, Any]:
     return dict(_LAST_GENERATION_TELEMETRY)
 
 
-def _record_last_generation_telemetry(telemetry: dict[str, int]) -> None:
+def _record_last_generation_telemetry(telemetry: dict[str, Any]) -> None:
     global _LAST_GENERATION_TELEMETRY
     _LAST_GENERATION_TELEMETRY = dict(telemetry)
 
 
-def _attach_generation_telemetry(draft: BaseModel, telemetry: dict[str, int]) -> BaseModel:
+def _attach_generation_telemetry(draft: BaseModel, telemetry: dict[str, Any]) -> BaseModel:
     object.__setattr__(draft, "_generation_telemetry", dict(telemetry))
     return draft
 
@@ -397,6 +419,54 @@ def _rewrite_prompt(prompt: str, critic: NativeViewerCritic) -> str:
         f"Rewrite instructions:\n{instructions}\n"
     )
 
+
+def _token_limit_failure_reason(exc: Exception) -> str:
+    message = str(exc or "").lower()
+    token_signals = (
+        "max output",
+        "max_output",
+        "max tokens",
+        "max_tokens",
+        "token limit",
+        "output token",
+        "truncated",
+        "cutoff",
+        "cut off",
+        "incomplete json",
+        "unterminated string",
+        "unexpected eof",
+        "end of data",
+        "finish_reason",
+        "length",
+        "output too short",
+    )
+    if any(signal in message for signal in token_signals):
+        return "token_limit_or_truncated_output"
+    return ""
+
+
+def _non_retryable_failure_reason(exc: Exception) -> str:
+    message = str(exc or "").lower()
+    if _token_limit_failure_reason(exc):
+        return ""
+    if any(term in message for term in ("insufficient_quota", "quota", "auth", "api key", "permission")):
+        return "auth_or_quota_failure"
+    if any(term in message for term in ("rate limit", "rate_limit", "429")):
+        return "rate_limit_failure"
+    if any(term in message for term in ("unsafe", "safety", "policy")):
+        return "unsafe_content_failure"
+    if any(term in message for term in ("validation", "required", "missing", "schema")):
+        return "schema_validation_failure"
+    if "none" in message or "null" in message:
+        return "null_output_without_token_signal"
+    return "non_token_failure"
+
+
+def _raise_generate_script_error(message: str, telemetry: dict[str, Any], cause: Exception | None = None) -> None:
+    _record_last_generation_telemetry(telemetry)
+    raise GenerateScriptError(message, telemetry, cause)
+
+
 # --- Public API ---
 def generate_script(prompt: str) -> DraftScript:
     """
@@ -404,7 +474,7 @@ def generate_script(prompt: str) -> DraftScript:
     2) 실패 시 JSON 모드 폴백 (responses.create + model_validate_json)
     3) 시도별로 토큰 예산 상향 (잘림 방지)
     """
-    budgets = _token_budgets()
+    budgets = _token_budgets()[: _max_structured_attempts()]
     last_err: Optional[Exception] = None
     client = _get_client()
     telemetry = _new_generation_telemetry()
@@ -424,10 +494,21 @@ def generate_script(prompt: str) -> DraftScript:
             telemetry["structured_failures"] += 1
             _record_last_generation_telemetry(telemetry)
             print(f"⚠️ Structured 실패 (시도 {i}/{len(budgets)} | tokens={max_tokens}): {e1}")
-            if not _json_fallback_enabled():
+            token_reason = _token_limit_failure_reason(e1)
+            has_next_budget = i < len(budgets)
+            if has_next_budget and (token_reason or not _retry_on_token_limit_only()):
+                telemetry["structured_retry_reason"] = token_reason or "retry_on_any_failure_enabled"
+                _record_last_generation_telemetry(telemetry)
                 continue
+
+            telemetry["structured_retry_skipped_reason"] = (
+                "max_structured_attempts_reached"
+                if not has_next_budget
+                else _non_retryable_failure_reason(e1)
+            )
+            if not _json_fallback_enabled():
+                _raise_generate_script_error(f"GPT 호출/검증 최종 실패: {last_err}", telemetry, e1)
             try:
-                # 2차: 폴백(JSON 모드)
                 telemetry["json_fallback_attempts"] += 1
                 telemetry["estimated_output_token_budget_total"] += max_tokens
                 _record_last_generation_telemetry(telemetry)
@@ -440,8 +521,9 @@ def generate_script(prompt: str) -> DraftScript:
                 telemetry["json_fallback_failures"] += 1
                 _record_last_generation_telemetry(telemetry)
                 print(f"⚠️ JSON 폴백 실패 (시도 {i}/{len(budgets)} | tokens={max_tokens}): {e2}")
+                _raise_generate_script_error(f"GPT 호출/검증 최종 실패: {last_err}", telemetry, e2)
 
-    raise RuntimeError(f"GPT 호출/검증 최종 실패: {last_err}")
+    _raise_generate_script_error(f"GPT 호출/검증 최종 실패: {last_err}", telemetry, last_err)
 
 
 def _run_critic_rewrite_flow(prompt: str, draft: BaseModel, max_output_tokens: int) -> BaseModel:

@@ -68,11 +68,13 @@ def test_content_gate_rejects_synthetic_source_by_default(monkeypatch):
 
 def test_content_gate_rejects_local_template_without_upload_override(monkeypatch):
     monkeypatch.setenv("SCRIPT_LOCAL_FALLBACK_ENABLED", "1")
+    monkeypatch.delenv("ALLOW_LOCAL_TEMPLATE_RENDER", raising=False)
     monkeypatch.delenv("ALLOW_LOCAL_TEMPLATE_UPLOAD", raising=False)
 
     result = evaluate_content_gate(_safe_item(generation_fallback="local_template"))
 
     assert result["ok"] is False
+    assert "local_template_render_not_allowed" in result["hard_errors"]
     assert "local_template_fallback_not_allowed" in result["hard_errors"]
 
 

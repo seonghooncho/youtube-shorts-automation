@@ -3,6 +3,8 @@
 import json
 import os
 import re
+import hashlib
+import random
 from pathlib import Path
 from typing import Any, Dict
 from generator.text.content_gate import ensure_content_gate, normalize_narration_fields
@@ -16,7 +18,7 @@ from generator.text.generate_script import (
     critique_script,
     draft_to_metadata,
     generate_script,
-    get_last_generation_telemetry,
+    GenerateScriptError,
 )
 from generator.text.metadata_repair import repair_metadata
 from generator.text.script_fingerprint import (
@@ -197,6 +199,13 @@ def _script_target_window() -> tuple[int, int]:
 
 def _max_llm_drafts_per_source() -> int:
     return max(1, _int_env("SCRIPT_MAX_LLM_DRAFTS_PER_SOURCE", 2))
+
+
+def _float_env(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except ValueError:
+        return default
 
 
 def _source_prompt_max_chars(content: str) -> int:
@@ -638,6 +647,8 @@ def _build_local_fallback_metadata(post: Dict[str, Any], reason: str = "") -> Di
     parsed = validate_and_parse_metadata(metadata, "local_fallback", post)
     parsed["generation_fallback"] = "local_template"
     parsed["generation_fallback_reason"] = _clean_sentence(reason, max_chars=240)
+    parsed["render_blocked"] = not _truthy_env("ALLOW_LOCAL_TEMPLATE_RENDER")
+    parsed["upload_blocked"] = not _truthy_env("ALLOW_LOCAL_TEMPLATE_UPLOAD")
     if post.get("id") is not None:
         parsed["id"] = post.get("id")
         parsed["uploaded"] = False
@@ -956,17 +967,6 @@ def _fallback_style_variant(title: str, content: str) -> str:
 
 
 def _fit_fallback_script(script: list[str], story_beats: list[str]) -> list[str]:
-    joined_len = len(" ".join(script))
-    if joined_len < TARGET_MIN_SCRIPT_CHARS and len(script) < 8:
-        script.insert(
-            -1,
-            _clean_sentence(
-                "The frustrating part was not just the mistake. It was being expected to absorb it quietly so nobody else had to feel uncomfortable.",
-                max_chars=185,
-            ),
-        )
-    if len(" ".join(script)) < TARGET_MIN_SCRIPT_CHARS and story_beats and len(script) < 8:
-        script.insert(-1, _clean_sentence(f"That is why this felt bigger than one awkward moment: {story_beats[0]}", max_chars=185))
     while len(" ".join(script)) > MAX_SCRIPT_CHARS and len(script) > 7:
         script.pop(-2)
     return script
@@ -1005,7 +1005,12 @@ def _finalize_candidate(
     if _after_local_gate_critic_enabled():
         run_critic, critic_reason = should_run_critic(metadata, post)
         if run_critic:
-            metadata["critic_policy"] = "forced" if _truthy_env("SCRIPT_CRITIC_ALWAYS") else "run_borderline_candidate"
+            if _truthy_env("SCRIPT_CRITIC_ALWAYS"):
+                metadata["critic_policy"] = "forced"
+            elif critic_reason == "sample_rate":
+                metadata["critic_policy"] = "sampled_strong_candidate"
+            else:
+                metadata["critic_policy"] = "run_borderline_candidate"
             metadata["critic_skipped_reason"] = ""
             metadata["critic_policy_reason"] = critic_reason
             metadata = _run_after_local_gate_critic(metadata, post)
@@ -1059,8 +1064,32 @@ def should_run_critic(metadata: dict, post: dict) -> tuple[bool, str]:
         return True, "non_mechanical_repair_action"
     script_chars = int(metadata.get("script_char_count") or 0)
     if 700 <= script_chars <= 950 and int(metadata.get("marketability_score") or 0) == 5:
+        if _sample_strong_candidate_for_critic(metadata, post):
+            return True, "sample_rate"
         return False, "strong_candidate_passed_deterministic_gates"
     return True, "borderline_candidate"
+
+
+def _sample_strong_candidate_for_critic(metadata: dict, post: dict) -> bool:
+    rate = max(0.0, min(1.0, _float_env("SCRIPT_CRITIC_SAMPLE_RATE", 0.0)))
+    if rate <= 0:
+        return False
+    if rate >= 1:
+        return True
+    seed = os.getenv("SCRIPT_CRITIC_SAMPLE_SEED", "").strip()
+    if seed:
+        stable_key = "|".join(
+            [
+                seed,
+                str((post or {}).get("id") or ""),
+                str(metadata.get("script_fingerprint") or ""),
+                str(metadata.get("public_title") or metadata.get("title") or ""),
+            ]
+        )
+        digest = hashlib.sha256(stable_key.encode("utf-8")).hexdigest()
+        value = int(digest[:16], 16) / float(0xFFFFFFFFFFFFFFFF)
+        return value < rate
+    return random.random() < rate
 
 
 def _float_value(value: Any, default: float = 0.0) -> float:
@@ -1158,12 +1187,12 @@ def _script_chars_from_result(result: DraftScript | ReturnScript | None) -> int 
     return len(script_text(result.model_dump()))
 
 
-def _generation_telemetry_from_result(result: DraftScript | ReturnScript | None) -> dict[str, int]:
+def _generation_telemetry_from_result(result: DraftScript | ReturnScript | None) -> dict[str, Any]:
     if result is not None:
         telemetry = getattr(result, "_generation_telemetry", None)
         if telemetry:
             return dict(telemetry)
-    return get_last_generation_telemetry()
+    return {}
 
 
 def _failure_record(
@@ -1177,6 +1206,7 @@ def _failure_record(
     failure_action: str | None = None,
     result: DraftScript | ReturnScript | None = None,
     metadata: dict | None = None,
+    generation_telemetry: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     record: dict[str, Any] = {
         "idx": idx,
@@ -1189,7 +1219,7 @@ def _failure_record(
         record["generation_attempt_count"] = generation_attempt_count
     if failure_action:
         record["failure_action"] = failure_action
-    telemetry = _generation_telemetry_from_result(result)
+    telemetry = dict(generation_telemetry or {}) or _generation_telemetry_from_result(result)
     if telemetry:
         record["generation_telemetry"] = telemetry
         record.update({f"llm_{key}": value for key, value in telemetry.items()})
@@ -1281,6 +1311,7 @@ def generate_scripts_from_filtered():
         while try_count <= max_retries:
             result = None
             metadata = None
+            generation_error_telemetry: dict[str, Any] = {}
             try:
                 if try_count == 0:
                     result: DraftScript = call_gpt_generate_script(title, content, post=post)
@@ -1321,6 +1352,8 @@ def generate_scripts_from_filtered():
                 break  # 성공 시 루프 종료
 
             except Exception as e:
+                if isinstance(e, GenerateScriptError):
+                    generation_error_telemetry = dict(e.telemetry or {})
                 char_count = _script_chars_from_result(result)
                 if result is not None:
                     print(f"⚠️ GPT 응답 검증 실패 (post {idx}, 시도 {try_count+1}, script_chars={char_count}): {e}")
@@ -1336,7 +1369,7 @@ def generate_scripts_from_filtered():
                         print(f"🧩 OpenAI quota 오류로 로컬 fallback 대본 생성 완료 (post {idx}): {origin_id}")
                         break
                     except Exception as fallback_error:
-                        failed_items.append(_failure_record(idx=idx, origin_id=origin_id, title=title, error=str(fallback_error), stage="script_generation", result=result, metadata=metadata))
+                        failed_items.append(_failure_record(idx=idx, origin_id=origin_id, title=title, error=str(fallback_error), stage="script_generation", result=result, metadata=metadata, generation_telemetry=generation_error_telemetry))
                         print(f"🚫 로컬 fallback 실패 (post {idx}): {fallback_error}")
                         break
                 failure_action = classify_failure(msg, script_chars=char_count, repeated=try_count >= max_retries)
@@ -1362,6 +1395,7 @@ def generate_scripts_from_filtered():
                             failure_action=failure_action.value,
                             result=result,
                             metadata=metadata,
+                            generation_telemetry=generation_error_telemetry,
                         )
                     )
                     print(f"🚫 repair-first 스킵 (post {idx}): action={failure_action.value} error={msg}")
@@ -1385,6 +1419,7 @@ def generate_scripts_from_filtered():
                             failure_action=FailureAction.SKIP_SOURCE.value,
                             result=result,
                             metadata=metadata,
+                            generation_telemetry=generation_error_telemetry,
                         )
                     )
                     print(f"🚫 최종 실패 (post {idx}): {msg}")
@@ -1401,8 +1436,26 @@ def generate_scripts_from_filtered():
     summary_path = FINAL_METADATA_FILE.with_name("generation_summary.json")
     with open(summary_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
+    if _truthy_env("SCRIPT_DRY_RUN_SUMMARY_ONLY"):
+        _print_dry_run_summary(summary)
     print(f"🧾 생성 요약 저장 완료 → {summary_path}")
     print(f"📦 최종 메타데이터 저장 완료 → {FINAL_METADATA_FILE}")
+
+
+def _print_dry_run_summary(summary: dict) -> None:
+    top_failures = ",".join(str(item.get("code") or "") for item in summary.get("top_failure_codes", [])[:5])
+    print(
+        "DRY_RUN_SUMMARY "
+        f"raw={summary.get('sources_considered', 0)} "
+        f"scorecard_calls={summary.get('source_scorecard_calls', 0)} "
+        f"draft_calls={summary.get('llm_drafts', 0)} "
+        f"json_fallback={summary.get('json_fallback_attempts', 0)} "
+        f"critic={summary.get('critic_calls_attempted', 0)} "
+        f"accepted={summary.get('final_accepted', 0)} "
+        f"rejected={summary.get('final_rejected', 0)} "
+        f"top_failures=[{top_failures}] "
+        f"estimated_token_budget={summary.get('estimated_output_token_budget_total', 0)}"
+    )
 
 
 def _generation_summary(posts: list[dict], accepted: list[dict], failed: list[dict]) -> dict:

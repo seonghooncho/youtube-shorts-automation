@@ -10,6 +10,7 @@ from generator.text.filter_viable_posts import (
     _local_precheck,
     _local_source_scorecard,
     _text_verbosity,
+    compact_source_for_filter,
     filter_viable_posts,
     local_source_priority,
     source_acceptance_score,
@@ -213,6 +214,57 @@ def test_filter_prerank_caps_llm_source_scorecard_calls(monkeypatch, tmp_path):
     assert calls["scorecard"] == 8
     assert summary["source_scorecard_calls"] == 8
     assert summary["source_scorecard_skipped_by_prerank"] == 6
+    assert summary["local_priority_cutoff_score"] > 0
+    assert len(summary["local_priority_top_scores"]) == 10
+    assert summary["local_priority_min_evaluated"] == summary["local_priority_cutoff_score"]
+    assert summary["prerank_skipped_examples"]
+    assert summary["source_rejection_reason_counts"]["below_local_prerank_cutoff"] == 6
+    assert summary["accepted_source_archetypes"]["roommate_money"] == 8
+
+
+def test_filter_compacts_long_source_and_preserves_receipts_and_question():
+    long_middle = " ".join([f"Slow context sentence {i} about unrelated history." for i in range(120)])
+    receipt = "The receipt screenshot showed the dinner bill was charged to my card at 8:42."
+    final_question = "Would you have refused to cover the card charge too?"
+    content = (
+        "My roommate charged dinner to my card without asking. "
+        + long_middle
+        + " "
+        + receipt
+        + " "
+        + "More unrelated context. " * 80
+        + final_question
+    )
+    post = {"title": "Dinner Card Charge", "content": content}
+
+    compacted = compact_source_for_filter(post, 1200)
+
+    assert len(compacted) <= 1200
+    assert "receipt screenshot" in compacted
+    assert final_question in compacted
+
+
+def test_filter_summary_records_compaction_counts(monkeypatch, tmp_path):
+    raw_path = tmp_path / "raw_posts.json"
+    viable_path = tmp_path / "viable_posts.json"
+    long_post = _raw_post(1) | {"content": " ".join([_raw_post(1)["content"]] * 8)}
+    long_post["content_char_count"] = len(long_post["content"])
+    long_post["content_word_count"] = len(long_post["content"].split())
+    raw_path.write_text(json.dumps([long_post]), encoding="utf-8")
+
+    monkeypatch.setenv("FILTER_SOURCE_MAX_CHARS", "900")
+    monkeypatch.setenv("FILTER_SOURCE_LONG_POST_MAX_CHARS", "800")
+    monkeypatch.setenv("SOURCE_LLM_EVAL_LIMIT", "8")
+    monkeypatch.setattr("generator.text.filter_viable_posts.RAW_POSTS_FILE", raw_path)
+    monkeypatch.setattr("generator.text.filter_viable_posts.VIABLE_POSTS_FILE", viable_path)
+    monkeypatch.setattr("generator.text.filter_viable_posts._get_client", lambda: object())
+    monkeypatch.setattr("generator.text.filter_viable_posts._ask_source_scorecard", lambda *_args, **_kwargs: _strong_scorecard())
+
+    filter_viable_posts()
+
+    summary = json.loads((tmp_path / "source_filter_summary.json").read_text(encoding="utf-8"))
+    assert summary["filter_prompt_compacted_count"] == 1
+    assert summary["filter_prompt_total_chars_after"] < summary["filter_prompt_total_chars_before"]
 
 
 def test_local_priority_sorts_strong_sources_first(monkeypatch, tmp_path):
