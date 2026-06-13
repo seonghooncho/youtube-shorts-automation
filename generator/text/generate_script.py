@@ -23,12 +23,20 @@ class ReturnScript(BaseModel):
     tags: List[str]
     voice: Literal["male", "female", "neutral"]
     visual_keywords: List[str]
+    hook_type: str = Field("", description="The Shorts hook pattern used, such as unfair accusation, crossed boundary, cost, betrayal, or villain framing.")
+    first_2_seconds: str = Field("", description="The exact opening phrase that should be compelling within the first two seconds.")
     source_summary: str = Field(..., description="One or two sentences summarizing the source conflict.")
     story_beats: List[str] = Field(..., min_length=4, max_length=7)
     adaptation_strategy: str = Field(..., description="How the source was compressed or plausibly dramatized without changing the core conflict.")
     retention_angle: str = Field(..., description="Why this story should hold Shorts viewers past the opening hook.")
+    turning_point: str = Field("", description="The moment where the story gets worse or flips expectations.")
+    payoff_line: str = Field("", description="The short final conflict statement immediately before the viewer question.")
     viewer_question: str = Field(..., description="A concise final engagement question for comments.")
     marketability_score: int = Field(..., ge=1, le=5)
+    retention_risk: str = Field("", description="The main risk that could make viewers swipe away, and how the script reduces it.")
+    cut_plan: List[str] = Field(default_factory=list, description="A concise list of visual cut intentions for hook, context, escalation, decision, and question.")
+    bg_strategy: Literal["story", "asmr", "hybrid"] = "hybrid"
+    rewrite_notes: str = Field("", description="Short note explaining what was tightened for retention.")
     script: List[str]
 
 def _assert_no_nulls(rs: ReturnScript) -> None:

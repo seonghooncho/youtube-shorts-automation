@@ -12,7 +12,11 @@ from generator.text.script_quality import (
     validate_script_quality,
 )
 from generator.text.youtube_metadata import apply_youtube_metadata_style
+from shared.state import ContentRepository
 from shared.utils.config import VIABLE_POSTS_FILE, FINAL_METADATA_FILE, FAILED_POSTS_FILE
+
+_PERFORMANCE_CONTEXT_CACHE: str | None = None
+
 EXAMPLE_JSON = """
 {
         "title": "Neighbor's Tenants' Kids Invaded My Property",
@@ -20,6 +24,8 @@ EXAMPLE_JSON = """
         "tags": ["storytime", "neighborhood", "drama", "reddit", "beachhouse"],
         "voice": "male",
         "visual_keywords": ["suburban driveway", "security camera", "kids playing", "angry neighbor", "rental house", "phone messages"],
+        "hook_type": "crossed_boundary",
+        "first_2_seconds": "A dozen kids turned my driveway into their playground",
         "source_summary": "The narrator owns a townhouse near a short-term rental and has repeated problems with renters' kids using his driveway and yard without permission.",
         "story_beats": [
                 "Neighboring rental guests start cutting through the narrator's property.",
@@ -30,8 +36,14 @@ EXAMPLE_JSON = """
         ],
         "adaptation_strategy": "Compressed repeated property issues into one escalating driveway incident, sharpened the neighbor's dismissive response, and kept the same boundary dispute and final dilemma.",
         "retention_angle": "The story has a clear property boundary violation, an unreasonable neighbor response, and a final moral split about whether the narrator was too strict.",
+        "turning_point": "The owner next door dismisses the complaint instead of apologizing.",
+        "payoff_line": "I told them my property was not free supervision for their renters.",
         "viewer_question": "Would you have shut it down too?",
         "marketability_score": 5,
+        "retention_risk": "The source has repeated incidents, so the rewrite compresses them into one camera-alert scene before the neighbor response.",
+        "cut_plan": ["driveway hook", "phone camera alert", "kids running", "owner text message", "final boundary question"],
+        "bg_strategy": "hybrid",
+        "rewrite_notes": "Removed slow vacation-rental context and led with the crossed boundary.",
         "script": [
                 "A dozen kids turned my driveway into their playground, and their parents acted like I was the problem.",
                 "I own a small townhouse near the beach, and the unit next door is a short-term rental. At first, the guests were just cutting across my yard. Annoying, but whatever.",
@@ -46,10 +58,11 @@ EXAMPLE_JSON = """
 
 def call_gpt_generate_script(title, content, post=None, regenerate_reason=None):
     source = build_source_profile(post or {"title": title, "content": content})
+    performance_context = _performance_context()
     # 2) f-string은 치환이 필요한 부분(제목/본문)만 사용
     parts = [
         "You are adapting a Reddit story into a YouTube Shorts narration.",
-        "Outcome: produce a fast, source-faithful, first-person script with strong Shorts retention.",
+        "Outcome: produce a fast, source-faithful, first-person script with strong Shorts retention and structured signals for future performance learning.",
         "Audience: English-speaking Shorts viewers who decide in the first 2 seconds whether to keep watching.",
         "\n[Instructions]",
         "- Return the response in the exact same JSON structure shown in the example below.",
@@ -63,20 +76,29 @@ def call_gpt_generate_script(title, content, post=None, regenerate_reason=None):
         "- Fill `story_beats` with 4 to 7 source-grounded beats: setup, escalation, decision, consequence, and final dilemma.",
         "- Fill `adaptation_strategy` with a transparent note about what you compressed or plausibly dramatized to make the story more watchable.",
         "- Fill `retention_angle` with the specific reason this story is clickable and watchable: boundary crossed, unfair accusation, betrayal, public embarrassment, money/property conflict, workplace/family pressure, or a hard moral split.",
+        "- Fill `hook_type` with a short snake_case label such as unfair_accusation, crossed_boundary, money_pressure, public_embarrassment, betrayal, villain_framing, or family_pressure.",
+        "- Fill `first_2_seconds` with the exact opening phrase that carries the first two seconds of attention. It must be concrete, not context.",
+        "- Fill `turning_point` with the moment where the situation gets worse, not just a summary.",
+        "- Fill `payoff_line` with the final conflict statement before the viewer question.",
         "- Fill `viewer_question` with the exact final comment-bait question. It must be a real question and should not be generic if the source supports a sharper one.",
         "- Fill `marketability_score` from 1 to 5. Use 4 or 5 only when the story has a concrete unfair action, clear stakes, and a debatable final decision.",
+        "- Fill `retention_risk` with the main reason viewers might swipe away and how your rewrite prevents it.",
+        "- Fill `cut_plan` with 4 to 6 short visual cut intentions. Use concrete settings, hands, phones, bills, hallway, kitchen, office, vet, car, or message shots.",
+        "- Fill `bg_strategy` as `story`, `asmr`, or `hybrid`. Use `hybrid` for most stories, `story` when concrete visual scenes matter, and `asmr` only when the source is mostly emotional or abstract.",
+        "- Fill `rewrite_notes` with one short note about what you tightened for retention.",
         "- Use a title that names the concrete conflict. Avoid generic titles like 'Did I Overreact?' unless paired with the specific action. Do not add hashtags; the uploader adds the channel hashtag style.",
         "- Write in a **casual, conversational tone**, as if you're sharing a story with a friend.",
         "- Avoid formal or stiff language. Use expressions and tones that are commonly seen in successful YouTube Shorts.",
         "- The first sentence must be a strong hook with a concrete crossed line. Start with what someone did wrong, what it cost, or why the narrator looked like the villain. Do not start with age, backstory, relationship length, 'So, get this', or 'A little backstory'.",
-        "- The first 3 paragraphs must create an open loop: hook, quick context, then escalation. Do not explain every detail chronologically.",
+        "- The first 3 paragraphs must follow this rhythm: hook result, quick context, then unexpected escalation. Do not explain every detail chronologically.",
         "- Every paragraph should either add a new problem, raise the stakes, or move toward the final decision. Cut neutral reflection.",
         "- Keep the pacing fast. Remove filler, repeated setup, and slow explanations. The narration should still be understandable after a moderate speed-up.",
         "- Structure the story in a `script` array of 5 to 7 short paragraphs. Never use more than 9 paragraphs.",
-        "- The entire script should target 780 to 1080 characters, with an ideal landing point around 900 characters.",
+        "- The entire script should target 820 to 980 characters, with an ideal landing point around 900 characters.",
         "- Anything over 1150 characters is invalid. Cut harder instead of explaining more.",
-        "- The target final narration length is roughly 45 to 75 seconds after a moderate speed-up. Prefer concise sentences over long paragraphs.",
+        "- The target final narration length is roughly 42 to 65 seconds after a moderate speed-up. Prefer concise sentences over long paragraphs.",
         "- The script should never feel stretched, repetitive, or abruptly shortened; keep only the setup, escalation, decision, and question.",
+        "- Keep the final paragraph short. Do not pack new facts and the viewer question into one overloaded sentence.",
         "- Add a `visual_keywords` array with 5 to 8 short English stock-video search phrases that match the story's setting and emotion.",
         "- Visual keywords should be concrete and searchable, such as 'phone texting', 'couple argument', 'apartment hallway', 'office conversation', 'security camera', or 'angry neighbor'. Avoid generic terms like 'nature', 'background', or 'landscape' unless the story truly needs them.",
         "- Avoid visual keywords that imply minors, teenagers, school romance, sexual content, or anything that would make stock footage unsafe.",
@@ -95,6 +117,8 @@ def call_gpt_generate_script(title, content, post=None, regenerate_reason=None):
         f"- Source URL: {source.source_url or 'unknown'}",
         f"- Source length: {source.char_count} chars, {source.word_count} words",
         f"- Source truncation flag: {source.is_truncated} {source.truncation_reason}".strip(),
+        f"- Source scorecard: {json.dumps((post or {}).get('source_scorecard') or {}, ensure_ascii=False)}",
+        f"- Recent winning patterns: {performance_context}",
         "\n[Original source]",
         f"Title: {title}",
         f"\nContent:\n{content}",
@@ -110,6 +134,19 @@ def call_gpt_generate_script(title, content, post=None, regenerate_reason=None):
         )
 
     return generate_script(prompt)
+
+
+def _performance_context() -> str:
+    global _PERFORMANCE_CONTEXT_CACHE
+    if _PERFORMANCE_CONTEXT_CACHE is not None:
+        return _PERFORMANCE_CONTEXT_CACHE
+    try:
+        patterns = ContentRepository().winning_patterns()
+    except Exception as exc:
+        print(f"⚠️ performance context unavailable: {exc}")
+        patterns = {}
+    _PERFORMANCE_CONTEXT_CACHE = json.dumps(patterns or {}, ensure_ascii=False)
+    return _PERFORMANCE_CONTEXT_CACHE
 
 
 def validate_and_parse_metadata(result: ReturnScript, idx, post) -> Dict[str, Any]:
@@ -128,12 +165,20 @@ def validate_and_parse_metadata(result: ReturnScript, idx, post) -> Dict[str, An
             "tags",
             "voice",
             "visual_keywords",
+            "hook_type",
+            "first_2_seconds",
             "source_summary",
             "story_beats",
             "adaptation_strategy",
             "retention_angle",
+            "turning_point",
+            "payoff_line",
             "viewer_question",
             "marketability_score",
+            "retention_risk",
+            "cut_plan",
+            "bg_strategy",
+            "rewrite_notes",
             "script",
         ]
         if not all(k in metadata for k in required_keys):
@@ -151,9 +196,14 @@ def validate_and_parse_metadata(result: ReturnScript, idx, post) -> Dict[str, An
             raise ValueError("❌ retention_angle은 문자열이어야 함")
         if not isinstance(metadata["adaptation_strategy"], str) or not metadata["adaptation_strategy"].strip():
             raise ValueError("❌ adaptation_strategy는 문자열이어야 함")
+        if not isinstance(metadata["cut_plan"], list) or not all(isinstance(cut, str) for cut in metadata["cut_plan"]):
+            raise ValueError("❌ cut_plan은 문자열 리스트여야 함")
+        if metadata.get("bg_strategy") not in {"story", "asmr", "hybrid"}:
+            raise ValueError("❌ bg_strategy는 story, asmr, hybrid 중 하나여야 함")
 
         metadata["script"] = [line.strip() for line in metadata["script"] if line.strip()]
         metadata["story_beats"] = [beat.strip() for beat in metadata["story_beats"] if beat.strip()]
+        metadata["cut_plan"] = [cut.strip() for cut in metadata["cut_plan"] if cut.strip()][:6]
 
         if post and post.get("content"):
             marketability_reject = source_reject_reason_for_marketability(post)
@@ -168,6 +218,13 @@ def validate_and_parse_metadata(result: ReturnScript, idx, post) -> Dict[str, An
 
         metadata["visual_keywords"] = _clean_visual_keywords(metadata["visual_keywords"])
         metadata["script_char_count"] = script_length
+        metadata["source_scorecard"] = (post or {}).get("source_scorecard") or {}
+        metadata["source_score"] = (post or {}).get("source_score")
+        metadata["source_archetype"] = (post or {}).get("source_archetype") or metadata.get("hook_type") or ""
+        metadata["source_provider"] = (post or {}).get("source_provider", "")
+        metadata["source_subreddit"] = (post or {}).get("subreddit", "")
+        metadata["source_url"] = (post or {}).get("source_url", "")
+        metadata["source_hash"] = (post or {}).get("content_hash", "")
 
         if post and post.get("content"):
             quality_issues = validate_script_quality(metadata, post)
@@ -208,6 +265,11 @@ def _regenerate_reason_from_error(message: str) -> str:
         return (
             "The previous script failed local quality validation. Fix these issues exactly: "
             f"{message}"
+        )
+    if any(code in message for code in ("weak_first_2_seconds", "weak_turning_point", "weak_payoff_line", "late_drag")):
+        return (
+            "The script needs a sharper first-two-seconds hook, a clearer turning point, "
+            "and a shorter payoff before the viewer question. Do not add filler."
         )
     if (
         "필수 키 누락" in message

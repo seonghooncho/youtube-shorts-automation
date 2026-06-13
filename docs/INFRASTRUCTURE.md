@@ -15,23 +15,23 @@ Batch job definitions: ytshorts-stage, ytshorts-script, ytshorts-render
 Step Functions state machine: ytshorts-pipeline
 Planner Lambda: ytshorts-planner
 Publisher Lambda: ytshorts-publisher
+Metrics Lambda: ytshorts-metrics-collector
 Budget/alert Lambda: ytshorts-budget-notifier
 Generate schedule: ytshorts-generate-refill
 Upload schedule: ytshorts-upload-daily
+Metrics schedule: ytshorts-metrics-daily
 ```
-
-기존 EC2 launcher, CloudWatch Event Rule, instance profile, userdata SSM parameter는 제거했습니다.
 
 ## 생성 리소스
 
 - S3 bucket: 산출물, source bundle, 상태 파일 저장
-- DynamoDB: 콘텐츠 상태, 예약 시각, 업로드 결과 저장
+- DynamoDB: 수집 소스, 콘텐츠 상태, 예약 시각, 업로드 결과, 성과 지표 저장
 - ECR: Batch 컨테이너 이미지 저장
 - CodeBuild: S3 source bundle을 Docker image로 빌드 후 ECR push
 - AWS Batch/Fargate: 생성 단계별 컨테이너 실행, 렌더링은 array job으로 병렬화
 - Step Functions: planner 결과에 따라 생성/업로드 workflow 오케스트레이션
-- EventBridge Scheduler: 월 2회 재고 보충, 일간 업로드 트리거
-- Lambda: publish-ready 부족분 계산, YouTube upload API 호출
+- EventBridge Scheduler: 월 2회 재고 보충, 일간 업로드, 일간 성과 수집 트리거
+- Lambda: publish-ready 부족분 계산, YouTube upload API 호출, YouTube 성과 지표 수집
 - SNS/Budgets/EventBridge: 비용 예산, Step Functions 실패, Batch 실패 Slack 알림
 - IAM: Batch, CodeBuild, Step Functions, Scheduler, Publisher 권한
 
@@ -40,6 +40,7 @@ Upload schedule: ytshorts-upload-daily
 ```text
 ytshorts-generate-refill: cron(0 2 1,15 * ? *) Asia/Seoul
 ytshorts-upload-daily:  cron(0 8 * * ? *) Asia/Seoul
+ytshorts-metrics-daily: cron(30 9 * * ? *) Asia/Seoul
 ```
 
 생성 workflow는 먼저 `ytshorts-planner` Lambda를 호출합니다. `days`는 “무조건 생성 개수”가 아니라 목표 재고일수입니다. planner는 현재 publish-ready 미업로드 재고를 세고 `days + buffer_days`에 모자란 만큼만 `needed_new_items`로 반환합니다. `needed_new_items=0`이면 Step Functions는 Batch/Fargate를 시작하지 않고 성공 종료합니다.
@@ -65,9 +66,14 @@ Terraform이 관리하는 비밀이 아닌 운영 설정 예시는 다음과 같
 /ytshorts/PUBLISH_HOUR_LOCAL
 /ytshorts/FILTER_MODEL
 /ytshorts/SCRIPT_MODEL
+/ytshorts/SOURCE_SCORE_MIN_AVG
+/ytshorts/SCRIPT_TARGET_MIN_CHARS
+/ytshorts/SCRIPT_TARGET_MAX_CHARS
+/ytshorts/TTS_MAX_SPEED
 /ytshorts/CAPTION_FONT_SIZE
 /ytshorts/FINAL_RENDER_CRF
 /ytshorts/PIXABAY_MIN_SHARPNESS_SCORE
+/ytshorts/METRICS_LOOKBACK_DAYS
 ```
 
 시크릿 값은 Terraform 변수로 받지 않습니다. Terraform state에 민감 값이 남지 않도록 기존 credential 파라미터는 외부에서 SSM SecureString으로 관리하고, 런타임에만 읽습니다.
@@ -99,7 +105,7 @@ S3와 Polly는 전용 정적 access key를 사용하지 않습니다. Batch/Lamb
 
 YouTube OAuth client/refresh token은 현재 SSM SecureString에 저장되어 있습니다. 값이 `PENDING`이면 publisher Lambda는 업로드를 시도하지 않고 `UPLOAD_BLOCKED` 상태를 남기도록 구현되어 있습니다.
 
-YouTube OAuth scope는 업로드 전용 `youtube.upload`와 상태 조회/삭제가 가능한 `youtube.force-ssl`을 함께 요청합니다. 기존 refresh token이 업로드 전용 scope로 발급된 경우 새 scope는 자동으로 소급 적용되지 않으므로, 처리 상태 조회나 삭제가 필요한 경우 `scripts/youtube_oauth_setup.py`로 refresh token을 다시 발급해 SSM에 저장해야 합니다.
+YouTube OAuth scope는 업로드용 `youtube.upload`, 상태 조회/삭제용 `youtube.force-ssl`, Data API 조회용 `youtube.readonly`, Analytics 조회용 `yt-analytics.readonly`를 함께 요청합니다. 기존 refresh token이 업로드 전용 scope로 발급된 경우 새 scope는 자동으로 소급 적용되지 않으므로, 처리 상태 조회/삭제나 성과 수집이 필요한 경우 `scripts/youtube_oauth_setup.py`로 refresh token을 다시 발급해 SSM에 저장해야 합니다.
 
 ## Source Bundle Build
 

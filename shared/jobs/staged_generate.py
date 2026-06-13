@@ -69,6 +69,7 @@ def collect_stage() -> None:
 
     _download_file("state/scraped_post_list.json", SCRAPED_POST_LIST_FILE)
     scrape_reddit_and_store()
+    content_repo.upsert_sources(_read_json_file(RAW_POSTS_FILE))
     store.upload_file(RAW_POSTS_FILE, "raw/raw_posts.json")
     if SCRAPED_POST_LIST_FILE.exists():
         store.upload_file(SCRAPED_POST_LIST_FILE, "raw/scraped_post_list.json")

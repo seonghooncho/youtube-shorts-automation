@@ -117,7 +117,7 @@ def run_batch_tts():
                         "The TTS narration was outside the target Shorts pacing. "
                         f"Original audio was {duration:.1f}s and would become {final_duration:.1f}s "
                         f"after {speed:.2f}x speed-up. Rewrite the script to land around "
-                        "45 to 75 seconds after speed-up, with a fast hook and no filler."
+                        "42 to 65 seconds after speed-up, with a fast hook and no filler."
                     ),
                 )
                 if not new_metadata:

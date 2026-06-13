@@ -8,8 +8,16 @@ def _market_fields(**overrides):
     fields = {
         "adaptation_strategy": "Compressed repeated conflict into a few clear beats and added plausible connective dialogue without changing the core dilemma.",
         "retention_angle": "The story has a concrete unfair accusation, public embarrassment, and a final boundary decision that viewers can debate.",
+        "hook_type": "unfair_accusation",
+        "first_2_seconds": "Someone accused me after crossing a clear line",
+        "turning_point": "The other person made the private conflict public instead of apologizing.",
+        "payoff_line": "I corrected the story because they made me look unreasonable first.",
         "viewer_question": "Would you have corrected the lie too?",
         "marketability_score": 5,
+        "retention_risk": "The source could drag if told chronologically, so the rewrite starts with the accusation and cuts context.",
+        "cut_plan": ["phone text hook", "apartment hallway", "group chat proof", "argument reaction"],
+        "bg_strategy": "hybrid",
+        "rewrite_notes": "Opened with the crossed line and removed slow setup.",
     }
     fields.update(overrides)
     return fields

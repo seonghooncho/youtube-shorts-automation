@@ -39,8 +39,24 @@ locals {
     PUBLISH_HOUR_LOCAL                = tostring(var.publish_hour_local)
     PUBLISH_MINUTE_LOCAL              = tostring(var.publish_minute_local)
     PUBLISH_REBASE_STALE_DAYS         = tostring(var.publish_rebase_stale_days)
+    METRICS_MAX_VIDEOS                = "50"
+    METRICS_LOOKBACK_DAYS             = "14"
+    METRICS_ANALYTICS_LAG_DAYS        = "2"
     FILTER_MODEL                      = var.openai_filter_model
     SCRIPT_MODEL                      = var.openai_script_model
+    SOURCE_SCORE_MIN_AVG              = "4.0"
+    SCRIPT_TARGET_MIN_CHARS           = "820"
+    SCRIPT_TARGET_MAX_CHARS           = "980"
+    TTS_BASE_SPEED                    = "1.18"
+    TTS_SHORT_SPEED                   = "1.12"
+    TTS_MEDIUM_SPEED                  = "1.22"
+    TTS_LONG_SPEED                    = "1.26"
+    TTS_VERY_LONG_SPEED               = "1.28"
+    TTS_MAX_SPEED                     = "1.30"
+    TTS_MAX_FINAL_SECONDS             = "75"
+    SHORTS_BG_FAST_CUT_WINDOW_SECONDS = "10"
+    SHORTS_BG_FAST_MIN_CLIP_SECONDS   = "2.2"
+    SHORTS_BG_FAST_MAX_CLIP_SECONDS   = "3.5"
     CAPTION_FONT_SIZE                 = "114"
     CAPTION_OUTLINE                   = "7"
     CAPTION_SHADOW                    = "0"
@@ -353,6 +369,12 @@ resource "aws_cloudwatch_log_group" "publisher" {
 
 resource "aws_cloudwatch_log_group" "planner" {
   name              = "/aws/lambda/${var.project_name}-planner"
+  retention_in_days = 30
+  tags              = local.tags
+}
+
+resource "aws_cloudwatch_log_group" "metrics_collector" {
+  name              = "/aws/lambda/${var.project_name}-metrics-collector"
   retention_in_days = 30
   tags              = local.tags
 }
@@ -882,6 +904,36 @@ resource "aws_lambda_function" "publisher" {
 
   depends_on = [
     aws_cloudwatch_log_group.publisher,
+    aws_ssm_parameter.runtime_config,
+  ]
+
+  tags = local.tags
+}
+
+data "archive_file" "metrics_collector" {
+  type        = "zip"
+  source_file = "${path.module}/lambda/metrics_collector.py"
+  output_path = "${path.module}/.build/metrics_collector.zip"
+}
+
+resource "aws_lambda_function" "metrics_collector" {
+  function_name    = "${var.project_name}-metrics-collector"
+  role             = aws_iam_role.publisher.arn
+  handler          = "metrics_collector.handler"
+  runtime          = "python3.12"
+  filename         = data.archive_file.metrics_collector.output_path
+  source_code_hash = data.archive_file.metrics_collector.output_base64sha256
+  timeout          = 300
+  memory_size      = 256
+
+  environment {
+    variables = {
+      SSM_PARAMETER_PREFIX = local.ssm_parameter_prefix
+    }
+  }
+
+  depends_on = [
+    aws_cloudwatch_log_group.metrics_collector,
     aws_ssm_parameter.runtime_config,
   ]
 
@@ -1452,6 +1504,11 @@ resource "aws_iam_role_policy" "scheduler" {
         Effect   = "Allow"
         Action   = "states:StartExecution"
         Resource = aws_sfn_state_machine.pipeline.arn
+      },
+      {
+        Effect   = "Allow"
+        Action   = "lambda:InvokeFunction"
+        Resource = aws_lambda_function.metrics_collector.arn
       }
     ]
   })
@@ -1495,6 +1552,34 @@ resource "aws_scheduler_schedule" "upload" {
     })
     role_arn = aws_iam_role.scheduler.arn
   }
+}
+
+resource "aws_scheduler_schedule" "metrics" {
+  name                         = "${var.project_name}-metrics-daily"
+  description                  = "Daily YouTube performance metrics collection"
+  schedule_expression          = var.metrics_schedule_expression
+  schedule_expression_timezone = var.schedule_timezone
+  state                        = var.enable_schedules ? "ENABLED" : "DISABLED"
+
+  flexible_time_window {
+    mode = "OFF"
+  }
+
+  target {
+    arn      = aws_lambda_function.metrics_collector.arn
+    role_arn = aws_iam_role.scheduler.arn
+    input = jsonencode({
+      mode = "metrics"
+    })
+  }
+}
+
+resource "aws_lambda_permission" "allow_scheduler_metrics" {
+  statement_id  = "AllowExecutionFromSchedulerMetrics"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.metrics_collector.function_name
+  principal     = "scheduler.amazonaws.com"
+  source_arn    = aws_scheduler_schedule.metrics.arn
 }
 
 resource "aws_cloudwatch_event_rule" "step_functions_failed" {

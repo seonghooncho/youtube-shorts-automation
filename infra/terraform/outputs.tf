@@ -30,10 +30,18 @@ output "publisher_function_name" {
   value = aws_lambda_function.publisher.function_name
 }
 
+output "metrics_function_name" {
+  value = aws_lambda_function.metrics_collector.function_name
+}
+
 output "generate_schedule_name" {
   value = aws_scheduler_schedule.generate.name
 }
 
 output "upload_schedule_name" {
   value = aws_scheduler_schedule.upload.name
+}
+
+output "metrics_schedule_name" {
+  value = aws_scheduler_schedule.metrics.name
 }

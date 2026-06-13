@@ -133,6 +133,11 @@ variable "upload_schedule_expression" {
   default = "cron(0 8 * * ? *)"
 }
 
+variable "metrics_schedule_expression" {
+  type    = string
+  default = "cron(30 9 * * ? *)"
+}
+
 variable "schedule_timezone" {
   type    = string
   default = "Asia/Seoul"

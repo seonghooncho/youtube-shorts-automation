@@ -6,14 +6,29 @@ Generated Shorts should be fast enough for the Shorts feed, visually varied, and
 
 ## Current Defaults
 
-- Script length: 780-1080 preferred characters, hard limit 750-1150 characters.
+- Script length: 820-980 preferred characters, hard limit 750-1150 characters.
 - Script model: `gpt-5.5` by default for source-faithful adaptation quality.
-- Filter model: `gpt-5.4-nano` by default for low-cost viability classification.
-- TTS speed: 1.06x-1.24x based on original duration.
-- Target final narration: 35-82 seconds, with normal output expected around 45-75 seconds.
-- Background clips: 3.4-5.6 second deterministic cuts by default, expanded to 4.0-6.6 seconds for longer narration.
+- Filter model: `gpt-5.4-nano` by default for low-cost source scorecard classification.
+- TTS speed: 1.12x-1.30x based on original duration.
+- Target final narration: 35-75 seconds, with normal output expected around 42-65 seconds.
+- Background clips: 2.2-3.5 second deterministic cuts during the first 10 seconds, then 3.4-5.6 second cuts by default.
 - Final video: 1080x1920, 30 fps, H.264 CRF 19, `+faststart`.
 - Final audio: AAC, 48 kHz, stereo, 128k target, loudness normalized to `I=-16:TP=-1.5:LRA=11`.
+
+## Source Scorecard
+
+Filtering now stores a structured `source_scorecard` instead of only YES/NO:
+
+- `relatability`
+- `conflict_clarity`
+- `stakes`
+- `debate_potential`
+- `safe_adaptability`
+- `visualizability`
+- `retention_risk`
+- `archetype`
+
+Only sources with `decision=YES`, non-high retention risk, and an average score at or above `SOURCE_SCORE_MIN_AVG` become viable. The scorecard is saved into final metadata and DynamoDB so future runs can compare source archetypes against YouTube performance.
 
 ## Story-Aware Backgrounds
 
@@ -26,6 +41,8 @@ GPT now returns `visual_keywords` with each script. The render stage uses those 
 - `person thinking`
 
 Generic queries like `nature`, `background`, and `landscape` are ignored unless explicitly reintroduced in code.
+
+Each script includes `bg_strategy=story|asmr|hybrid`. Story mode prioritizes concrete story visuals, ASMR mode starts with muted texture clips, and hybrid mode uses story visuals first before ASMR fallback.
 
 When story-specific clips are not enough, the Pixabay search falls back to muted ASMR-style visual queries such as:
 
@@ -56,8 +73,16 @@ Script generation uses Structured Outputs with these required fields:
 - `story_beats`: 4-7 source-grounded beats
 - `adaptation_strategy`: what was compressed or plausibly dramatized
 - `retention_angle`: why the story should hold viewers after the opening hook
+- `hook_type`: reusable hook pattern label
+- `first_2_seconds`: exact opening phrase for the first two seconds
+- `turning_point`: moment where the conflict gets worse
+- `payoff_line`: short final conflict statement before the question
 - `viewer_question`: the final comment prompt
 - `marketability_score`: model self-audit from 1 to 5
+- `retention_risk`: likely swipe-away risk and mitigation
+- `cut_plan`: 4-6 intended visual beats
+- `bg_strategy`: story, asmr, or hybrid
+- `rewrite_notes`: what was tightened for retention
 - `visual_keywords`: 5-8 concrete stock-video search phrases
 - `script`: first-person narration paragraphs
 
@@ -69,6 +94,8 @@ The local validator rejects scripts before TTS when any hard failure is detected
 - source involves minors or teen/high-school context in romantic or sexual conflict
 - script is outside the 750-1150 character hard bounds
 - first sentence hook is missing, too long, starts with slow setup, or lacks a concrete crossed line
+- first two seconds are vague, too long, or lack a concrete crossed line
+- turning point, payoff line, retention risk, cut plan, or background strategy is missing or weak
 - final beats do not include a direct engagement question
 - narration contains meta language such as JSON/script/AI references
 - source summary, story beats, adaptation strategy, retention angle, viewer question, or marketability score are missing or weak
@@ -76,7 +103,19 @@ The local validator rejects scripts before TTS when any hard failure is detected
 - script invents unsupported high-stakes facts such as police/legal threats, violence, cheating, pregnancy, medical emergencies, minors, or job loss
 - lexical overlap with the original story is too low, which usually means the adaptation drifted from the source
 
-Non-blocking warnings are stored in `quality_warnings` for valid scripts that are outside the preferred 780-1080 character target or show repetitive paragraph starts.
+Non-blocking warnings are stored in `quality_warnings` for valid scripts that are outside the preferred 820-980 character target, show repetitive paragraph starts, or overload the final paragraph.
+
+## Performance Learning Loop
+
+The daily metrics collector reads uploaded video IDs from DynamoDB and stores YouTube performance snapshots back onto each content record:
+
+- Data API: public statistics, content details, processing/status data
+- Analytics API: `views`, `likes`, `comments`, `shares`, `estimatedMinutesWatched`, `averageViewDuration`, `averageViewPercentage`
+- Primary KPI: `averageViewPercentage`
+
+The goal is to compare source archetype, hook type, script length, TTS speed, caption style, and background strategy against retention performance. Missing analytics rows are stored as `METRICS_PENDING`, not treated as failures, because YouTube Analytics data can lag.
+
+When enough metrics exist, script generation reads the top-performing `source_archetype`, `hook_type`, and `bg_strategy` patterns from DynamoDB and includes them as compact context in the next prompt. If no metrics are available, generation falls back to the static quality rules.
 
 ## YouTube Metadata Style
 
@@ -145,6 +184,12 @@ The render stage also logs non-blocking quality warnings when output is outside 
 - `TTS_MAX_SPEED`
 - `TTS_MIN_FINAL_SECONDS`
 - `TTS_MAX_FINAL_SECONDS`
+- `SOURCE_SCORE_MIN_AVG`
+- `SCRIPT_TARGET_MIN_CHARS`
+- `SCRIPT_TARGET_MAX_CHARS`
+- `SHORTS_BG_FAST_CUT_WINDOW_SECONDS`
+- `SHORTS_BG_FAST_MIN_CLIP_SECONDS`
+- `SHORTS_BG_FAST_MAX_CLIP_SECONDS`
 - `SHORTS_BG_MIN_CLIP_SECONDS`
 - `SHORTS_BG_MAX_CLIP_SECONDS`
 - `PIXABAY_ENABLE_ASMR_FALLBACK`
@@ -175,3 +220,6 @@ The render stage also logs non-blocking quality warnings when output is outside 
 - `FILTER_REASONING_EFFORT`
 - `FILTER_MODEL`
 - `SCRIPT_MODEL`
+- `METRICS_MAX_VIDEOS`
+- `METRICS_LOOKBACK_DAYS`
+- `METRICS_ANALYTICS_LAG_DAYS`

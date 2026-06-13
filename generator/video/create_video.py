@@ -348,6 +348,9 @@ def _write_centered_caption_ass(adjusted_subs, path: Path, offset_seconds: float
     center_x = _env_int("CAPTION_CENTER_X", DEFAULT_CAPTION_CENTER_X, minimum=0)
     center_y = _env_int("CAPTION_CENTER_Y", DEFAULT_CAPTION_CENTER_Y, minimum=0)
     fade_ms = _env_int("CAPTION_FADE_MS", DEFAULT_CAPTION_FADE_MS, minimum=0)
+    max_words = _env_int("CAPTION_MAX_WORDS", DEFAULT_CAPTION_MAX_WORDS, minimum=1)
+    max_chars = _env_int("CAPTION_MAX_CHARS", DEFAULT_CAPTION_MAX_CHARS, minimum=4)
+    _validate_caption_layout(font_size, outline, center_x, center_y, max_words, max_chars)
     events = _build_centered_caption_events(adjusted_subs)
 
     with open(path, "w", encoding="utf-8") as f:
@@ -415,6 +418,28 @@ def _build_centered_caption_events(
     if group:
         events.append(_caption_group_to_event(group))
     return events
+
+
+def _validate_caption_layout(
+    font_size: int,
+    outline: int,
+    center_x: int,
+    center_y: int,
+    max_words: int,
+    max_chars: int,
+) -> None:
+    horizontal_margin = _env_int("CAPTION_SAFE_MARGIN_X", 120, minimum=0)
+    vertical_margin = _env_int("CAPTION_SAFE_MARGIN_Y", 320, minimum=0)
+    if not (horizontal_margin <= center_x <= CAPTION_PLAY_RES_X - horizontal_margin):
+        raise ValueError(f"caption center_x outside safe area: {center_x}")
+    if not (vertical_margin <= center_y <= CAPTION_PLAY_RES_Y - vertical_margin):
+        raise ValueError(f"caption center_y outside safe area: {center_y}")
+    estimated_char_width = font_size * 0.50
+    estimated_width = min(max_chars, max_words * 8) * estimated_char_width + outline * 2
+    if estimated_width > CAPTION_PLAY_RES_X - horizontal_margin * 2:
+        raise ValueError(f"caption group may exceed safe width: estimated={estimated_width:.1f}")
+    if outline < max(3, int(font_size * 0.045)):
+        raise ValueError(f"caption outline too thin for Shorts contrast: outline={outline}, font_size={font_size}")
 
 
 def _should_start_new_caption_group(group, next_item, max_words, max_chars, max_duration) -> bool:

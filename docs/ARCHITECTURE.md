@@ -34,6 +34,12 @@ EventBridge Scheduler
          -> Lambda ytshorts-publisher
          -> YouTube Data API
          -> DynamoDB UPLOADED
+
+EventBridge Scheduler
+  └─ daily metrics input: {"mode":"metrics"}
+      -> Lambda ytshorts-metrics-collector
+         -> YouTube Data API + Analytics API
+         -> DynamoDB youtube_metrics / metrics_status
 ```
 
 ## S3 Prefix Contract
@@ -59,7 +65,7 @@ generator/text        Reddit 수집, 콘텐츠 필터링, 대본 생성
 generator/tts         AWS Polly TTS와 음성 길이 분석
 generator/video       배경 영상 병합, 자막 변환, 최종 렌더
 shared/jobs           stage runner, generate/upload orchestration
-shared/state          DynamoDB content repository
+shared/state          DynamoDB source/content/performance repository
 shared/storage        S3 object store 추상화
 shared/utils          설정, S3, Slack 유틸
 uploader              플랫폼 업로더와 YouTube OAuth helper
@@ -86,6 +92,12 @@ needed = min(max_new_items, max(0, target_days + buffer_days - current_publish_r
 14개를 요청해도 모든 단계가 14개를 보장하지는 않습니다. Reddit 후보 부족, GPT 검증 실패, TTS 길이 실패, Pixabay/ffmpeg 렌더 실패가 있으면 publish-ready가 목표보다 적을 수 있고, 다음 refill에서 부족분을 다시 채웁니다. 업로드 큐가 오래 밀려 예약일이 과거로 누적되면 publisher Lambda가 미업로드 큐를 현재 시점부터 다시 일별 슬롯으로 정렬합니다.
 
 최종 MP4는 Batch 렌더 단계에서 `ffprobe`로 최소 길이, 파일 크기, 세로 해상도, 오디오/비디오 스트림을 검증한 뒤에만 `videos/final/`로 승격합니다. publisher Lambda도 업로드 직전 최소 파일 크기를 다시 확인해 smoke/깨진 파일이 YouTube로 올라가지 않게 차단합니다.
+
+## 성과 학습 루프
+
+업로드 이후 `ytshorts-metrics-collector`가 DynamoDB의 `UPLOADED` 콘텐츠에서 YouTube video ID를 읽고, YouTube Data API와 Analytics API에서 조회수/좋아요/댓글/공유/평균 시청 시간/평균 시청률을 수집합니다.
+
+성과 snapshot은 같은 콘텐츠 레코드의 `youtube_metrics`에 저장됩니다. 소스 필터의 `source_scorecard`, 대본의 `hook_type`, 렌더링의 `bg_strategy`, `pixabay_ids`, `quality_warnings`도 같은 레코드에 남기므로 이후 어떤 소재/훅/배경 전략이 유지율에 유리했는지 비교할 수 있습니다.
 
 ## Reddit 수집
 

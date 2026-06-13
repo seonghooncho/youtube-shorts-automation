@@ -1,3 +1,4 @@
+import os
 import re
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List
@@ -10,8 +11,8 @@ from generator.text.source_integrity import (
 
 
 MIN_SCRIPT_CHARS = 750
-TARGET_MIN_SCRIPT_CHARS = 780
-TARGET_MAX_SCRIPT_CHARS = 1080
+TARGET_MIN_SCRIPT_CHARS = 820
+TARGET_MAX_SCRIPT_CHARS = 980
 MAX_SCRIPT_CHARS = 1150
 MIN_SOURCE_WORDS = 90
 MIN_SOURCE_CHARS = 550
@@ -301,7 +302,7 @@ def validate_script_quality(metadata: Dict[str, Any], post: Dict[str, Any]) -> L
     first_lower = first_sentence.lower()
     if not first_sentence:
         issues.append(ScriptQualityIssue("missing_hook", "first sentence is missing"))
-    elif len(first_sentence) > 170:
+    elif len(first_sentence) > 150:
         issues.append(ScriptQualityIssue("hook_too_long", f"first hook sentence is too long ({len(first_sentence)} chars)"))
     elif first_lower.startswith(_SLOW_HOOK_PREFIXES):
         issues.append(ScriptQualityIssue("slow_hook", f"hook starts too slowly: {first_sentence[:80]}"))
@@ -315,6 +316,49 @@ def validate_script_quality(metadata: Dict[str, Any], post: Dict[str, Any]) -> L
 
     if "?" not in " ".join(lines[-2:]):
         issues.append(ScriptQualityIssue("missing_engagement_question", "script should end with a direct question"))
+
+    hook_type = str(metadata.get("hook_type") or "").strip()
+    if len(hook_type) < 3:
+        issues.append(ScriptQualityIssue("missing_hook_type", "hook_type should label the opening pattern"))
+
+    first_two_seconds = str(metadata.get("first_2_seconds") or "").strip()
+    first_two_lower = first_two_seconds.lower()
+    if len(first_two_seconds) < 12:
+        issues.append(ScriptQualityIssue("weak_first_2_seconds", "first_2_seconds should contain the concrete opening phrase"))
+    elif len(first_two_seconds) > 95:
+        issues.append(ScriptQualityIssue("first_2_seconds_too_long", "first_2_seconds should stay short enough to land immediately"))
+    elif first_two_lower.startswith(_SLOW_HOOK_PREFIXES) or not _has_hook_stakes(first_two_lower):
+        issues.append(ScriptQualityIssue("weak_first_2_seconds", "first_2_seconds should carry the crossed line, cost, accusation, or villain framing"))
+
+    turning_point = str(metadata.get("turning_point") or "").strip()
+    if len(turning_point) < 30:
+        issues.append(ScriptQualityIssue("weak_turning_point", "turning_point should name the moment the story gets worse"))
+
+    payoff_line = str(metadata.get("payoff_line") or "").strip()
+    if len(payoff_line) < 24:
+        issues.append(ScriptQualityIssue("weak_payoff_line", "payoff_line should be a short final conflict statement before the question"))
+
+    retention_risk = str(metadata.get("retention_risk") or "").strip()
+    if len(retention_risk) < 45:
+        issues.append(ScriptQualityIssue("weak_retention_risk", "retention_risk should explain the likely swipe-away risk and mitigation"))
+
+    cut_plan = metadata.get("cut_plan") or []
+    if not isinstance(cut_plan, list) or len([cut for cut in cut_plan if str(cut).strip()]) < 4:
+        issues.append(ScriptQualityIssue("weak_cut_plan", "cut_plan should include at least 4 concrete visual beats"))
+
+    if metadata.get("bg_strategy") not in {"story", "asmr", "hybrid"}:
+        issues.append(ScriptQualityIssue("invalid_bg_strategy", "bg_strategy must be story, asmr, or hybrid"))
+
+    if lines:
+        final_paragraph_len = len(lines[-1])
+        if final_paragraph_len > 260:
+            issues.append(
+                ScriptQualityIssue(
+                    "late_drag",
+                    f"final paragraph is overloaded ({final_paragraph_len} chars); split payoff and viewer question earlier",
+                    hard=False,
+                )
+            )
 
     for phrase in _SCRIPT_META_PHRASES:
         if _contains_meta_phrase(lower_text, phrase):
@@ -395,11 +439,13 @@ def validate_script_quality(metadata: Dict[str, Any], post: Dict[str, Any]) -> L
             )
         )
 
-    if not (TARGET_MIN_SCRIPT_CHARS <= char_count <= TARGET_MAX_SCRIPT_CHARS):
+    target_min_chars = _int_env("SCRIPT_TARGET_MIN_CHARS", TARGET_MIN_SCRIPT_CHARS)
+    target_max_chars = max(target_min_chars, _int_env("SCRIPT_TARGET_MAX_CHARS", TARGET_MAX_SCRIPT_CHARS))
+    if not (target_min_chars <= char_count <= target_max_chars):
         issues.append(
             ScriptQualityIssue(
                 "outside_target_length",
-                f"script is valid but outside the preferred {TARGET_MIN_SCRIPT_CHARS}-{TARGET_MAX_SCRIPT_CHARS} char target ({char_count})",
+                f"script is valid but outside the preferred {target_min_chars}-{target_max_chars} char target ({char_count})",
                 hard=False,
             )
         )
@@ -509,6 +555,13 @@ def _safe_int(value, default: int) -> int:
     try:
         return int(value)
     except (TypeError, ValueError):
+        return default
+
+
+def _int_env(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except ValueError:
         return default
 
 

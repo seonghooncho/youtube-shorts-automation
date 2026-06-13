@@ -69,6 +69,7 @@ def upload_batch_pipeline():
         target["uploaded"] = True
         target["platform_ids"] = platform_ids
         target["upload_status"] = "UPLOADED"
+        target["uploaded_at"] = int(time.time())
 
         with open(FINAL_METADATA_FILE, "w", encoding="utf-8") as f:
             json.dump(metadata_list, f, ensure_ascii=False, indent=2)
@@ -79,7 +80,7 @@ def upload_batch_pipeline():
         ContentRepository().mark_status(
             target["id"],
             "UPLOADED",
-            {"platform_ids": platform_ids, "upload_status": "UPLOADED"},
+            {"platform_ids": platform_ids, "upload_status": "UPLOADED", "uploaded_at": target["uploaded_at"]},
         )
 
         send_slack_message(f"🎉 업로드 완료: {title}")

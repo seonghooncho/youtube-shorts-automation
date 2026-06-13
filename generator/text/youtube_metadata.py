@@ -17,6 +17,7 @@ DEFAULT_VIDEO_TAGS = (
     "short story",
 )
 MAX_TITLE_CHARS = 100
+MAX_TITLE_CONFLICT_CHARS = 64
 MAX_TAGS = 15
 
 _HASHTAG_RE = re.compile(r"#\w+")
@@ -42,7 +43,7 @@ def format_youtube_title(title: str, hashtags: Iterable[str] = TITLE_HASHTAGS) -
     if not suffix:
         return clean_title[:MAX_TITLE_CHARS]
 
-    budget = MAX_TITLE_CHARS - len(suffix) - 1
+    budget = min(MAX_TITLE_CONFLICT_CHARS, MAX_TITLE_CHARS - len(suffix) - 1)
     if len(clean_title) > budget:
         clean_title = _truncate_at_word(clean_title, budget).strip(" .,-")
     return f"{clean_title} {suffix}".strip()[:MAX_TITLE_CHARS]

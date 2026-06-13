@@ -16,18 +16,19 @@ Reddit/PullPush 사연 수집
   -> FFmpeg로 9:16 쇼츠 렌더링
   -> S3에 publish-ready 재고 저장
   -> 매일 YouTube에 public 업로드
+  -> YouTube 성과 지표를 DynamoDB에 저장
 ```
 
 ## 전체 운영 구조
 
 자동화는 AWS managed service를 중심으로 역할을 나눠 운영됩니다.
 
-- **EventBridge Scheduler**: 월 2회 생성, 매일 업로드 트리거
+- **EventBridge Scheduler**: 월 2회 생성, 매일 업로드/성과 수집 트리거
 - **Step Functions**: 수집부터 렌더링까지 단계별 오케스트레이션
 - **AWS Batch/Fargate**: 오래 걸리는 ffmpeg 렌더링과 생성 작업 실행
-- **Lambda**: 재고 계산과 YouTube 업로드처럼 가벼운 작업 담당
+- **Lambda**: 재고 계산, YouTube 업로드, 성과 지표 수집 담당
 - **S3**: 원본, 대본, 음성, 자막, 최종 영상, publish-ready metadata 저장
-- **DynamoDB**: 콘텐츠 상태, 예약 시각, 업로드 결과 저장
+- **DynamoDB**: 소스, 콘텐츠 상태, 예약 시각, 업로드 결과, YouTube 성과 지표 저장
 - **SSM Parameter Store**: 런타임 설정과 credential 관리
 
 ## 자동화 주기
@@ -35,6 +36,7 @@ Reddit/PullPush 사연 수집
 ```text
 생성 refill: 매월 1일, 15일 02:00 KST
 업로드:      매일 08:00 KST
+성과 수집:   매일 09:30 KST
 ```
 
 생성은 “무조건 14개 생성”이 아니라 **재고 보충 방식**입니다.
@@ -63,13 +65,15 @@ publish-ready/        업로드 대기 metadata
 state/                중복 방지와 상태 파일
 ```
 
-콘텐츠별 상태와 YouTube 업로드 결과는 DynamoDB `ytshorts-content`에 기록됩니다.
+소스 중복 상태, 콘텐츠별 상태, YouTube 업로드 결과, 성과 지표는 DynamoDB `ytshorts-content`에 기록됩니다.
 
 ## YouTube 업로드
 
 업로드 대상은 YouTube 채널이며, 현재 자동 업로드 기본값은 `public`입니다.
 
 업로드는 API key가 아니라 YouTube OAuth refresh token으로 수행합니다. 업로드가 끝나면 metadata와 DynamoDB에 YouTube video ID가 기록됩니다.
+
+업로드 이후에는 YouTube Data API와 Analytics API에서 조회수, 평균 시청 시간, 평균 시청률, 좋아요/댓글/공유 지표를 수집해 다음 소스 선정과 대본 개선에 사용할 수 있게 저장합니다.
 
 ## 영상 품질 처리
 
@@ -94,7 +98,7 @@ shared/state          DynamoDB 상태 저장
 uploader              YouTube 업로드/OAuth helper
 infra/terraform       AWS 인프라 정의
 infra/terraform/lambda
-                      planner, publisher, budget notifier Lambda
+                      planner, publisher, metrics collector, budget notifier Lambda
 docs                  기획, 구조, 운영, 품질 문서
 tests                 핵심 로직 회귀 테스트
 ```
@@ -108,6 +112,7 @@ ECR repo:       ytshorts-app
 CodeBuild:      ytshorts-image-build
 Planner Lambda: ytshorts-planner
 Publisher:      ytshorts-publisher
+Metrics Lambda: ytshorts-metrics-collector
 S3 bucket:      youtube-shorts-automation-160885253413-apne2
 DynamoDB:       ytshorts-content
 ```
@@ -118,7 +123,7 @@ Terraform remote state는 S3와 DynamoDB lock table로 관리합니다.
 
 런타임 설정은 `/ytshorts/*` SSM Parameter Store를 기준으로 관리합니다.
 
-예를 들어 공개 범위, 생성 재고 수, 자막 크기, 렌더 품질, Pixabay 필터 기준 같은 값은 SSM에서 바꿀 수 있습니다. Batch 컨테이너는 SSM 값을 주입받고, Lambda는 런타임에 SSM 값을 읽습니다.
+예를 들어 공개 범위, 생성 재고 수, 소스 점수 기준, TTS 속도, 자막 크기, 렌더 품질, Pixabay 필터 기준, 성과 수집 기간 같은 값은 SSM에서 바꿀 수 있습니다. Batch 컨테이너는 SSM 값을 주입받고, Lambda는 런타임에 SSM 값을 읽습니다.
 
 credential 값은 README에 적지 않습니다. 필요한 파라미터와 운영 방법은 [운영 문서](docs/OPERATIONS.md)와 [인프라 문서](docs/INFRASTRUCTURE.md)에 정리되어 있습니다.
 

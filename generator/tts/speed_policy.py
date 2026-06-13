@@ -3,12 +3,12 @@ import os
 
 def target_tts_speed(original_duration: float) -> float:
     """Return a Shorts-friendly playback speed without pushing narration too far."""
-    base_speed = _float_env("TTS_BASE_SPEED", 1.12)
-    short_speed = _float_env("TTS_SHORT_SPEED", 1.06)
-    medium_speed = _float_env("TTS_MEDIUM_SPEED", 1.16)
-    long_speed = _float_env("TTS_LONG_SPEED", 1.20)
-    very_long_speed = _float_env("TTS_VERY_LONG_SPEED", 1.24)
-    max_speed = _float_env("TTS_MAX_SPEED", 1.24)
+    base_speed = _float_env("TTS_BASE_SPEED", 1.18)
+    short_speed = _float_env("TTS_SHORT_SPEED", 1.12)
+    medium_speed = _float_env("TTS_MEDIUM_SPEED", 1.22)
+    long_speed = _float_env("TTS_LONG_SPEED", 1.26)
+    very_long_speed = _float_env("TTS_VERY_LONG_SPEED", 1.28)
+    max_speed = _float_env("TTS_MAX_SPEED", 1.30)
 
     if original_duration < _float_env("TTS_SHORT_DURATION_SECONDS", 42.0):
         speed = short_speed
@@ -31,7 +31,7 @@ def final_duration_in_range(original_duration: float) -> tuple[bool, float, floa
     speed = target_tts_speed(original_duration)
     final_duration = original_duration / speed
     min_seconds = _float_env("TTS_MIN_FINAL_SECONDS", 35.0)
-    max_seconds = _float_env("TTS_MAX_FINAL_SECONDS", 82.0)
+    max_seconds = _float_env("TTS_MAX_FINAL_SECONDS", 75.0)
     return min_seconds <= final_duration <= max_seconds, speed, final_duration
 
 

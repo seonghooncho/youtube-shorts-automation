@@ -198,7 +198,12 @@ def prepare_bg_videos_for_tts(video_paths: list, tts_length: float, output_video
                 print(f"⚠️ 잘못된 클립 무시 (duration={video.duration}): {vid_path}")
                 continue
 
-            segment_duration = _segment_duration_for_source(Path(vid_path), video.duration, target_length=target_len)
+            segment_duration = _segment_duration_for_source(
+                Path(vid_path),
+                video.duration,
+                target_length=target_len,
+                current_duration=cur_len,
+            )
             clip_duration = min(segment_duration, video.duration, remain)
             start_time = _segment_start_for_source(Path(vid_path), video.duration, clip_duration)
         except Exception as exc:
@@ -364,6 +369,12 @@ def batch_merge_videos_for_tts(target_ids: list[str] | None = None):
             print(f"❌ [{tts_basename}] 배경 영상 준비 실패: {exc}")
             continue
         used_ids.update(selected_ids)
+        _update_metadata_with_bg_selection(
+            content_id=tts_basename,
+            selected_ids=selected_ids,
+            queries=queries,
+            strategy=str(story_metadata.get("bg_strategy") or "hybrid"),
+        )
         save_used_ids(used_ids)
         print(f"✅ used_pixabay_ids.json 갱신됨 (총 {len(used_ids)}개)")
 
@@ -407,6 +418,7 @@ def _extend_video_selection(
                     part_path,
                     vid_duration,
                     target_length=target_duration,
+                    current_duration=total_duration,
                 )
                 if total_duration >= target_duration:
                     break
@@ -512,21 +524,30 @@ def _int_like(value) -> int:
 
 
 def _queries_for_entry(entry: dict) -> list[str]:
+    strategy = str(entry.get("bg_strategy") or "hybrid").strip().lower()
+    if strategy not in {"story", "asmr", "hybrid"}:
+        strategy = "hybrid"
     queries = []
+    story_queries = []
     for keyword in entry.get("visual_keywords") or []:
         normalized = _clean_query(keyword)
-        if normalized and normalized not in queries:
-            queries.append(normalized)
+        if normalized and normalized not in story_queries:
+            story_queries.append(normalized)
     primary_fallback_count = max(0, _int_env("PIXABAY_PRIMARY_FALLBACK_QUERIES", 4))
     for query in VIDEO_QUERY_CANDIDATES[:primary_fallback_count]:
         normalized = _clean_query(query)
-        if normalized and normalized not in queries:
-            queries.append(normalized)
-    if _env_bool("PIXABAY_ENABLE_ASMR_FALLBACK", default=True):
-        for query in _asmr_queries():
-            normalized = _clean_query(query)
-            if normalized and normalized not in queries:
-                queries.append(normalized)
+        if normalized and normalized not in story_queries:
+            story_queries.append(normalized)
+    asmr_queries = [_clean_query(query) for query in _asmr_queries()] if _env_bool("PIXABAY_ENABLE_ASMR_FALLBACK", default=True) else []
+    ordered_groups = {
+        "story": [story_queries],
+        "asmr": [asmr_queries, story_queries],
+        "hybrid": [story_queries, asmr_queries],
+    }[strategy]
+    for group in ordered_groups:
+        for query in group:
+            if query and query not in queries:
+                queries.append(query)
     for query in VIDEO_QUERY_CANDIDATES[primary_fallback_count:]:
         normalized = _clean_query(query)
         if normalized and normalized not in queries:
@@ -550,6 +571,28 @@ def _metadata_by_id() -> dict[str, dict]:
     }
 
 
+def _update_metadata_with_bg_selection(content_id: str, selected_ids: set, queries: list[str], strategy: str) -> None:
+    if not FINAL_METADATA_FILE.exists():
+        return
+    try:
+        with open(FINAL_METADATA_FILE, "r", encoding="utf-8") as f:
+            items = json.load(f)
+        changed = False
+        for item in items:
+            if str(item.get("id")) != str(content_id):
+                continue
+            item["pixabay_ids"] = sorted([str(video_id) for video_id in selected_ids])
+            item["bg_queries"] = queries[:12]
+            item["bg_strategy"] = strategy if strategy in {"story", "asmr", "hybrid"} else "hybrid"
+            changed = True
+            break
+        if changed:
+            with open(FINAL_METADATA_FILE, "w", encoding="utf-8") as f:
+                json.dump(items, f, ensure_ascii=False, indent=2)
+    except Exception as exc:
+        print(f"⚠️ Pixabay metadata update failed: {content_id}: {exc}")
+
+
 def _clean_query(query: str) -> str:
     normalized = " ".join(str(query or "").lower().split())
     if normalized in {"nature", "background", "landscape"}:
@@ -557,12 +600,20 @@ def _clean_query(query: str) -> str:
     return normalized[:60]
 
 
-def _segment_duration_for_source(path: Path, source_duration: float, target_length: float | None = None) -> float:
-    min_seconds = _min_segment_seconds(target_length)
-    max_seconds = min(_max_segment_seconds(target_length), max(min_seconds, source_duration))
+def _segment_duration_for_source(
+    path: Path,
+    source_duration: float,
+    target_length: float | None = None,
+    current_duration: float = 0.0,
+) -> float:
+    min_seconds = _min_segment_seconds(target_length, current_duration=current_duration)
+    max_seconds = min(
+        _max_segment_seconds(target_length, current_duration=current_duration),
+        max(min_seconds, source_duration),
+    )
     if max_seconds <= min_seconds:
         return max_seconds
-    return _deterministic_float(f"{path.stem}:duration", min_seconds, max_seconds)
+    return _deterministic_float(f"{path.stem}:duration:{int(current_duration // 2)}", min_seconds, max_seconds)
 
 
 def _segment_start_for_source(path: Path, source_duration: float, segment_duration: float) -> float:
@@ -578,18 +629,28 @@ def _deterministic_float(seed: str, minimum: float, maximum: float) -> float:
     return minimum + (maximum - minimum) * ratio
 
 
-def _min_segment_seconds(target_length: float | None = None) -> float:
+def _min_segment_seconds(target_length: float | None = None, current_duration: float = 0.0) -> float:
+    if current_duration < _float_env("SHORTS_BG_FAST_CUT_WINDOW_SECONDS", 10.0):
+        return _float_env("SHORTS_BG_FAST_MIN_CLIP_SECONDS", 2.2)
     default = 3.4
     if target_length and target_length > 75:
         default = 4.0
     return _float_env("SHORTS_BG_MIN_CLIP_SECONDS", default)
 
 
-def _max_segment_seconds(target_length: float | None = None) -> float:
+def _max_segment_seconds(target_length: float | None = None, current_duration: float = 0.0) -> float:
+    if current_duration < _float_env("SHORTS_BG_FAST_CUT_WINDOW_SECONDS", 10.0):
+        return max(
+            _min_segment_seconds(target_length, current_duration=current_duration),
+            _float_env("SHORTS_BG_FAST_MAX_CLIP_SECONDS", 3.5),
+        )
     default = 5.6
     if target_length and target_length > 75:
         default = 6.6
-    return max(_min_segment_seconds(target_length), _float_env("SHORTS_BG_MAX_CLIP_SECONDS", default))
+    return max(
+        _min_segment_seconds(target_length, current_duration=current_duration),
+        _float_env("SHORTS_BG_MAX_CLIP_SECONDS", default),
+    )
 
 
 def _fetch_pixabay_video_urls_safe(**kwargs) -> list[tuple[int | str, str, float]]:

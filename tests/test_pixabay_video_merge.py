@@ -57,11 +57,22 @@ def test_queries_for_entry_includes_asmr_visual_fallback(monkeypatch):
     assert queries.index("hands typing keyboard close up") > queries.index("phone texting")
 
 
-def test_segment_duration_stays_in_shorts_cut_range(monkeypatch):
+def test_segment_duration_uses_fast_initial_cut_range(monkeypatch):
+    monkeypatch.delenv("SHORTS_BG_MIN_CLIP_SECONDS", raising=False)
+    monkeypatch.delenv("SHORTS_BG_MAX_CLIP_SECONDS", raising=False)
+    monkeypatch.delenv("SHORTS_BG_FAST_MIN_CLIP_SECONDS", raising=False)
+    monkeypatch.delenv("SHORTS_BG_FAST_MAX_CLIP_SECONDS", raising=False)
+
+    duration = _segment_duration_for_source(Path("clip-1.mp4"), 20.0)
+
+    assert 2.2 <= duration <= 3.5
+
+
+def test_segment_duration_stays_in_regular_shorts_cut_range(monkeypatch):
     monkeypatch.delenv("SHORTS_BG_MIN_CLIP_SECONDS", raising=False)
     monkeypatch.delenv("SHORTS_BG_MAX_CLIP_SECONDS", raising=False)
 
-    duration = _segment_duration_for_source(Path("clip-1.mp4"), 20.0)
+    duration = _segment_duration_for_source(Path("clip-1.mp4"), 20.0, current_duration=12.0)
 
     assert 3.4 <= duration <= 5.6
 
@@ -70,7 +81,7 @@ def test_segment_duration_breathes_more_for_longer_narration(monkeypatch):
     monkeypatch.delenv("SHORTS_BG_MIN_CLIP_SECONDS", raising=False)
     monkeypatch.delenv("SHORTS_BG_MAX_CLIP_SECONDS", raising=False)
 
-    duration = _segment_duration_for_source(Path("clip-1.mp4"), 20.0, target_length=80.0)
+    duration = _segment_duration_for_source(Path("clip-1.mp4"), 20.0, target_length=80.0, current_duration=12.0)
 
     assert 4.0 <= duration <= 6.6
 

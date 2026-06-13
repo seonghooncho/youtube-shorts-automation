@@ -3,9 +3,10 @@
 import os
 import json
 import re
-from typing import List
+from typing import List, Literal
 from dotenv import load_dotenv, find_dotenv
 import openai
+from pydantic import BaseModel, Field, ValidationError
 from generator.text.script_quality import build_source_profile, source_reject_reason_for_marketability
 from shared.utils.config import RAW_POSTS_FILE, VIABLE_POSTS_FILE
 
@@ -28,6 +29,19 @@ def _get_client() -> openai.OpenAI:
 # Helpers
 # -----------------------------
 _CODE_FENCE_RE = re.compile(r"^```(?:json|txt|[\w-]+)?\s*([\s\S]*?)\s*```$", re.IGNORECASE)
+
+
+class SourceScorecard(BaseModel):
+    decision: Literal["YES", "NO"]
+    relatability: int = Field(..., ge=1, le=5)
+    conflict_clarity: int = Field(..., ge=1, le=5)
+    stakes: int = Field(..., ge=1, le=5)
+    debate_potential: int = Field(..., ge=1, le=5)
+    safe_adaptability: int = Field(..., ge=1, le=5)
+    visualizability: int = Field(..., ge=1, le=5)
+    retention_risk: Literal["low", "medium", "high"]
+    archetype: str
+    reason: str
 
 def _clean_response_text(text: str) -> str:
     """코드펜스/마크다운 블록 제거 및 공백 트리밍."""
@@ -60,6 +74,65 @@ def _normalize_yes_no(text: str) -> str:
     if contains_no and not contains_yes:
         return "NO"
     return ""
+
+
+def _scorecard_average(scorecard: SourceScorecard) -> float:
+    fields = [
+        scorecard.relatability,
+        scorecard.conflict_clarity,
+        scorecard.stakes,
+        scorecard.debate_potential,
+        scorecard.safe_adaptability,
+        scorecard.visualizability,
+    ]
+    return round(sum(fields) / len(fields), 2)
+
+
+def _parse_source_scorecard(raw: str) -> SourceScorecard:
+    text = _clean_response_text(raw)
+    try:
+        return SourceScorecard.model_validate_json(text)
+    except ValidationError:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start >= 0 and end > start:
+            return SourceScorecard.model_validate_json(text[start : end + 1])
+        raise
+
+
+def _ask_source_scorecard(client: openai.OpenAI, prompt: str, model: str) -> SourceScorecard | None:
+    system_base = (
+        "You are a strict YouTube Shorts source evaluator. "
+        "Return only valid JSON matching the requested scorecard schema. "
+        "Do not include markdown, code fences, or commentary."
+    )
+    messages_templates = [
+        [
+            {"role": "system", "content": system_base},
+            {"role": "user", "content": prompt},
+        ],
+        [
+            {
+                "role": "system",
+                "content": system_base + " Any missing key is an error. Use uppercase YES or NO for decision.",
+            },
+            {"role": "user", "content": prompt + "\n\nReturn only the JSON object."},
+        ],
+    ]
+    for attempt, messages in enumerate(messages_templates, start=1):
+        try:
+            kwargs = {
+                "model": model,
+                "input": messages,
+                "max_output_tokens": 512,
+                "text": {"format": {"type": "json_object"}, "verbosity": "low"},
+            }
+            kwargs.update(_reasoning_kwargs_for_model(model))
+            resp = client.responses.create(**kwargs)
+            return _parse_source_scorecard(resp.output_text or "")
+        except Exception as e:
+            print(f"⚠️ source scorecard 호출 실패 (시도 {attempt}/{len(messages_templates)}): {e}")
+    return None
 
 
 def _ask_yes_no(client: openai.OpenAI, prompt: str, model: str) -> str:
@@ -156,19 +229,33 @@ def filter_viable_posts():
             continue
 
         prompt = f"""
-        Evaluate whether this source can become a high-retention 45-75 second YouTube Shorts story.
+        Evaluate whether this source can become a high-retention 42-65 second YouTube Shorts story.
 
-        Answer YES only if all conditions are true:
+        Return JSON with this exact schema:
+        {{
+          "decision": "YES" or "NO",
+          "relatability": integer 1-5,
+          "conflict_clarity": integer 1-5,
+          "stakes": integer 1-5,
+          "debate_potential": integer 1-5,
+          "safe_adaptability": integer 1-5,
+          "visualizability": integer 1-5,
+          "retention_risk": "low" or "medium" or "high",
+          "archetype": short snake_case label such as roommate_money, family_boundary, pet_medical_bill, workplace_accusation, neighbor_property, wedding_drama,
+          "reason": one concise sentence
+        }}
+
+        Use YES only if all conditions are true:
         - The story is complete enough to adapt without inventing major facts.
         - There is a clear first-person conflict with a concrete crossed line, unfair accusation,
           betrayal, property/money pressure, family/workplace pressure, or public embarrassment.
         - The story has enough concrete detail for 4-7 fast narration beats.
         - The content can be made broadly safe for YouTube Shorts.
-        - The likely narration will not need filler to reach 45 seconds.
+        - The likely narration will not need filler to reach 42 seconds.
         - The ending naturally creates a comment debate where reasonable viewers could disagree.
         - The story feels like a 4/5 or 5/5 retention candidate, not merely "understandable."
 
-        Answer NO if the source is mostly contextless, a question without a story, rage bait without events,
+        Use NO if the source is mostly contextless, a question without a story, rage bait without events,
         low-stakes relationship ambiguity, graphic/sexual content involving minors, teen/high-school romance,
         explicit hate or slurs, or a post that requires major fabrication.
 
@@ -183,19 +270,30 @@ def filter_viable_posts():
         """
 
         try:
-            verdict = _ask_yes_no(client, prompt, model)
-            if not verdict:
-                print("⚠️ GPT 응답 없음/불명(공백·장황·해석불가). 해당 포스트 스킵")
+            scorecard = _ask_source_scorecard(client, prompt, model)
+            if not scorecard:
+                print("⚠️ GPT scorecard 응답 없음/불명. 해당 포스트 스킵")
                 continue
 
-            if verdict == "YES":
+            source_score = _scorecard_average(scorecard)
+            min_score = float(os.getenv("SOURCE_SCORE_MIN_AVG", "4.0"))
+            if scorecard.decision == "YES" and scorecard.retention_risk != "high" and source_score >= min_score:
+                post["source_scorecard"] = scorecard.model_dump()
+                post["source_score"] = source_score
+                post["source_archetype"] = scorecard.archetype.strip().lower()[:80]
                 selected_posts.append(post)
-            # NO면 추가하지 않음
+            else:
+                print(
+                    "⏭️ source scorecard reject: "
+                    f"id={post.get('id', 'unknown')} decision={scorecard.decision} "
+                    f"score={source_score} risk={scorecard.retention_risk} reason={scorecard.reason}"
+                )
 
         except Exception as e:
             print(f"GPT 판단 오류: {e}")
             continue
 
+    selected_posts.sort(key=lambda item: float(item.get("source_score") or 0), reverse=True)
     with open(VIABLE_POSTS_FILE, "w", encoding="utf-8") as f:
         json.dump(selected_posts, f, ensure_ascii=False, indent=2)
 
