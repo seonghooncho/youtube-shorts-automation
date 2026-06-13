@@ -83,25 +83,81 @@ _TITLE_OBJECT_TERMS = {
     "camera",
     "card",
     "chat",
+    "coffee",
     "dinners",
     "driveway",
     "garage",
+    "groceries",
+    "hallway",
     "invoice",
+    "keys",
+    "laundry",
+    "mail",
     "manager",
+    "machine",
     "package",
+    "password",
+    "printer",
     "receipt",
+    "rental",
+    "reservation",
+    "scratches",
+    "screenshot",
+    "shelf",
+    "sign",
     "storage",
+    "text",
+    "timestamp",
+    "toner",
     "unit",
+    "washer",
+}
+_TITLE_OBJECT_PHRASES = {
+    "building chat",
+    "dinner bill",
+    "dinner reservation",
+    "door camera",
+    "grocery fund",
+    "group chat",
+    "hallway camera",
+    "lunch order",
+    "mail shelf",
+    "office coffee fund",
+    "parking sign",
+    "rental deposit",
+    "shared balcony",
+    "storage unit",
+    "streaming password",
 }
 _TITLE_ACTION_TERMS = {
     "accused",
+    "blamed",
     "blocked",
+    "borrowed",
     "called",
     "charged",
+    "changed",
+    "deleted",
     "demanded",
+    "drained",
+    "exposed",
+    "filled",
+    "hid",
+    "ignored",
+    "kept",
+    "left",
     "lied",
+    "locked",
+    "moved",
     "parked",
+    "posted",
     "put",
+    "recorded",
+    "refused",
+    "reported",
+    "returned",
+    "shared",
+    "showed",
     "shared",
     "spent",
     "stole",
@@ -258,7 +314,8 @@ def title_quality_reason(title: str) -> str:
         return "too_long"
     if clean.rstrip(" .,!?:;").split(" ")[-1].lower() in _TITLE_DANGLING_WORDS:
         return "dangling_title"
-    if not (words & _TITLE_ACTOR_TERMS or words & _TITLE_OBJECT_TERMS):
+    has_object = bool(words & _TITLE_ACTOR_TERMS or words & _TITLE_OBJECT_TERMS or _has_phrase(lowered, _TITLE_OBJECT_PHRASES))
+    if not has_object:
         return "missing_actor_or_object"
     if not (words & _TITLE_ACTION_TERMS):
         return "missing_conflict_action"
@@ -297,11 +354,25 @@ def _fallback_public_title_from_source(source_title: str) -> str:
         (("coworker", "credit"), "My Coworker Lied In Front Of Our Manager"),
         (("package", "accused"), "She Accused Me In The Building Chat"),
         (("storage", "unit"), "He Used My Storage Unit Like A Free Garage"),
+        (("laundry", "machine"), "She Left Her Laundry In Both Machines"),
+        (("grocery", "fund"), "My Roommate Spent Our Grocery Fund"),
+        (("lunch", "order"), "My Coworker Changed His Lunch Order"),
+        (("rental", "deposit"), "They Kept My Rental Deposit"),
+        (("borrowed", "car"), "He Returned My Car Empty And Scratched"),
+        (("office", "coffee", "fund"), "They Drained The Office Coffee Fund"),
+        (("streaming", "password"), "She Shared My Streaming Password"),
+        (("shared", "balcony"), "She Filled Our Shared Balcony With Plants"),
+        (("dinner", "reservation"), "She Put Twelve Dinners On My Card"),
+        (("printer", "toner"), "He Hid My Printer Toner"),
     )
     for terms, title in patterns:
         if all(term in lowered for term in terms):
             return title
     return ""
+
+
+def _has_phrase(text: str, phrases: set[str]) -> bool:
+    return any(phrase in text for phrase in phrases)
 
 
 def _strip_hashtags(text: str) -> str:

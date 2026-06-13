@@ -126,6 +126,12 @@ def tts_stage() -> None:
         return
 
     run_batch_tts()
+    store.upload_file(FINAL_METADATA_FILE, "scripts/final_metadata.json")
+    if FAILED_POSTS_FILE.exists():
+        store.upload_file(FAILED_POSTS_FILE, "scripts/failed_posts.json")
+    if not _read_metadata():
+        print("✅ TTS 성공 항목이 없어 이후 단계를 no-op 처리합니다.")
+        return
     uploaded_audio = store.upload_directory(AUDIO_DIR, "audio/mp3")
     uploaded_marks = store.upload_directory(MARKS_DIR, "audio/marks")
     if not uploaded_audio or not uploaded_marks:
@@ -139,13 +145,20 @@ def subtitles_stage() -> None:
         return
 
     downloaded_marks = store.download_prefix("audio/marks", MARKS_DIR)
+    store.download_prefix("audio/mp3", AUDIO_DIR)
     if not downloaded_marks:
         raise RuntimeError("No speech mark artifacts found in S3 for subtitle generation.")
+    _filter_metadata_by_artifacts("subtitles", require_audio=True, require_marks=True)
+    if not _read_metadata():
+        print("✅ audio/marks artifact gate 통과 항목이 없어 subtitles stage를 no-op 처리합니다.")
+        return
     convert_all_marks_to_srt()
     if not list(SUBTITLES_DIR.glob("*.srt")):
         raise RuntimeError("Subtitle generation produced no SRT files.")
-    store.download_prefix("audio/mp3", AUDIO_DIR)
     analyze_all_tts()
+    store.upload_file(FINAL_METADATA_FILE, "scripts/final_metadata.json")
+    if FAILED_POSTS_FILE.exists():
+        store.upload_file(FAILED_POSTS_FILE, "scripts/failed_posts.json")
     store.upload_directory(SUBTITLES_DIR, "audio/subtitles")
     store.upload_file(get_output_file("tts_check_result.json"), "audio/tts_check_result.json")
 
@@ -164,6 +177,10 @@ def render_stage() -> None:
     store.download_prefix("audio/mp3", AUDIO_DIR)
     store.download_prefix("audio/subtitles", SUBTITLES_DIR)
     _download_required("audio/tts_check_result.json", get_output_file("tts_check_result.json"))
+    _filter_metadata_by_artifacts("render", require_audio=True, require_srt=True, require_tts_result=True)
+    if not _read_metadata():
+        print("✅ render artifact gate 통과 항목이 없어 render stage를 no-op 처리합니다.")
+        return
     target_ids = _render_target_ids()
     if target_ids is not None and not target_ids:
         print("✅ render shard에 할당된 항목이 없어 no-op 처리합니다.")
@@ -203,6 +220,15 @@ def finalize_stage() -> None:
 def _finalize_publish_ready() -> None:
     _merge_render_shard_pixabay_usage()
     update_metadata_after_video_creation()
+    _filter_metadata_by_artifacts(
+        "publish_ready",
+        require_video_key=True,
+        require_final_video=True,
+        allow_s3_video=True,
+    )
+    if not _read_metadata():
+        print("✅ video artifact gate 통과 항목이 없어 publish-ready 업로드를 건너뜁니다.")
+        return
     _filter_metadata_by_content_gate("publish_ready")
     if not _read_metadata():
         print("✅ content gate 통과 항목이 없어 publish-ready 업로드를 건너뜁니다.")
@@ -220,12 +246,106 @@ def _filter_metadata_by_content_gate(stage: str) -> None:
     accepted, rejected = filter_content_gate_items(items, stage=stage)
     if rejected:
         print(f"🚫 content gate rejected {len(rejected)} item(s) at {stage}: {rejected[:3]}")
-        _write_json_file(FAILED_POSTS_FILE, rejected)
+        _append_failed_items(rejected)
         try:
             store.upload_file(FAILED_POSTS_FILE, "scripts/failed_posts.json")
         except Exception as exc:
             print(f"⚠️ failed_posts upload skipped: {exc}")
     _write_metadata(accepted)
+
+
+def _filter_metadata_by_artifacts(
+    stage: str,
+    *,
+    require_audio: bool = False,
+    require_marks: bool = False,
+    require_srt: bool = False,
+    require_tts_result: bool = False,
+    require_video_key: bool = False,
+    require_final_video: bool = False,
+    allow_s3_video: bool = False,
+) -> None:
+    tts_result_ids = _tts_result_ids() if require_tts_result else set()
+    accepted = []
+    rejected = []
+    for item in _read_metadata():
+        content_id = str(item.get("id") or "")
+        errors = []
+        if not content_id:
+            errors.append("missing_id")
+        if require_audio and not _valid_file(AUDIO_DIR / f"{content_id}.mp3"):
+            errors.append("missing_audio_mp3")
+        if require_marks and not _valid_file(MARKS_DIR / f"{content_id}_marks.json"):
+            errors.append("missing_speech_marks")
+        if require_srt and not _valid_file(SUBTITLES_DIR / f"{content_id}.srt"):
+            errors.append("missing_subtitle_srt")
+        if require_tts_result and content_id not in tts_result_ids:
+            errors.append("missing_tts_check_result")
+        if require_video_key and not str(item.get("video_key") or "").strip():
+            errors.append("missing_video_key")
+        if require_final_video:
+            local_video = FINAL_DIR / f"{content_id}.mp4"
+            video_key = str(item.get("video_key") or f"videos/final/{content_id}.mp4")
+            has_video = _valid_file(local_video)
+            if not has_video and allow_s3_video and video_key:
+                try:
+                    has_video = store.object_exists(video_key)
+                except Exception as exc:
+                    print(f"⚠️ video artifact S3 check skipped for {content_id}: {exc}")
+            if not has_video:
+                errors.append("missing_final_mp4")
+        if errors:
+            item["artifact_gate_status"] = "rejected"
+            item["artifact_gate_stage"] = stage
+            item["artifact_gate_errors"] = errors
+            rejected.append(
+                {
+                    "id": content_id,
+                    "title": item.get("title") or item.get("public_title"),
+                    "stage": stage,
+                    "error": "artifact_gate_failed:" + ",".join(errors),
+                }
+            )
+            continue
+        item["artifact_gate_status"] = "passed"
+        item["artifact_gate_stage"] = stage
+        accepted.append(item)
+    if rejected:
+        print(f"🚫 artifact gate rejected {len(rejected)} item(s) at {stage}: {rejected[:3]}")
+        _append_failed_items(rejected)
+        try:
+            store.upload_file(FAILED_POSTS_FILE, "scripts/failed_posts.json")
+        except Exception as exc:
+            print(f"⚠️ failed_posts upload skipped: {exc}")
+    _write_metadata(accepted)
+
+
+def _valid_file(path) -> bool:
+    return path.exists() and path.is_file() and path.stat().st_size > 0
+
+
+def _tts_result_ids() -> set[str]:
+    path = get_output_file("tts_check_result.json")
+    if not path.exists():
+        return set()
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            items = json.load(f)
+        if not isinstance(items, list):
+            return set()
+        return {str(item.get("filename")) for item in items if item.get("filename")}
+    except Exception as exc:
+        print(f"⚠️ tts_check_result read failed: {exc}")
+        return set()
+
+
+def _append_failed_items(items: list[dict]) -> None:
+    if not items:
+        return
+    existing = _read_json_file(FAILED_POSTS_FILE)
+    if not isinstance(existing, list):
+        existing = []
+    _write_json_file(FAILED_POSTS_FILE, existing + items)
 
 
 def _log_generation_acceptance() -> None:

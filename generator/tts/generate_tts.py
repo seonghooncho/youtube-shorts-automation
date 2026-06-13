@@ -10,7 +10,7 @@ from moviepy.editor import AudioFileClip
 from generator.text.content_gate import ensure_content_gate, normalize_narration_fields, tts_text
 from generator.text.generate_scripts_from_filtered import regenerate_post_by_id
 from generator.tts.speed_policy import final_duration_in_range
-from shared.utils.config import FINAL_METADATA_FILE, AUDIO_DIR, MARKS_DIR
+from shared.utils.config import FINAL_METADATA_FILE, AUDIO_DIR, MARKS_DIR, FAILED_POSTS_FILE
 
 load_dotenv()
 MALE_VOICES = ["Matthew", "Justin", "Joey", "Kevin", "Stephen"]
@@ -69,10 +69,14 @@ def run_batch_tts():
     with open(FINAL_METADATA_FILE, "r", encoding="utf-8") as f:
         items = json.load(f)
 
+    ready_items = []
+    failed_items = []
+
     for idx, item in enumerate(tqdm(items, desc="Generating TTS")):
         original_filename = item.get("id", None)
         if not original_filename:
             print("❌ 게시물 ID 없음, 건너뜀")
+            failed_items.append(_tts_failure(item, "missing_id"))
             continue
 
         metadata = item
@@ -81,6 +85,7 @@ def run_batch_tts():
             normalize_narration_fields(metadata)
         except ValueError as exc:
             print(f"🚫 [id={original_filename}] content gate rejected before TTS: {exc}")
+            failed_items.append(_tts_failure(metadata, str(exc)))
             continue
         voice_type = metadata.get("voice", "male")
         voice_id = pick_voice_id(voice_type)
@@ -91,11 +96,16 @@ def run_batch_tts():
         success = False
 
         while try_count <= max_retries:
-            audio_path, marks_path = generate_tts_with_timestamps(script_text, original_filename, voice_id)
+            try:
+                audio_path, marks_path = generate_tts_with_timestamps(script_text, original_filename, voice_id)
 
-            audio = AudioFileClip(audio_path)
-            duration = audio.duration
-            audio.close()
+                audio = AudioFileClip(audio_path)
+                duration = audio.duration
+                audio.close()
+            except Exception as exc:
+                print(f"🚫 [id={original_filename}] TTS generation failed: {exc}")
+                failed_items.append(_tts_failure(metadata, f"tts_generation_failed:{exc}"))
+                break
 
             duration_ok, speed, final_duration = final_duration_in_range(duration)
             wpm = _wpm(script_text, final_duration)
@@ -107,6 +117,15 @@ def run_batch_tts():
                 final_marks_path = MARKS_DIR / f"{original_filename}_marks.json"
                 os.replace(audio_path, final_audio_path)
                 os.replace(marks_path, final_marks_path)
+                if not _valid_tts_artifacts(original_filename):
+                    failed_items.append(_tts_failure(metadata, "tts_artifact_missing_after_success"))
+                    break
+                metadata["tts_status"] = "READY"
+                metadata["tts_voice_id"] = voice_id
+                metadata["tts_wpm"] = round(wpm, 2)
+                metadata["tts_original_duration"] = round(duration, 3)
+                metadata["tts_final_duration_estimate"] = round(final_duration, 3)
+                ready_items.append(metadata)
                 success = True
                 break
             else:
@@ -140,13 +159,21 @@ def run_batch_tts():
                     normalize_narration_fields(new_metadata)
                 except ValueError as exc:
                     print(f"🚫 [id={original_filename}] regenerated metadata rejected before TTS retry: {exc}")
+                    failed_items.append(_tts_failure(new_metadata, str(exc)))
                     break
+                metadata = new_metadata
                 script_text = tts_text(new_metadata)
                 voice_type = new_metadata.get("voice", "male")
                 voice_id = pick_voice_id(voice_type)
 
         if not success:
             print(f"🚫 [id={original_filename}] 최종 실패, skip")
+            if not any(failed.get("id") == original_filename for failed in failed_items):
+                failed_items.append(_tts_failure(metadata, "tts_failed"))
+
+    with open(FINAL_METADATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(ready_items, f, ensure_ascii=False, indent=2)
+    _append_failed_posts(failed_items)
 
 
 def _wpm(text: str, final_duration_seconds: float) -> float:
@@ -161,6 +188,47 @@ def _max_tts_wpm() -> float:
         return float(os.getenv("TTS_MAX_WPM", "225"))
     except ValueError:
         return 225.0
+
+
+def _valid_tts_artifacts(content_id: str) -> bool:
+    audio_path = AUDIO_DIR / f"{content_id}.mp3"
+    marks_path = MARKS_DIR / f"{content_id}_marks.json"
+    if not audio_path.exists() or audio_path.stat().st_size <= 0:
+        return False
+    if not marks_path.exists() or marks_path.stat().st_size <= 0:
+        return False
+    try:
+        with open(marks_path, "r", encoding="utf-8") as f:
+            marks = json.load(f)
+        return isinstance(marks, list) and bool(marks)
+    except Exception:
+        return False
+
+
+def _tts_failure(item: dict, reason: str) -> dict:
+    return {
+        "id": item.get("id"),
+        "title": item.get("title") or item.get("public_title"),
+        "stage": "tts",
+        "error": reason,
+    }
+
+
+def _append_failed_posts(items: list[dict]) -> None:
+    if not items:
+        return
+    FAILED_POSTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    existing = []
+    if FAILED_POSTS_FILE.exists():
+        try:
+            with open(FAILED_POSTS_FILE, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, list):
+                existing = loaded
+        except Exception:
+            existing = []
+    with open(FAILED_POSTS_FILE, "w", encoding="utf-8") as f:
+        json.dump(existing + items, f, ensure_ascii=False, indent=2)
 
 
 if __name__ == "__main__":
