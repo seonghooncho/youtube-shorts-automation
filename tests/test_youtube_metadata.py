@@ -96,6 +96,10 @@ def test_common_conflict_titles_pass_quality_validation():
     assert title_quality_reason("My Daughter Dented My Van") == ""
     assert title_quality_reason("My Landlord Walked Into My Apartment") == ""
     assert title_quality_reason("Her Cat Bit Mine Twice, Then Refused To Pay") == ""
+    assert title_quality_reason("My Boyfriend Deleted My Bank Alert") == ""
+    assert title_quality_reason("My Sister Called Me A Bad Aunt") == ""
+    assert title_quality_reason("She Texted Her Ex While I Paid Bills") == ""
+    assert title_quality_reason("Her Boyfriend Mocked My Job At Dinner") == ""
 
 
 def test_sanitize_upload_metadata_blocks_internal_values():

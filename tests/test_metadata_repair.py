@@ -289,3 +289,128 @@ def test_overpacked_vet_first_frame_is_simplified():
     repaired, _actions = repair_metadata(metadata, _cat_post())
 
     assert repaired["first_frame_text"] in {"HER CAT BIT MINE TWICE", "SHE REFUSED THE VET BILL"}
+
+
+def test_bank_alert_story_does_not_trigger_dad_bank_template():
+    lines = [
+        "At 1 a.m., my boyfriend used my bank account for food, then deleted the bank alert from my phone.",
+        "I woke up to the charge because the app still showed the food order and the missing notification.",
+        "When I asked, he said it was only a small mistake and I was making money more important than trust.",
+        "Then he admitted he erased the alert because he knew I would be upset before work.",
+        "I changed my password and told him he could not touch my account again.",
+        "Now he says I am treating him like a thief over one late-night order.",
+        "Would you stay with someone who deleted a bank alert?",
+    ]
+    metadata = _short_cat_metadata() | {
+        "voiceover_lines": lines,
+        "script": lines,
+        "tts_text": " ".join(lines),
+        "title": "AITA for being mad about food?",
+        "public_title": "AITA for being mad about food?",
+        "viewer_question": lines[-1],
+    }
+    post = {
+        "title": "AITA for being mad about food?",
+        "content": " ".join(lines),
+        "source_provider": "pullpush",
+    }
+
+    repaired, _actions = repair_metadata(metadata, post)
+
+    assert repaired["public_title"] == "My Boyfriend Deleted My Bank Alert"
+    assert repaired["first_frame_text"] == "MY BOYFRIEND DELETED MY BANK ALERT"
+    assert repaired["opening_visual_query"] == "bank phone alert"
+    assert "Dad Gave My Number" not in repaired["public_title"]
+
+
+def test_babysitting_story_repairs_to_family_pressure_metadata():
+    lines = [
+        "My sister gave me two hours notice to babysit, then called me a bad aunt when I said no.",
+        "She said her dinner plans were already paid for and I was the only person close enough to help.",
+        "I told her I had work messages open and could not suddenly take over bedtime for my niece.",
+        "Then she sent the family chat a screenshot of my no and left out the two-hour notice.",
+        "My mom said I should have helped because family does not need a calendar invite.",
+        "I muted the chat and told my sister she needed to ask before making me the backup plan.",
+        "Would you say no with only two hours notice?",
+    ]
+    metadata = _short_cat_metadata() | {
+        "voiceover_lines": lines,
+        "script": lines,
+        "tts_text": " ".join(lines),
+        "title": "AITA for saying no?",
+        "public_title": "AITA for saying no?",
+        "viewer_question": lines[-1],
+    }
+    post = {
+        "title": "AITA for saying no?",
+        "content": " ".join(lines),
+        "source_provider": "pullpush",
+    }
+
+    repaired, _actions = repair_metadata(metadata, post)
+
+    assert repaired["public_title"] == "My Sister Called Me A Bad Aunt"
+    assert repaired["first_frame_text"] == "MY SISTER CALLED ME A BAD AUNT"
+    assert repaired["opening_visual_query"] == "babysitting notice sister"
+
+
+def test_ex_bills_story_repairs_to_message_and_bill_metadata():
+    lines = [
+        "She was sending flirty messages to her ex while I was paying most of our bills.",
+        "The phone lit up on the counter right after I sent the rent transfer.",
+        "I asked why his name was still pinned, and she said I was insecure for reading the preview.",
+        "Then I saw she had complained to him that I was boring because I cared about money.",
+        "I stopped covering the extra bills until she could explain why he knew more than I did.",
+        "Now she says I am punishing her for a harmless conversation.",
+        "Would you keep paying the bills after seeing those messages?",
+    ]
+    metadata = _short_cat_metadata() | {
+        "voiceover_lines": lines,
+        "script": lines,
+        "tts_text": " ".join(lines),
+        "title": "AITA for checking a phone?",
+        "public_title": "AITA for checking a phone?",
+        "viewer_question": lines[-1],
+    }
+    post = {
+        "title": "AITA for checking a phone?",
+        "content": " ".join(lines),
+        "source_provider": "pullpush",
+    }
+
+    repaired, _actions = repair_metadata(metadata, post)
+
+    assert repaired["public_title"] == "She Texted Her Ex While I Paid Bills"
+    assert repaired["first_frame_text"] == "SHE TEXTED HER EX WHILE I PAID BILLS"
+    assert repaired["opening_visual_query"] == "phone messages bills"
+
+
+def test_dinner_job_story_repairs_to_insult_metadata():
+    lines = [
+        "Her boyfriend mocked my job at dinner, then expected to sleep in our guest room.",
+        "He joked that my work was not a real career while I was clearing plates from the table.",
+        "My sister laughed until I said he could find a hotel if my house was so unimpressive.",
+        "Then he told everyone I was humiliating him over one joke.",
+        "I said the guest room was for people who could be polite in the home they wanted to use.",
+        "Now my family says I made the whole dinner awkward by refusing to host him.",
+        "Would you still let him stay after that dinner?",
+    ]
+    metadata = _short_cat_metadata() | {
+        "voiceover_lines": lines,
+        "script": lines,
+        "tts_text": " ".join(lines),
+        "title": "AITA for asking him to leave?",
+        "public_title": "AITA for asking him to leave?",
+        "viewer_question": lines[-1],
+    }
+    post = {
+        "title": "AITA for asking him to leave?",
+        "content": " ".join(lines),
+        "source_provider": "pullpush",
+    }
+
+    repaired, _actions = repair_metadata(metadata, post)
+
+    assert repaired["public_title"] == "Her Boyfriend Mocked My Job At Dinner"
+    assert repaired["first_frame_text"] == "HE MOCKED MY JOB AT DINNER"
+    assert repaired["opening_visual_query"] == "dinner table job argument"

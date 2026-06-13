@@ -256,6 +256,10 @@ def test_caption_quality_uses_caption_specific_rules():
     assert caption_quality_reason("The door camera showed his car", is_first=True) == ""
     assert caption_quality_reason("My dad gave my number to every bank", is_first=True) == ""
     assert caption_quality_reason("landlord walking right into my apartment", is_first=True) == ""
+    assert caption_quality_reason("My boyfriend used my bank account", is_first=True) == ""
+    assert caption_quality_reason("My sister gave me two hours notice", is_first=True) == ""
+    assert caption_quality_reason("She was sending flirty messages", is_first=True) == ""
+    assert caption_quality_reason("My sister's boyfriend mocked my job", is_first=True) == ""
     assert caption_quality_reason("Things got worse", is_first=True) == "generic_filler"
     assert caption_quality_reason("The boundary was simple", is_first=True) == "generic_filler"
 
@@ -294,6 +298,42 @@ def test_opening_visual_query_must_match_hook():
 
     assert opening_visual_query_relevance_reason(relevant) == ""
     assert "opening_visual_query_mismatch" in evaluate_content_gate(mismatched)["hard_errors"]
+
+
+def test_opening_visual_query_matches_current_candidate_hooks():
+    bank_item = _safe_item(
+        voiceover_lines=["My boyfriend deleted my bank alert before I woke up.", "Would you trust him after that?"],
+        tts_text="My boyfriend deleted my bank alert before I woke up. Would you trust him after that?",
+        first_frame_text="MY BOYFRIEND DELETED MY BANK ALERT",
+        public_title="My Boyfriend Deleted My Bank Alert",
+        opening_visual_query="bank phone alert",
+    )
+    childcare_item = _safe_item(
+        voiceover_lines=["My sister gave me two hours notice to babysit.", "Would you say no?"],
+        tts_text="My sister gave me two hours notice to babysit. Would you say no?",
+        first_frame_text="MY SISTER CALLED ME A BAD AUNT",
+        public_title="My Sister Called Me A Bad Aunt",
+        opening_visual_query="babysitting notice sister",
+    )
+    ex_item = _safe_item(
+        voiceover_lines=["She was sending flirty messages to her ex while I was paying our bills.", "Would you leave?"],
+        tts_text="She was sending flirty messages to her ex while I was paying our bills. Would you leave?",
+        first_frame_text="SHE TEXTED HER EX WHILE I PAID BILLS",
+        public_title="She Texted Her Ex While I Paid Bills",
+        opening_visual_query="phone messages bills",
+    )
+    dinner_item = _safe_item(
+        voiceover_lines=["Her boyfriend mocked my job at dinner before asking for our guest room.", "Would you host him?"],
+        tts_text="Her boyfriend mocked my job at dinner before asking for our guest room. Would you host him?",
+        first_frame_text="HE MOCKED MY JOB AT DINNER",
+        public_title="Her Boyfriend Mocked My Job At Dinner",
+        opening_visual_query="dinner table job argument",
+    )
+
+    assert opening_visual_query_relevance_reason(bank_item) == ""
+    assert opening_visual_query_relevance_reason(childcare_item) == ""
+    assert opening_visual_query_relevance_reason(ex_item) == ""
+    assert opening_visual_query_relevance_reason(dinner_item) == ""
 
 
 def test_childcare_opening_visual_query_is_not_generic():
