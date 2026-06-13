@@ -85,6 +85,8 @@ def test_local_fallback_metadata_covers_synthetic_seed_batch():
     assert all("At first, My" not in " ".join(item["script"]) for item in generated)
     assert all(not _ends_with_dangling_word(item["first_2_seconds"]) for item in generated)
     assert all(not _ends_with_dangling_word(line) for item in generated for line in item["script"])
+    assert all(not _ends_with_dangling_word(_title_without_hashtags(item["title"])) for item in generated)
+    assert all(len(item["title"]) <= 100 for item in generated)
 
 
 def _ends_with_dangling_word(line: str) -> bool:
@@ -105,3 +107,7 @@ def _ends_with_dangling_word(line: str) -> bool:
         "with",
         "without",
     }
+
+
+def _title_without_hashtags(title: str) -> str:
+    return title.split(" #shorts", 1)[0]

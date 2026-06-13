@@ -332,8 +332,9 @@ def _is_llm_quota_error(message: str) -> bool:
 
 def _build_local_fallback_metadata(post: Dict[str, Any], reason: str = "") -> Dict[str, Any]:
     """Create a conservative script from source text when the LLM API is unavailable."""
-    title = _clean_sentence(post.get("title") or "Boundary Story", max_chars=92)
+    source_title = _clean_sentence(post.get("title") or "Boundary Story", max_chars=92)
     content = str(post.get("content") or "")
+    title = _fallback_public_title(source_title, content)
     parts = _extract_source_parts(content)
     boundary = parts.get("boundary") or "I was clear about the boundary before anything happened"
     setup = parts.get("setup") or _fallback_setup_sentence(content) or "At first, I tried to handle it calmly."
@@ -344,7 +345,7 @@ def _build_local_fallback_metadata(post: Dict[str, Any], reason: str = "") -> Di
     consequence = parts.get("consequence") or _sentence_at(content, 5) or "I held the boundary and stopped covering for it"
     debate = parts.get("debate") or "Was I wrong to hold the boundary?"
 
-    hook = _fallback_opening_hook(title, crossed_line, content)
+    hook = _fallback_opening_hook(source_title, crossed_line, content)
     if not hook.endswith((".", "?", "!")):
         hook = f"{hook}."
     first_two = _fallback_first_two_seconds(hook, crossed_line)
@@ -435,6 +436,33 @@ def _fallback_setup_sentence(content: str) -> str:
     return ""
 
 
+def _fallback_public_title(title: str, content: str) -> str:
+    lowered = f"{title} {content}".lower()
+    patterns = (
+        (("driveway",), "Neighbor Used My Driveway"),
+        (("grocery", "shared fund"), "Roommate Spent Our Grocery Fund"),
+        (("birthday", "whole table", "my card"), "Family Tried To Put Dinner On My Card"),
+        (("lunch", "pocketing"), "Coworker Accused Me Over A Lunch Order"),
+        (("family trip", "paid extra", "room"), "Cousin Took My Reserved Trip Room"),
+        (("trash bins", "walkway"), "Neighbor Blocked My Walkway With Trash Bins"),
+        (("deposit", "rental"), "Friends Trashed The Rental Deposit"),
+        (("car", "scratches"), "Cousin Returned My Car Empty And Scratched"),
+        (("package",), "Neighbor Accused Me Of Taking Her Package"),
+        (("storage unit",), "Brother Filled My Storage Unit"),
+        (("coffee fund",), "Coworkers Drained The Office Coffee Fund"),
+        (("laundry", "washer"), "Neighbor Blocked Both Laundry Machines"),
+        (("bedroom", "couch"), "Family Tried To Take My Bedroom"),
+        (("wedding", "invoice"), "Friend Put A Wedding Invoice In My Name"),
+        (("outfit", "stain"), "Friend Returned My Borrowed Outfit Stained"),
+        (("credit for my work", "file history"), "Coworker Took Credit For My Work"),
+        (("streaming", "password"), "Sister Shared My Streaming Password"),
+    )
+    for terms, public_title in patterns:
+        if all(term in lowered for term in terms):
+            return public_title
+    return _clean_sentence(title, max_chars=58).rstrip(".!?")
+
+
 def _fallback_opening_hook(title: str, crossed_line: str, content: str) -> str:
     action = _fallback_hook_action(title, crossed_line, content)
     return _clean_sentence(f"{action}, then acted like I was the problem", max_chars=132)
@@ -447,8 +475,10 @@ def _fallback_hook_action(title: str, crossed_line: str, content: str) -> str:
         (("grocery", "shared fund"), "My roommate spent our grocery fund on snacks for friends"),
         (("birthday", "whole table", "my card"), "My aunt tried to put the whole birthday dinner on my card"),
         (("lunch", "pocketing"), "My coworker changed his lunch order and accused me of pocketing money"),
+        (("family trip", "paid extra", "room"), "My cousin took the room I paid extra for and called it first come first served"),
+        (("trash bins", "walkway"), "My neighbor kept blocking my walkway with his trash bins"),
         (("deposit", "rental"), "My friends trashed the rental and demanded their deposit back"),
-        (("borrowed car", "scratches"), "My cousin returned my car late, empty, and scratched"),
+        (("car", "scratches"), "My cousin returned my car late, empty, and scratched"),
         (("package",), "My neighbor accused me of stealing her package in the building chat"),
         (("storage unit",), "My brother filled my storage unit, then blamed me for needing my space"),
         (("coffee fund",), "Coworkers used the coffee fund without paying and blamed me when it ran out"),
@@ -457,12 +487,10 @@ def _fallback_hook_action(title: str, crossed_line: str, content: str) -> str:
         (("wedding", "invoice"), "A friend ordered wedding decorations in my name and expected me to pay"),
         (("outfit", "stain"), "My friend returned my borrowed outfit late, stained, and damaged"),
         (("credit for my work", "file history"), "A coworker presented my work as hers in front of our manager"),
-        (("trash bins", "walkway"), "My neighbor kept blocking my walkway with his trash bins"),
         (("streaming", "password"), "My sister shared my streaming password and blamed me when it locked"),
-        (("family trip", "paid extra", "room"), "My cousin took the room I paid extra for and called it first come first served"),
     )
     for terms, action in patterns:
-        if any(term in lowered for term in terms):
+        if all(term in lowered for term in terms):
             return action
     action = _clean_clause(crossed_line, max_chars=72)
     return _sentence_case(action or "Someone crossed the one boundary I had made clear")
