@@ -635,6 +635,7 @@ def filter_viable_posts():
     filter_prompt_compacted_count = 0
     filter_prompt_total_chars_before = 0
     filter_prompt_total_chars_after = 0
+    source_scorecard_skipped_after_quota = 0
     candidate_posts: List[dict] = []
 
     for post in raw_posts:
@@ -661,7 +662,7 @@ def filter_viable_posts():
         posts_to_evaluate = candidate_posts
         skipped_by_prerank = []
 
-    for post in posts_to_evaluate:
+    for post_index, post in enumerate(posts_to_evaluate):
         title = post.get("title", "")
         original_content = str(post.get("content") or "")
         compacted_content = compact_source_for_filter(post, _filter_source_max_chars(original_content))
@@ -759,6 +760,20 @@ def filter_viable_posts():
                         f"score={source_score} acceptance={acceptance_score} risk={scorecard.retention_risk} reason={scorecard.reason}"
                     )
             else:
+                if _is_llm_quota_error(str(e)):
+                    llm_unavailable_reason = str(e)
+                    post["source_quality_status"] = "skipped"
+                    post["source_rejection_reason"] = llm_unavailable_reason
+                    remaining = posts_to_evaluate[post_index + 1 :]
+                    for remaining_post in remaining:
+                        remaining_post["source_quality_status"] = "skipped"
+                        remaining_post["source_rejection_reason"] = llm_unavailable_reason
+                    source_scorecard_skipped_after_quota = len(remaining)
+                    print(
+                        "🚫 source scorecard quota unavailable; "
+                        f"skipping remaining {source_scorecard_skipped_after_quota} candidate(s) without more LLM calls"
+                    )
+                    break
                 post["source_quality_status"] = "skipped"
                 post["source_rejection_reason"] = str(e)
                 print(f"GPT 판단 오류: {e}")
@@ -790,6 +805,8 @@ def filter_viable_posts():
         "source_llm_eval_limit": _int_env("SOURCE_LLM_EVAL_LIMIT", 8),
         "source_scorecard_calls": source_scorecard_calls,
         "source_scorecard_skipped_by_prerank": source_scorecard_skipped_by_prerank,
+        "source_scorecard_skipped_after_quota": source_scorecard_skipped_after_quota,
+        "llm_unavailable_reason": llm_unavailable_reason[:240],
         "filter_prompt_compacted_count": filter_prompt_compacted_count,
         "filter_prompt_total_chars_before": filter_prompt_total_chars_before,
         "filter_prompt_total_chars_after": filter_prompt_total_chars_after,

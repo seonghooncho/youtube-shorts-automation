@@ -227,6 +227,35 @@ def test_filter_prerank_caps_llm_source_scorecard_calls(monkeypatch, tmp_path):
     assert "Strong local conflict" in summary["accepted_examples"][0]["reason"]
 
 
+def test_filter_stops_scorecard_calls_after_quota(monkeypatch, tmp_path):
+    raw_path = tmp_path / "raw_posts.json"
+    viable_path = tmp_path / "viable_posts.json"
+    raw_path.write_text(json.dumps([_raw_post(i, strong=True) for i in range(6)]), encoding="utf-8")
+    calls = {"scorecard": 0}
+
+    def quota_scorecard(*_args, **_kwargs):
+        calls["scorecard"] += 1
+        raise RuntimeError("llm_quota_unavailable: insufficient_quota")
+
+    monkeypatch.setenv("SOURCE_LLM_EVAL_LIMIT", "6")
+    monkeypatch.setenv("SOURCE_LOCAL_PRERANK_ENABLED", "1")
+    monkeypatch.delenv("FILTER_LOCAL_FALLBACK_ENABLED", raising=False)
+    monkeypatch.setattr("generator.text.filter_viable_posts.RAW_POSTS_FILE", raw_path)
+    monkeypatch.setattr("generator.text.filter_viable_posts.VIABLE_POSTS_FILE", viable_path)
+    monkeypatch.setattr("generator.text.filter_viable_posts._get_client", lambda: object())
+    monkeypatch.setattr("generator.text.filter_viable_posts._ask_source_scorecard", quota_scorecard)
+
+    filter_viable_posts()
+
+    summary = json.loads((tmp_path / "source_filter_summary.json").read_text(encoding="utf-8"))
+    viable = json.loads(viable_path.read_text(encoding="utf-8"))
+    assert calls["scorecard"] == 1
+    assert viable == []
+    assert summary["source_scorecard_calls"] == 1
+    assert summary["source_scorecard_skipped_after_quota"] == 5
+    assert "llm_quota_unavailable" in summary["llm_unavailable_reason"]
+
+
 def test_filter_compacts_long_source_and_preserves_receipts_and_question():
     long_middle = " ".join([f"Slow context sentence {i} about unrelated history." for i in range(120)])
     receipt = "The receipt screenshot showed the dinner bill was charged to my card at 8:42."
