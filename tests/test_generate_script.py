@@ -62,7 +62,7 @@ def test_local_fallback_metadata_passes_quality_validation():
     assert metadata["generation_fallback"] == "local_template"
     assert metadata["id"] == "synthetic-test"
     assert 750 <= metadata["script_char_count"] <= 1150
-    assert "without asking" in metadata["first_2_seconds"].lower()
+    assert "driveway" in metadata["first_2_seconds"].lower()
 
 
 def test_local_fallback_metadata_covers_synthetic_seed_batch():
@@ -80,3 +80,28 @@ def test_local_fallback_metadata_covers_synthetic_seed_batch():
     assert len(generated) == 17
     assert all(item["generation_fallback"] == "local_template" for item in generated)
     assert all(750 <= item["script_char_count"] <= 1150 for item in generated)
+    assert all("Without asking me first" not in " ".join(item["script"]) for item in generated)
+    assert all("one clear boundary in this situation" not in " ".join(item["script"]) for item in generated)
+    assert all("At first, My" not in " ".join(item["script"]) for item in generated)
+    assert all(not _ends_with_dangling_word(item["first_2_seconds"]) for item in generated)
+    assert all(not _ends_with_dangling_word(line) for item in generated for line in item["script"])
+
+
+def _ends_with_dangling_word(line: str) -> bool:
+    return line.rstrip(" .,!?:;").split(" ")[-1].lower() in {
+        "a",
+        "and",
+        "because",
+        "but",
+        "for",
+        "from",
+        "in",
+        "like",
+        "of",
+        "that",
+        "the",
+        "then",
+        "to",
+        "with",
+        "without",
+    }

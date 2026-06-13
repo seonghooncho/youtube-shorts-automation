@@ -336,7 +336,7 @@ def _build_local_fallback_metadata(post: Dict[str, Any], reason: str = "") -> Di
     content = str(post.get("content") or "")
     parts = _extract_source_parts(content)
     boundary = parts.get("boundary") or "I was clear about the boundary before anything happened"
-    setup = parts.get("setup") or _sentence_at(content, 0) or "At first, I tried to handle it calmly."
+    setup = parts.get("setup") or _fallback_setup_sentence(content) or "At first, I tried to handle it calmly."
     crossed_line = parts.get("crossed_line") or _sentence_at(content, 1) or "someone crossed the line and acted like I was the problem"
     public_pressure = parts.get("public_pressure") or _sentence_at(content, 2) or "people around us started taking sides"
     escalation = parts.get("escalation") or _sentence_at(content, 3) or "the pressure kept building instead of anyone owning the mistake"
@@ -344,10 +344,10 @@ def _build_local_fallback_metadata(post: Dict[str, Any], reason: str = "") -> Di
     consequence = parts.get("consequence") or _sentence_at(content, 5) or "I held the boundary and stopped covering for it"
     debate = parts.get("debate") or "Was I wrong to hold the boundary?"
 
-    hook = _fallback_opening_hook(crossed_line)
+    hook = _fallback_opening_hook(title, crossed_line, content)
     if not hook.endswith((".", "?", "!")):
         hook = f"{hook}."
-    first_two = _clean_sentence(hook, max_chars=96).rstrip(".!?")
+    first_two = _fallback_first_two_seconds(hook, crossed_line)
     viewer_question = _ensure_question(_clean_sentence(debate, max_chars=150))
     payoff = _clean_sentence(consequence, max_chars=120)
     source_summary = _clean_sentence(f"{setup} {crossed_line}", max_chars=220)
@@ -362,12 +362,15 @@ def _build_local_fallback_metadata(post: Dict[str, Any], reason: str = "") -> Di
     visual_keywords = _fallback_visual_keywords(title, content)
 
     script = [
-        hook,
-        _clean_sentence(f"The boundary was simple: {boundary}. {setup}", max_chars=185),
-        _clean_sentence(f"Then {crossed_line}. I tried to keep it calm, but it already felt like my limit did not matter.", max_chars=185),
-        _clean_sentence(f"What made it worse was {public_pressure}. {escalation}", max_chars=185),
-        _clean_sentence(f"The proof was clear: {proof}. So {consequence}.", max_chars=185),
-        _clean_sentence(f"Now people are split because I refused to smooth it over. {viewer_question}", max_chars=185),
+        _finish_sentence(hook),
+        _finish_sentence(_clean_sentence(f"I had already made the boundary clear: {boundary}.", max_chars=185)),
+        _finish_sentence(_clean_sentence(f"At first, {_sentence_fragment(setup)}", max_chars=185)),
+        _finish_sentence(_clean_sentence(f"Then {crossed_line}.", max_chars=185)),
+        _finish_sentence(_clean_sentence(f"Instead of owning it, {public_pressure}.", max_chars=185)),
+        _finish_sentence(_clean_sentence(f"What made it worse was that {_sentence_fragment(escalation)}", max_chars=185)),
+        _finish_sentence(_clean_sentence(f"The proof was clear: {proof}.", max_chars=185)),
+        _finish_sentence(_clean_sentence(f"So {consequence}.", max_chars=185)),
+        viewer_question,
     ]
     script = _fit_fallback_script(script, story_beats)
 
@@ -408,7 +411,7 @@ def _extract_source_parts(content: str) -> Dict[str, str]:
         "boundary": r"one clear boundary in this situation:\s*(.*?)(?:\.|$)",
         "crossed_line": r"Then\s+(.*?)(?:,\s*and acted like| and acted like|\.|$)",
         "public_pressure": r"The part that made people take sides was\s+(.*?)(?:\.|$)",
-        "escalation": r"but\s+(.*?)(?:\.|$)",
+        "escalation": r"I tried to keep it calm.*?,\s*but\s+(.*?)(?:\.|$)",
         "proof": r"What changed everything was\s+(.*?)(?:\.|$)",
         "consequence": r"After that,\s+(.*?)(?:\.|$)",
     }
@@ -423,19 +426,116 @@ def _extract_source_parts(content: str) -> Dict[str, str]:
     return parts
 
 
-def _fallback_opening_hook(crossed_line: str) -> str:
-    action = _clean_sentence(crossed_line, max_chars=105).rstrip(".!?")
-    if not action:
-        action = "someone crossed the one boundary I had made clear"
-    return _clean_sentence(
-        f"Without asking me first, {action}, then acted like I was the problem",
-        max_chars=132,
+def _fallback_setup_sentence(content: str) -> str:
+    sentences = [item.strip() for item in re.split(r"(?<=[.!?])\s+", str(content or "")) if item.strip()]
+    for sentence in sentences:
+        if "one clear boundary in this situation" in sentence.lower():
+            continue
+        return sentence
+    return ""
+
+
+def _fallback_opening_hook(title: str, crossed_line: str, content: str) -> str:
+    action = _fallback_hook_action(title, crossed_line, content)
+    return _clean_sentence(f"{action}, then acted like I was the problem", max_chars=132)
+
+
+def _fallback_hook_action(title: str, crossed_line: str, content: str) -> str:
+    lowered = f"{title} {content}".lower()
+    patterns = (
+        (("driveway",), "My neighbor treated my driveway like his extra parking spot"),
+        (("grocery", "shared fund"), "My roommate spent our grocery fund on snacks for friends"),
+        (("birthday", "whole table", "my card"), "My aunt tried to put the whole birthday dinner on my card"),
+        (("lunch", "pocketing"), "My coworker changed his lunch order and accused me of pocketing money"),
+        (("deposit", "rental"), "My friends trashed the rental and demanded their deposit back"),
+        (("borrowed car", "scratches"), "My cousin returned my car late, empty, and scratched"),
+        (("package",), "My neighbor accused me of stealing her package in the building chat"),
+        (("storage unit",), "My brother filled my storage unit, then blamed me for needing my space"),
+        (("coffee fund",), "Coworkers used the coffee fund without paying and blamed me when it ran out"),
+        (("laundry", "washer"), "My neighbor blocked both washers and accused me of crossing a line"),
+        (("bedroom", "couch"), "My uncle assigned my bedroom to a guest without asking me"),
+        (("wedding", "invoice"), "A friend ordered wedding decorations in my name and expected me to pay"),
+        (("outfit", "stain"), "My friend returned my borrowed outfit late, stained, and damaged"),
+        (("credit for my work", "file history"), "A coworker presented my work as hers in front of our manager"),
+        (("trash bins", "walkway"), "My neighbor kept blocking my walkway with his trash bins"),
+        (("streaming", "password"), "My sister shared my streaming password and blamed me when it locked"),
+        (("family trip", "paid extra", "room"), "My cousin took the room I paid extra for and called it first come first served"),
     )
+    for terms, action in patterns:
+        if any(term in lowered for term in terms):
+            return action
+    action = _clean_clause(crossed_line, max_chars=72)
+    return _sentence_case(action or "Someone crossed the one boundary I had made clear")
+
+
+def _fallback_first_two_seconds(hook: str, crossed_line: str) -> str:
+    raw = str(hook or "").rstrip(".!?")
+    first_two = _clean_sentence(raw, max_chars=95).rstrip(".!?")
+    if len(raw) > 95 or _is_dangling_phrase(first_two):
+        action = _clean_clause(raw.split(", then acted", 1)[0], max_chars=95)
+        if not action:
+            action = _clean_clause(crossed_line, max_chars=54) or "someone crossed my boundary"
+        first_two = _sentence_case(action)
+    return first_two[:95].rstrip(" .,;:")
 
 
 def _sentence_at(content: str, index: int) -> str:
     sentences = [item.strip() for item in re.split(r"(?<=[.!?])\s+", str(content or "")) if item.strip()]
     return sentences[index] if 0 <= index < len(sentences) else ""
+
+
+_DANGLING_TRAILING_WORDS = {
+    "a",
+    "an",
+    "and",
+    "as",
+    "at",
+    "because",
+    "but",
+    "by",
+    "could",
+    "did",
+    "do",
+    "does",
+    "for",
+    "from",
+    "had",
+    "has",
+    "have",
+    "her",
+    "his",
+    "in",
+    "into",
+    "i",
+    "is",
+    "like",
+    "my",
+    "of",
+    "on",
+    "our",
+    "or",
+    "should",
+    "that",
+    "the",
+    "their",
+    "then",
+    "to",
+    "was",
+    "were",
+    "with",
+    "without",
+    "would",
+    "your",
+}
+
+
+def _clean_clause(text: str, *, max_chars: int) -> str:
+    cleaned = re.sub(r"\s+", " ", str(text or "")).strip(" -.,;:")
+    if len(cleaned) > max_chars:
+        cleaned = cleaned[:max_chars].rstrip()
+        if " " in cleaned:
+            cleaned = cleaned.rsplit(" ", 1)[0]
+    return _strip_dangling_tail(cleaned).strip(" -.,;:")
 
 
 def _clean_sentence(text: str, *, max_chars: int) -> str:
@@ -445,7 +545,36 @@ def _clean_sentence(text: str, *, max_chars: int) -> str:
     truncated = cleaned[: max(0, max_chars - 1)].rstrip()
     if " " in truncated:
         truncated = truncated.rsplit(" ", 1)[0]
+    truncated = _strip_dangling_tail(truncated)
     return f"{truncated.rstrip('.,;:')}."
+
+
+def _strip_dangling_tail(text: str) -> str:
+    words = str(text or "").split()
+    while words and words[-1].strip(".,;:!?").lower() in _DANGLING_TRAILING_WORDS:
+        words.pop()
+    return " ".join(words)
+
+
+def _is_dangling_phrase(text: str) -> bool:
+    last = str(text or "").strip().split(" ")[-1].strip(".,;:!?").lower()
+    return last in _DANGLING_TRAILING_WORDS
+
+
+def _finish_sentence(text: str) -> str:
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return ""
+    return cleaned if cleaned.endswith((".", "?", "!")) else f"{cleaned}."
+
+
+def _sentence_fragment(text: str) -> str:
+    fragment = str(text or "").strip()
+    if not fragment:
+        return ""
+    if fragment.startswith("I "):
+        return fragment
+    return fragment[:1].lower() + fragment[1:]
 
 
 def _sentence_case(text: str) -> str:
@@ -486,7 +615,7 @@ def _fallback_hook_type(content: str) -> str:
 
 def _fit_fallback_script(script: list[str], story_beats: list[str]) -> list[str]:
     joined_len = len(" ".join(script))
-    if joined_len < TARGET_MIN_SCRIPT_CHARS:
+    if joined_len < TARGET_MIN_SCRIPT_CHARS and len(script) < 8:
         script.insert(
             -1,
             _clean_sentence(
@@ -494,9 +623,9 @@ def _fit_fallback_script(script: list[str], story_beats: list[str]) -> list[str]
                 max_chars=185,
             ),
         )
-    if len(" ".join(script)) < TARGET_MIN_SCRIPT_CHARS and story_beats:
+    if len(" ".join(script)) < TARGET_MIN_SCRIPT_CHARS and story_beats and len(script) < 8:
         script.insert(-1, _clean_sentence(f"That is why this felt bigger than one awkward moment: {story_beats[0]}", max_chars=185))
-    while len(" ".join(script)) > TARGET_MAX_SCRIPT_CHARS and len(script) > 5:
+    while len(" ".join(script)) > MAX_SCRIPT_CHARS and len(script) > 7:
         script.pop(-2)
     return script
 
