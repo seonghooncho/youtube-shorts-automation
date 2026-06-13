@@ -93,7 +93,7 @@ Terraform이 관리하는 비밀이 아닌 운영 설정 예시는 다음과 같
 
 S3와 Polly는 전용 정적 access key를 사용하지 않습니다. Batch/Lambda runtime은 IAM role과 AWS SDK 기본 credential chain을 사용합니다. 외부에 노출된 기존 정적 키는 각 발급처에서 폐기/재발급해야 합니다.
 
-정리된 legacy SSM 파라미터: 전용 S3 access key, 전용 Polly access key, YouTube API key, Google credential path. Polly 전용 IAM access key는 비활성화했고, S3 전용 access key는 현재 권한으로 비활성화가 거부되어 SSM에서는 제거했습니다.
+정리된 legacy SSM 파라미터: 전용 S3 access key, 전용 Polly access key, Google credential path. Polly 전용 IAM access key는 비활성화했고, S3 전용 access key는 현재 권한으로 비활성화가 거부되어 SSM에서는 제거했습니다. YouTube API key는 업로드 credential이 아니라 공개 통계 fallback 용도로만 남깁니다.
 
 선택 파라미터:
 
@@ -101,11 +101,14 @@ S3와 Polly는 전용 정적 access key를 사용하지 않습니다. Batch/Lamb
 /ytshorts/REDDIT_CLIENT_ID
 /ytshorts/REDDIT_CLIENT_SECRET
 /ytshorts/REDDIT_USER_AGENT
+/ytshorts/YOUTUBE_API_KEY
 ```
 
 YouTube OAuth client/refresh token은 현재 SSM SecureString에 저장되어 있습니다. 값이 `PENDING`이면 publisher Lambda는 업로드를 시도하지 않고 `UPLOAD_BLOCKED` 상태를 남기도록 구현되어 있습니다.
 
 YouTube OAuth scope는 업로드용 `youtube.upload`, 상태 조회/삭제용 `youtube.force-ssl`, Data API 조회용 `youtube.readonly`, Analytics 조회용 `yt-analytics.readonly`를 함께 요청합니다. 기존 refresh token이 업로드 전용 scope로 발급된 경우 새 scope는 자동으로 소급 적용되지 않으므로, 처리 상태 조회/삭제나 성과 수집이 필요한 경우 `scripts/youtube_oauth_setup.py`로 refresh token을 다시 발급해 SSM에 저장해야 합니다.
+
+`/ytshorts/YOUTUBE_API_KEY`는 업로드에 사용하지 않습니다. metrics Lambda가 OAuth Data API scope 부족을 만났을 때 공개 영상의 기본 통계 조회를 한 번 더 시도하는 fallback 용도입니다. 비공개 영상, 내 채널 전용 상태, YouTube Analytics 지표는 API key로 조회할 수 없으므로 OAuth scope가 필요합니다.
 
 ## Source Bundle Build
 

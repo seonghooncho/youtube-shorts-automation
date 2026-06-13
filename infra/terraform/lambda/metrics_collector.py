@@ -29,23 +29,50 @@ def handler(event, context):
         return {"status": "noop", "reason": "no_uploaded_items"}
 
     youtube_ids = [item["youtube_id"] for item in items if item.get("youtube_id")]
+    data_api_stats = {}
+    analytics_rows = {}
+    metric_errors = []
     youtube_config = _youtube_config()
-    if not youtube_config:
-        return {"status": "blocked", "reason": "youtube_oauth_missing", "videos": len(youtube_ids)}
+    if youtube_config:
+        access_token = ""
+        try:
+            access_token = _refresh_access_token(youtube_config)
+        except Exception as exc:
+            metric_errors.append(_metric_error("oauth_refresh", exc))
+        if access_token:
+            try:
+                data_api_stats = _fetch_video_statistics(access_token, youtube_ids)
+            except Exception as exc:
+                metric_errors.append(_metric_error("data_api_oauth", exc))
+            try:
+                analytics_rows = _fetch_analytics(access_token, youtube_ids)
+            except Exception as exc:
+                metric_errors.append(_metric_error("analytics", exc))
+    else:
+        metric_errors.append("youtube_oauth_missing")
+
+    if not data_api_stats:
+        api_key = _setting("YOUTUBE_API_KEY", "")
+        if api_key:
+            try:
+                data_api_stats = _fetch_video_statistics_with_key(api_key, youtube_ids)
+                if not data_api_stats:
+                    metric_errors.append("data_api_key:no_public_items")
+            except Exception as exc:
+                metric_errors.append(_metric_error("data_api_key", exc))
+        else:
+            metric_errors.append("data_api_key_missing")
+
+    if not data_api_stats and not analytics_rows:
+        reason = "; ".join(metric_errors)[:240] or "metrics_unavailable"
+        _mark_metrics_blocked(table_name, items, reason)
+        return {"status": "blocked", "reason": reason, "videos": len(youtube_ids)}
 
     try:
-        access_token = _refresh_access_token(youtube_config)
-        data_api_stats = _fetch_video_statistics(access_token, youtube_ids)
-        analytics_rows = _fetch_analytics(access_token, youtube_ids)
+        updated = _store_metrics(table_name, items, data_api_stats, analytics_rows, "; ".join(metric_errors))
     except Exception as exc:
-        reason = str(exc)[:240]
-        if "insufficient" in reason.lower() or "forbidden" in reason.lower():
-            _mark_metrics_blocked(table_name, items, reason)
-            return {"status": "blocked", "reason": reason, "videos": len(youtube_ids)}
         raise
-
-    updated = _store_metrics(table_name, items, data_api_stats, analytics_rows)
-    return {"status": "ok", "videos": len(youtube_ids), "updated": updated}
+    return {"status": "ok", "videos": len(youtube_ids), "updated": updated, "partial": bool(metric_errors)}
 
 
 def _uploaded_items(table_name: str, limit: int) -> list[dict[str, Any]]:
@@ -85,6 +112,30 @@ def _fetch_video_statistics(access_token: str, youtube_ids: list[str]) -> dict[s
         f"https://www.googleapis.com/youtube/v3/videos?{params}",
         access_token,
     )
+    stats = {}
+    for item in payload.get("items", []):
+        video_id = item.get("id")
+        if video_id:
+            stats[video_id] = {
+                "statistics": item.get("statistics") or {},
+                "contentDetails": item.get("contentDetails") or {},
+                "status": item.get("status") or {},
+            }
+    return stats
+
+
+def _fetch_video_statistics_with_key(api_key: str, youtube_ids: list[str]) -> dict[str, dict[str, Any]]:
+    if not youtube_ids:
+        return {}
+    params = urllib.parse.urlencode(
+        {
+            "key": api_key,
+            "part": "statistics,contentDetails,status",
+            "id": ",".join(youtube_ids[:50]),
+            "maxResults": "50",
+        }
+    )
+    payload = _google_get_without_auth(f"https://www.googleapis.com/youtube/v3/videos?{params}")
     stats = {}
     for item in payload.get("items", []):
         video_id = item.get("id")
@@ -144,6 +195,7 @@ def _store_metrics(
     items: list[dict[str, Any]],
     data_api_stats: dict[str, dict[str, Any]],
     analytics_rows: dict[str, dict[str, Any]],
+    metrics_error: str = "",
 ) -> int:
     table = dynamodb.Table(table_name)
     collected_at = int(time.time())
@@ -152,22 +204,28 @@ def _store_metrics(
         content_id = item["content_id"]
         youtube_id = item["youtube_id"]
         analytics = analytics_rows.get(youtube_id) or {}
-        status = "METRICS_COLLECTED" if analytics else "METRICS_PENDING"
+        data_api = data_api_stats.get(youtube_id, {})
+        status = "METRICS_COLLECTED" if analytics else ("METRICS_PARTIAL" if data_api else "METRICS_PENDING")
         metrics = {
             "youtube_id": youtube_id,
             "collected_at": collected_at,
             "status": status,
-            "data_api": data_api_stats.get(youtube_id, {}),
+            "data_api": data_api,
             "analytics": analytics,
             "primary_kpi": "averageViewPercentage",
             "primary_kpi_value": analytics.get("averageViewPercentage", ""),
+            "metrics_error": metrics_error[:240],
         }
         table.update_item(
             Key={"content_id": content_id},
-            UpdateExpression="SET youtube_metrics = :metrics, metrics_status = :status, updated_at = :updated_at",
+            UpdateExpression=(
+                "SET youtube_metrics = :metrics, metrics_status = :status, "
+                "metrics_error = :error, updated_at = :updated_at"
+            ),
             ExpressionAttributeValues={
                 ":metrics": _clean(metrics),
                 ":status": status,
+                ":error": metrics_error[:240],
                 ":updated_at": collected_at,
             },
         )
@@ -190,12 +248,40 @@ def _mark_metrics_blocked(table_name: str, items: list[dict[str, Any]], reason: 
         )
 
 
+def _metric_error(stage: str, exc: Exception) -> str:
+    text = str(exc).replace("\n", " ").replace("\r", " ")
+    lower = text.lower()
+    if "insufficient authentication scopes" in lower or "access_token_scope_insufficient" in lower:
+        reason = "insufficient_scope"
+    elif "quota" in lower:
+        reason = "quota"
+    elif "403" in lower or "forbidden" in lower:
+        reason = "forbidden"
+    elif "404" in lower or "not found" in lower:
+        reason = "not_found"
+    elif "400" in lower or "bad request" in lower:
+        reason = "bad_request"
+    else:
+        reason = text[:120] or exc.__class__.__name__
+    return f"{stage}:{reason}"
+
+
 def _google_get(url: str, access_token: str) -> dict[str, Any]:
     request = urllib.request.Request(
         url,
         headers={"Authorization": f"Bearer {access_token}"},
         method="GET",
     )
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"google_api_error:{exc.code}:{body[:300]}") from exc
+
+
+def _google_get_without_auth(url: str) -> dict[str, Any]:
+    request = urllib.request.Request(url, method="GET")
     try:
         with urllib.request.urlopen(request, timeout=60) as response:
             return json.loads(response.read().decode("utf-8"))
@@ -255,7 +341,7 @@ def _setting(name: str, default: str) -> str:
     try:
         value = ssm.get_parameter(Name=f"{SSM_PREFIX}/{name}", WithDecryption=True)["Parameter"]["Value"]
     except ClientError:
-        value = default
+        return default
     _CONFIG_CACHE[name] = value
     return value
 

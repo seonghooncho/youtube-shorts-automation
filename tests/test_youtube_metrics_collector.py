@@ -71,5 +71,14 @@ def test_store_metrics_updates_content_records(monkeypatch):
     assert updated == 1
     values = calls[0]["ExpressionAttributeValues"]
     assert values[":status"] == "METRICS_COLLECTED"
+    assert values[":error"] == ""
     assert values[":metrics"]["primary_kpi"] == "averageViewPercentage"
     assert str(values[":metrics"]["analytics"]["averageViewPercentage"]) == "72.4"
+
+
+def test_metric_error_normalizes_scope_failure(monkeypatch):
+    metrics = _load_metrics_module(monkeypatch)
+
+    error = RuntimeError("google_api_error:403:Request had insufficient authentication scopes")
+
+    assert metrics._metric_error("analytics", error) == "analytics:insufficient_scope"
