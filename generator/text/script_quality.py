@@ -77,7 +77,13 @@ _HOOK_STAKES_TERMS = {
     "took",
     "trashed",
     "used",
+    "without a yes",
     "without asking",
+    "without consent",
+    "without my",
+    "without permission",
+    "without telling",
+    "without their",
     "wouldn't",
 }
 _ROMANTIC_OR_SEXUAL_TERMS = {

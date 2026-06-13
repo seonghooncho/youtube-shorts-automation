@@ -2,6 +2,7 @@ import pytest
 
 from generator.text.generate_script import ReturnScript
 from generator.text.generate_scripts_from_filtered import validate_and_parse_metadata
+from generator.text.script_quality import validate_script_quality
 
 
 def _market_fields(**overrides):
@@ -251,3 +252,50 @@ def test_validate_metadata_requires_transparent_adaptation_strategy():
 
     with pytest.raises(ValueError, match="weak_adaptation_strategy"):
         validate_and_parse_metadata(result, 0, source)
+
+
+def test_without_consent_hook_counts_as_crossed_boundary():
+    source = {
+        "title": "AITA for fostering without asking my housemate?",
+        "content": (
+            "I co-own a house with my housemate and told him a month ago that I wanted to foster a dog. "
+            "He told me not to make that kind of decision unilaterally, but I did not follow up before bringing "
+            "home a temporary foster from a shelter. I planned to handle food, walks, cleanup, and all costs myself. "
+            "When he came home, he said the issue was not the dog but that I had ignored his boundary in a shared house. "
+            "Now he says the trust is broken and he is considering moving out because he does not want more surprises. "
+            "I thought he was overreacting because the foster is temporary, but now I am wondering whether I crossed a line."
+        ),
+    }
+    metadata = {
+        "hook_type": "crossed_boundary",
+        "first_2_seconds": "I brought home a shelter dog without my housemate ever saying yes",
+        "turning_point": "The housemate came home, saw the foster, and said the trust was broken.",
+        "payoff_line": "Maybe I turned our shared home into my solo rescue mission.",
+        "viewer_question": "Was I wrong for fostering anyway?",
+        "marketability_score": 5,
+        "retention_risk": "The rescue motive could make the narrator seem automatically right, so the rewrite highlights the shared home and ignored warning early.",
+        "cut_plan": ["shelter hook", "shared kitchen", "leash by door", "quiet argument"],
+        "bg_strategy": "hybrid",
+        "source_summary": "A co-owner brings home a temporary foster after being warned not to decide alone.",
+        "story_beats": [
+            "The narrator wants to foster.",
+            "The housemate warns them not to decide alone.",
+            "The narrator brings the foster home anyway.",
+            "The housemate says trust is broken.",
+        ],
+        "adaptation_strategy": "Compressed the month-long gap into a warning-to-action setup while preserving the shared-home boundary conflict.",
+        "retention_angle": "A shared-home boundary was crossed, creating a debatable split between helping and consent.",
+        "visual_keywords": ["shelter", "shared kitchen", "leash", "tense conversation"],
+        "script": [
+            "I brought home a shelter dog without my housemate ever saying yes, and now he says I broke the whole house.",
+            "We co-own the place, and a month ago I said I wanted to foster. He did not say no, but he warned me not to decide alone.",
+            "Yesterday, a shelter needed a temporary foster fast. I brought the dog home because I thought I could handle food, walks, cleanup, and costs myself.",
+            "My housemate came home and said the issue was not the work. It was that I made a shared-house decision after he clearly asked me not to.",
+            "Now he says trust is broken and he might move out because he does not want more surprises where he lives.",
+            "I thought temporary made it different, but maybe I turned our shared home into my solo rescue mission. Was I wrong for fostering anyway?",
+        ],
+    }
+
+    issues = validate_script_quality(metadata, source)
+
+    assert "weak_first_2_seconds" not in {issue.code for issue in issues}
