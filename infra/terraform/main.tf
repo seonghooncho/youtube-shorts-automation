@@ -32,6 +32,10 @@ locals {
     REDDIT_MAX_POSTS                  = tostring(var.reddit_max_posts)
     REDDIT_MIN_NEEDED                 = tostring(var.reddit_min_needed)
     REDDIT_FALLBACK_PROVIDER          = "pullpush"
+    REDDIT_REQUEST_TIMEOUT_SECONDS    = "45"
+    REDDIT_REQUEST_MAX_ATTEMPTS       = "4"
+    REDDIT_REQUEST_BACKOFF_SECONDS    = "2"
+    PULLPUSH_PAGE_SIZE                = "50"
     GENERATION_BATCH_DAYS             = tostring(var.generation_batch_days)
     GENERATION_BUFFER_DAYS            = tostring(var.generation_buffer_days)
     GENERATION_MAX_NEW_ITEMS          = tostring(var.generation_max_new_items)

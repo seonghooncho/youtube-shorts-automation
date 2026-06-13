@@ -5,7 +5,7 @@ from typing import Dict, Iterable, List, Optional, Protocol, Set
 from urllib.parse import urlparse
 
 import requests
-from requests import HTTPError, Session
+from requests import HTTPError, RequestException, Session
 
 from generator.text.source_integrity import normalize_story_text, select_story_content, source_integrity_fields
 
@@ -25,6 +25,10 @@ class RedditScrapeConfig:
     detail_request_delay_seconds: float = 0.15
     fetch_post_details: bool = True
     fallback_provider: str = "pullpush"
+    request_timeout_seconds: float = 45.0
+    request_max_attempts: int = 4
+    request_backoff_seconds: float = 2.0
+    pullpush_page_size: int = 50
 
     @classmethod
     def from_env(cls) -> "RedditScrapeConfig":
@@ -44,6 +48,10 @@ class RedditScrapeConfig:
             ),
             fetch_post_details=os.getenv("REDDIT_FETCH_POST_DETAILS", "1") != "0",
             fallback_provider=os.getenv("REDDIT_FALLBACK_PROVIDER", cls.fallback_provider),
+            request_timeout_seconds=float(os.getenv("REDDIT_REQUEST_TIMEOUT_SECONDS", cls.request_timeout_seconds)),
+            request_max_attempts=int(os.getenv("REDDIT_REQUEST_MAX_ATTEMPTS", cls.request_max_attempts)),
+            request_backoff_seconds=float(os.getenv("REDDIT_REQUEST_BACKOFF_SECONDS", cls.request_backoff_seconds)),
+            pullpush_page_size=int(os.getenv("PULLPUSH_PAGE_SIZE", cls.pullpush_page_size)),
         )
 
 
@@ -199,18 +207,20 @@ class PullPushSource:
     def _search(self, before: Optional[int] = None) -> Dict:
         params = {
             "subreddit": self.config.subreddit,
-            "size": 100,
+            "size": max(1, min(100, self.config.pullpush_page_size)),
             "sort": "desc",
         }
         if before:
             params["before"] = before
-        response = self.session.get(
+        return _get_json_with_retries(
+            self.session,
             "https://api.pullpush.io/reddit/search/submission/",
             params=params,
-            timeout=30,
+            timeout=self.config.request_timeout_seconds,
+            max_attempts=self.config.request_max_attempts,
+            backoff_seconds=self.config.request_backoff_seconds,
+            label="pullpush search",
         )
-        response.raise_for_status()
-        return response.json()
 
     def collect(self, scraped_ids: Set[str]) -> List[Dict[str, str]]:
         posts: List[Dict[str, str]] = []
@@ -218,7 +228,13 @@ class PullPushSource:
         before: Optional[int] = None
 
         for page in range(1, self.config.max_pages + 1):
-            payload = self._search(before=before)
+            try:
+                payload = self._search(before=before)
+            except Exception as e:
+                if posts:
+                    print(f"⚠️ PullPush page fetch failed after partial collection; using {len(posts)} posts: {e}")
+                    break
+                raise
             items = payload.get("data") or []
             page_ok = 0
             page_skipped = 0
@@ -311,6 +327,34 @@ def collect_with_fallback(config: RedditScrapeConfig, scraped_ids: Set[str]) -> 
             raise
         print(f"⚠️ Reddit 공식/API 수집 실패, PullPush fallback 사용: {e}")
         return PullPushSource(config).collect(scraped_ids)
+
+
+def _get_json_with_retries(
+    session: Session,
+    url: str,
+    *,
+    params: Dict,
+    timeout: float,
+    max_attempts: int,
+    backoff_seconds: float,
+    label: str,
+) -> Dict:
+    attempts = max(1, max_attempts)
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            response = session.get(url, params=params, timeout=timeout)
+            response.raise_for_status()
+            return response.json()
+        except RequestException as e:
+            last_error = e
+            if attempt >= attempts:
+                break
+            wait = max(0.0, backoff_seconds) * attempt
+            print(f"⚠️ {label} failed attempt {attempt}/{attempts}; retrying in {wait:.1f}s: {e}")
+            if wait > 0:
+                time.sleep(wait)
+    raise RuntimeError(f"{label} failed after {attempts} attempts: {last_error}") from last_error
 
 
 def _valid_story(data: Dict, post_id: str, title: str, content: str, config: RedditScrapeConfig) -> bool:
