@@ -1,5 +1,5 @@
 from generator.text.failure_policy import FailureAction, classify_failure
-from generator.text.generate_scripts_from_filtered import _generation_summary
+from generator.text.generate_scripts_from_filtered import _generation_summary, _operator_recommendation
 
 
 def test_classifies_mechanical_failures_as_repair_only():
@@ -41,3 +41,65 @@ def test_generation_summary_counts_only_explicit_preflight_stage():
 
     assert summary["sources_skipped_preflight"] == 1
     assert summary["final_rejected"] == 2
+    assert "operator_recommendation" in summary
+
+
+def test_operator_recommendation_distinguishes_source_and_gate_failures():
+    assert _operator_recommendation(
+        {
+            "final_accepted": 0,
+            "sources_considered": 0,
+            "source_scorecard_calls": 8,
+        }
+    ).startswith("CHECK_SOURCE_FILTER")
+    assert _operator_recommendation(
+        {
+            "final_accepted": 0,
+            "sources_considered": 3,
+            "source_scorecard_calls": 8,
+        }
+    ).startswith("CHECK_GATE")
+
+
+def test_operator_recommendation_flags_cost_and_schema_issues():
+    assert _operator_recommendation(
+        {
+            "final_accepted": 2,
+            "json_fallback_attempts": 1,
+            "structured_attempts": 4,
+            "structured_failures": 0,
+        }
+    ).startswith("CHECK_COST")
+    assert _operator_recommendation(
+        {
+            "final_accepted": 2,
+            "json_fallback_attempts": 0,
+            "structured_attempts": 4,
+            "structured_failures": 3,
+        }
+    ).startswith("CHECK_PROMPT_SCHEMA")
+
+
+def test_operator_recommendation_flags_critic_naturalness_and_ok():
+    assert _operator_recommendation(
+        {
+            "final_accepted": 2,
+            "json_fallback_attempts": 0,
+            "structured_attempts": 4,
+            "structured_failures": 0,
+            "critic_failed": 3,
+            "critic_passed": 1,
+            "critic_skipped": 1,
+        }
+    ).startswith("CHECK_SCRIPT_NATURALNESS")
+    assert _operator_recommendation(
+        {
+            "final_accepted": 3,
+            "json_fallback_attempts": 0,
+            "structured_attempts": 4,
+            "structured_failures": 0,
+            "critic_failed": 0,
+            "critic_passed": 1,
+            "critic_skipped": 2,
+        }
+    ).startswith("OK")

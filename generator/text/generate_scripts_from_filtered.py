@@ -1424,6 +1424,11 @@ def generate_scripts_from_filtered():
                     )
                     print(f"🚫 최종 실패 (post {idx}): {msg}")
 
+    dry_run = _truthy_env("SCRIPT_DRY_RUN_SUMMARY_ONLY")
+    if dry_run:
+        for item in metadata_list:
+            item["dry_run"] = True
+
     with open(FINAL_METADATA_FILE, "w", encoding="utf-8") as f:
         json.dump(metadata_list, f, ensure_ascii=False, indent=2)
 
@@ -1433,10 +1438,12 @@ def generate_scripts_from_filtered():
         print(f"⚠️ 실패한 포스트 {len(failed_items)}개 → {FAILED_POSTS_FILE}에 저장됨")
 
     summary = _generation_summary(posts, metadata_list, failed_items)
+    if dry_run:
+        summary["dry_run"] = True
     summary_path = FINAL_METADATA_FILE.with_name("generation_summary.json")
     with open(summary_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
-    if _truthy_env("SCRIPT_DRY_RUN_SUMMARY_ONLY"):
+    if dry_run:
         _print_dry_run_summary(summary)
     print(f"🧾 생성 요약 저장 완료 → {summary_path}")
     print(f"📦 최종 메타데이터 저장 완료 → {FINAL_METADATA_FILE}")
@@ -1445,16 +1452,22 @@ def generate_scripts_from_filtered():
 def _print_dry_run_summary(summary: dict) -> None:
     top_failures = ",".join(str(item.get("code") or "") for item in summary.get("top_failure_codes", [])[:5])
     print(
-        "DRY_RUN_SUMMARY "
-        f"raw={summary.get('sources_considered', 0)} "
-        f"scorecard_calls={summary.get('source_scorecard_calls', 0)} "
-        f"draft_calls={summary.get('llm_drafts', 0)} "
-        f"json_fallback={summary.get('json_fallback_attempts', 0)} "
-        f"critic={summary.get('critic_calls_attempted', 0)} "
-        f"accepted={summary.get('final_accepted', 0)} "
-        f"rejected={summary.get('final_rejected', 0)} "
-        f"top_failures=[{top_failures}] "
-        f"estimated_token_budget={summary.get('estimated_output_token_budget_total', 0)}"
+        "\n".join(
+            [
+                "DRY RUN SUMMARY",
+                f"raw={summary.get('sources_considered', 0)}",
+                f"scorecard_calls={summary.get('source_scorecard_calls', 0)}",
+                f"draft_calls={summary.get('llm_drafts', 0)}",
+                f"json_fallback={summary.get('json_fallback_attempts', 0)}",
+                f"critic_calls={summary.get('critic_calls_attempted', 0)}",
+                f"critic_skipped={summary.get('critic_skipped', 0)}",
+                f"repair_successes={summary.get('repair_successes', 0)}",
+                f"accepted={summary.get('final_accepted', 0)}",
+                f"rejected={summary.get('final_rejected', 0)}",
+                f"estimated_output_token_budget={summary.get('estimated_output_token_budget_total', 0)}",
+                f"top_failures=[{top_failures}]",
+            ]
+        )
     )
 
 
@@ -1470,7 +1483,7 @@ def _generation_summary(posts: list[dict], accepted: list[dict], failed: list[di
     source_scorecard_skipped = int(source_filter_summary.get("source_scorecard_skipped_by_prerank") or 0)
     critic_budget = _int_env("SCRIPT_CRITIC_MAX_OUTPUT_TOKENS", 1400)
     failure_codes = _failure_code_counts([str(item.get("error") or "") for item in failed])
-    return {
+    summary = {
         "sources_considered": len(posts),
         "sources_skipped_preflight": sum(1 for item in failed if item.get("stage") == "source_preflight"),
         "llm_drafts": sum(int(item.get("llm_draft_count") or item.get("generation_attempt_count") or 0) for item in accepted)
@@ -1507,6 +1520,32 @@ def _generation_summary(posts: list[dict], accepted: list[dict], failed: list[di
         "final_rejected": len(failed),
         "top_failure_codes": failure_codes[:10],
     }
+    summary["operator_recommendation"] = _operator_recommendation(summary)
+    return summary
+
+
+def _operator_recommendation(summary: dict) -> str:
+    final_accepted = int(summary.get("final_accepted") or 0)
+    sources_considered = int(summary.get("sources_considered") or 0)
+    source_scorecard_calls = int(summary.get("source_scorecard_calls") or 0)
+    json_fallback_attempts = int(summary.get("json_fallback_attempts") or 0)
+    structured_attempts = int(summary.get("structured_attempts") or 0)
+    structured_failures = int(summary.get("structured_failures") or 0)
+    critic_failed = int(summary.get("critic_failed") or 0)
+    critic_passed = int(summary.get("critic_passed") or 0)
+    critic_skipped = int(summary.get("critic_skipped") or 0)
+
+    if final_accepted == 0 and source_scorecard_calls > 0:
+        if sources_considered == 0:
+            return "CHECK_SOURCE_FILTER: 0 accepted after source scorecard calls."
+        return "CHECK_GATE: source filter accepted items but script gate rejected all."
+    if json_fallback_attempts > 0:
+        return "CHECK_COST: json_fallback_attempts are non-zero; review structured output reliability."
+    if structured_attempts > 0 and structured_failures > structured_attempts / 2:
+        return "CHECK_PROMPT_SCHEMA: structured_failures are high relative to attempts."
+    if critic_failed > critic_passed + critic_skipped:
+        return "CHECK_SCRIPT_NATURALNESS: critic failures exceed passed and skipped scripts."
+    return f"OK: accepted {final_accepted} items with low fallback usage."
 
 
 def _sum_generation_telemetry(items: list[dict]) -> dict[str, int]:

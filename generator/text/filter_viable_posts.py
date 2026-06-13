@@ -584,6 +584,29 @@ def _accepted_source_archetypes(posts: list[dict]) -> dict[str, int]:
     return dict(sorted(counts.items(), key=lambda item: item[1], reverse=True))
 
 
+def _accepted_examples(posts: list[dict]) -> list[dict]:
+    examples: list[dict] = []
+    sorted_posts = sorted(
+        posts,
+        key=lambda post: float(post.get("source_priority_score") or post.get("source_acceptance_score") or 0),
+        reverse=True,
+    )
+    for post in sorted_posts[:5]:
+        scorecard = post.get("source_scorecard") if isinstance(post.get("source_scorecard"), dict) else {}
+        examples.append(
+            {
+                "id": post.get("id", ""),
+                "title": str(post.get("title") or "")[:120],
+                "local_source_priority": float(post.get("local_source_priority") or 0),
+                "source_acceptance_score": float(post.get("source_acceptance_score") or 0),
+                "source_priority_score": float(post.get("source_priority_score") or 0),
+                "archetype": str(post.get("source_archetype") or scorecard.get("archetype") or "unknown")[:80],
+                "reason": str(scorecard.get("reason") or post.get("source_rejection_reason") or "")[:180],
+            }
+        )
+    return examples
+
+
 # -----------------------------
 # Main
 # -----------------------------
@@ -776,6 +799,7 @@ def filter_viable_posts():
         "prerank_skipped_examples": skipped_examples,
         "source_rejection_reason_counts": _source_rejection_reason_counts(raw_posts),
         "accepted_source_archetypes": _accepted_source_archetypes(selected_posts),
+        "accepted_examples": _accepted_examples(selected_posts),
         "accepted": len(selected_posts),
     }
     with open(_source_filter_summary_path(), "w", encoding="utf-8") as f:
