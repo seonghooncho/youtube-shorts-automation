@@ -148,7 +148,7 @@ def call_gpt_generate_script(title, content, post=None, regenerate_reason=None):
         "- The script should never feel stretched, repetitive, or abruptly shortened; keep only the setup, escalation, decision, and question.",
         "- Keep the final line short. Do not pack new facts and the viewer question into one overloaded sentence.",
         "- Add `first_frame_text` as max 38 characters of all-caps hook text that shows the core conflict immediately. Do not use generic text like Story, Drama, AITA, or Did I Overreact.",
-        "- Add `opening_visual_query` as the first background-video search query. It must match the first spoken line, not generic mood footage.",
+        "- Add `opening_visual_query` as the first background-video search query. It must match the first spoken line and `first_frame_text` with concrete overlapping words, not generic mood footage.",
         "- Add `visual_beat_queries` as ordered objects with `beat` and `query` keys. The first beat should be hook; receipt/reveal beats should prefer camera, phone, receipt, bill, app, screenshot, timestamp, or group chat when the source supports them.",
         "- Add a `visual_keywords` array with 5 to 8 short English stock-video search phrases that match the story's setting and emotion.",
         "- Visual keywords should be concrete and searchable, such as 'phone texting', 'couple argument', 'apartment hallway', 'office conversation', 'security camera', or 'angry neighbor'. Avoid generic terms like 'nature', 'background', or 'landscape' unless the story truly needs them.",

@@ -17,6 +17,7 @@ if not hasattr(Image, "ANTIALIAS"):
 
 from shared.utils.config import (
     AUDIO_DIR,
+    FINAL_METADATA_FILE,
     SUBTITLES_DIR,
     FINAL_DIR,
     get_font_file,
@@ -49,6 +50,7 @@ DEFAULT_CAPTION_FADE_MS = 0
 DEFAULT_CAPTION_CHUNK_FONT_SIZE = 92
 DEFAULT_CAPTION_CHUNK_MAX_CHARS = 42
 DEFAULT_CAPTION_CHUNK_LINE_CHARS = 22
+DEFAULT_FIRST_FRAME_TEXT_FONT_SIZE = 96
 ASS_WHITE_STYLE = "&H00FFFFFF"
 ASS_YELLOW_STYLE = "&H0000FFFF"
 ASS_BLACK_STYLE = "&H00000000"
@@ -70,6 +72,19 @@ def get_tts_metadata(filename: str) -> dict:
     with open(TTS_RESULT_JSON, "r", encoding="utf-8") as f:
         data = json.load(f)
     return next((entry for entry in data if entry["filename"] == filename), None)
+
+
+def get_final_metadata(filename: str) -> dict:
+    if not FINAL_METADATA_FILE.exists():
+        return {}
+    try:
+        with open(FINAL_METADATA_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return {}
+    if not isinstance(data, list):
+        return {}
+    return next((entry for entry in data if str(entry.get("id")) == str(filename)), {})
 
 
 def adjust_subtitle_timings(srt_path: Path, speed: float):
@@ -245,7 +260,11 @@ def render_video_with_ffmpeg(filename: str):
         raise ValueError(f"'{filename}'에 final_duration 정보가 없습니다.")
 
     # 배경 영상
-    margin = 1.0
+    render_metadata = get_final_metadata(filename)
+    first_frame_text = str(render_metadata.get("first_frame_text") or metadata.get("first_frame_text") or "").strip()
+    margin = _opening_silence_seconds()
+    if margin > 0.5 and _env_bool("FIRST_FRAME_TEXT_ENABLED", default=True) and not first_frame_text:
+        raise ValueError("first_frame_text is required when OPENING_SILENCE_SECONDS > 0.5")
     background_path = get_video_source(f"{filename}.mp4")
     if not background_path.exists():
         raise FileNotFoundError(f"배경 영상이 없습니다: {background_path}")
@@ -255,7 +274,21 @@ def render_video_with_ffmpeg(filename: str):
         raise FileNotFoundError(f"SRT가 없습니다: {subtitle_path}")
     adjusted_subs = adjust_subtitle_timings(subtitle_path, speed)
     FINAL_DIR.mkdir(parents=True, exist_ok=True)
-    _write_centered_caption_ass(adjusted_subs, temp_caption_ass, offset_seconds=margin)
+    caption_debug = _write_centered_caption_ass(
+        adjusted_subs,
+        temp_caption_ass,
+        offset_seconds=margin,
+        first_frame_text=first_frame_text,
+    )
+    _update_render_metadata(
+        filename,
+        {
+            "render_opening_silence_seconds": margin,
+            **caption_debug,
+        },
+    )
+    if caption_debug.get("first_frame_text_rendered"):
+        print(f"🧲 first_frame_text rendered: {first_frame_text}")
 
     print(f"🎬 FFmpeg: subtitles + audio merge → {output_path}")
     font_path = ensure_anton_font()
@@ -276,7 +309,7 @@ def render_video_with_ffmpeg(filename: str):
         "-reinit_filter",
         "0",
         "-i", str(background_path),
-        "-f", "lavfi", "-t", "1", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+        "-f", "lavfi", "-t", f"{margin:.3f}", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
         "-i", str(audio_path),
         "-f", "lavfi", "-t", "1", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
         "-filter_complex", filter_complex,
@@ -349,7 +382,12 @@ def _write_adjusted_srt(adjusted_subs, path: Path, offset_seconds: float) -> Non
             f.write(f"{text}\n\n")
 
 
-def _write_centered_caption_ass(adjusted_subs, path: Path, offset_seconds: float) -> None:
+def _write_centered_caption_ass(
+    adjusted_subs,
+    path: Path,
+    offset_seconds: float,
+    first_frame_text: str = "",
+) -> dict:
     """Write centered Shorts-style captions as ASS for deterministic FFmpeg rendering."""
     render_mode = os.getenv("CAPTION_RENDER_MODE", "chunk").strip().lower()
     if render_mode not in {"chunk", "word_pop"}:
@@ -370,6 +408,7 @@ def _write_centered_caption_ass(adjusted_subs, path: Path, offset_seconds: float
         max_chars = _env_int("CAPTION_CHUNK_MAX_CHARS", DEFAULT_CAPTION_CHUNK_MAX_CHARS, minimum=8)
         _validate_chunk_caption_layout(font_size, outline, center_x, center_y, max_chars)
         events = _build_chunk_caption_events(adjusted_subs)
+    opening_event = _build_first_frame_text_event(first_frame_text, offset_seconds)
 
     with open(path, "w", encoding="utf-8") as f:
         f.write("[Script Info]\n")
@@ -391,8 +430,25 @@ def _write_centered_caption_ass(adjusted_subs, path: Path, offset_seconds: float
             f"{ASS_SHADOW_STYLE},-1,0,0,0,100,100,0,0,1,{outline},{shadow},"
             "5,70,70,0,1\n\n"
         )
+        first_frame_font_size = _env_int("FIRST_FRAME_TEXT_FONT_SIZE", DEFAULT_FIRST_FRAME_TEXT_FONT_SIZE, minimum=24)
+        first_frame_outline = _env_int("FIRST_FRAME_TEXT_OUTLINE", max(outline, 7), minimum=0)
+        f.write(
+            "Style: Opening,Anton,"
+            f"{first_frame_font_size},{ASS_WHITE_STYLE},{ASS_YELLOW_STYLE},{ASS_BLACK_STYLE},"
+            f"{ASS_SHADOW_STYLE},-1,0,0,0,100,100,0,0,1,{first_frame_outline},{shadow},"
+            "5,70,70,0,1\n\n"
+        )
         f.write("[Events]\n")
         f.write("Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n")
+        if opening_event:
+            start, end, text = opening_event
+            opening_y = _env_int("FIRST_FRAME_TEXT_CENTER_Y", max(360, center_y - 90), minimum=0)
+            prefix = f"{{\\an5\\pos({center_x},{opening_y})\\fad(0,80)}}"
+            f.write(
+                "Dialogue: 1,"
+                f"{_ass_time(start)},{_ass_time(end)},"
+                f"Opening,,0,0,0,,{prefix}{text}\n"
+            )
         for event in events:
             start, end, payload = event
             event_start = start + offset_seconds
@@ -404,6 +460,13 @@ def _write_centered_caption_ass(adjusted_subs, path: Path, offset_seconds: float
                 f"{_ass_time(event_start)},{_ass_time(event_end)},"
                 f"Caption,,0,0,0,,{prefix}{text}\n"
             )
+    first_caption = _first_caption_debug(events, render_mode, offset_seconds)
+    return {
+        "first_frame_text_rendered": bool(opening_event),
+        "caption_render_mode": render_mode,
+        "caption_event_count": len(events),
+        **first_caption,
+    }
 
 
 def _build_centered_caption_events(
@@ -446,6 +509,19 @@ def _build_chunk_caption_events(adjusted_subs):
         if cleaned:
             events.append((float(start), float(end), cleaned))
     return events
+
+
+def _build_first_frame_text_event(first_frame_text: str, opening_silence_seconds: float):
+    if not _env_bool("FIRST_FRAME_TEXT_ENABLED", default=True):
+        return None
+    text = _normalize_caption_word(first_frame_text)
+    if not text:
+        return None
+    duration = max(
+        _env_float("FIRST_FRAME_TEXT_DURATION", 0.9, minimum=0.1),
+        float(opening_silence_seconds or 0.0),
+    )
+    return (0.0, duration, _format_first_frame_text(text))
 
 
 def _validate_caption_layout(
@@ -553,6 +629,18 @@ def _format_chunk_caption_text(text: str) -> str:
     return r"\N".join(rendered_lines)
 
 
+def _format_first_frame_text(text: str) -> str:
+    words = _normalize_caption_word(text).upper().split()
+    if not words:
+        return ""
+    lines = _wrap_words_to_lines(
+        words,
+        _env_int("FIRST_FRAME_TEXT_LINE_CHARS", 18, minimum=8),
+        max_lines=2,
+    )
+    return r"\N".join(" ".join(_escape_ass_text(word) for word in line) for line in lines)
+
+
 def _wrap_caption_chunk_words(words: list[str]) -> list[list[str]]:
     max_line_chars = _env_int("CAPTION_CHUNK_LINE_CHARS", DEFAULT_CAPTION_CHUNK_LINE_CHARS, minimum=8)
     if len(" ".join(words)) <= max_line_chars:
@@ -568,6 +656,36 @@ def _wrap_caption_chunk_words(words: list[str]) -> list[list[str]]:
         first_line.append(remaining.pop(0))
     second_line = remaining
     return [first_line, second_line] if second_line else [first_line]
+
+
+def _wrap_words_to_lines(words: list[str], max_line_chars: int, max_lines: int) -> list[list[str]]:
+    lines: list[list[str]] = []
+    current: list[str] = []
+    for word in words:
+        candidate = current + [word]
+        if current and len(" ".join(candidate)) > max_line_chars and len(lines) < max_lines - 1:
+            lines.append(current)
+            current = [word]
+        else:
+            current = candidate
+    if current:
+        lines.append(current)
+    if len(lines) > max_lines:
+        merged = lines[: max_lines - 1]
+        merged.append([word for line in lines[max_lines - 1 :] for word in line])
+        return merged
+    return lines
+
+
+def _first_caption_debug(events, render_mode: str, offset_seconds: float) -> dict:
+    if not events:
+        return {"first_caption_start": None, "first_caption_text": ""}
+    start, _end, payload = events[0]
+    text = " ".join(payload) if render_mode == "word_pop" and isinstance(payload, list) else str(payload)
+    return {
+        "first_caption_start": float(start) + float(offset_seconds),
+        "first_caption_text": text,
+    }
 
 
 def _normalize_caption_word(text: str) -> str:
@@ -615,6 +733,10 @@ def _env_float(name: str, default: float, *, minimum: float | None = None) -> fl
     return value
 
 
+def _opening_silence_seconds() -> float:
+    return _env_float("OPENING_SILENCE_SECONDS", 0.25, minimum=0.0)
+
+
 def _env_bool(name: str, *, default: bool) -> bool:
     raw = os.getenv(name)
     if raw is None:
@@ -628,6 +750,28 @@ def _srt_time(seconds: float) -> str:
     minutes, rem = divmod(rem, 60_000)
     secs, millis = divmod(rem, 1000)
     return f"{hours:02}:{minutes:02}:{secs:02},{millis:03}"
+
+
+def _update_render_metadata(content_id: str, debug: dict) -> None:
+    if not FINAL_METADATA_FILE.exists():
+        return
+    try:
+        with open(FINAL_METADATA_FILE, "r", encoding="utf-8") as f:
+            items = json.load(f)
+        if not isinstance(items, list):
+            return
+        changed = False
+        for item in items:
+            if str(item.get("id")) != str(content_id):
+                continue
+            item.update(debug)
+            changed = True
+            break
+        if changed:
+            with open(FINAL_METADATA_FILE, "w", encoding="utf-8") as f:
+                json.dump(items, f, ensure_ascii=False, indent=2)
+    except Exception as exc:
+        print(f"⚠️ render metadata update failed for {content_id}: {exc}")
 
 
 def _escape_filter_path(path: Path) -> str:

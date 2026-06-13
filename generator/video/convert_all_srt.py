@@ -2,6 +2,7 @@ import os
 import json
 import re
 from pathlib import Path
+from generator.text.content_gate import find_caption_chunk_span
 from shared.utils.config import FINAL_METADATA_FILE, MARKS_DIR, SUBTITLES_DIR
 
 def ms_to_srt_time(ms):
@@ -19,6 +20,16 @@ def convert_single_mark_file(json_path: Path, srt_path: Path, metadata: dict | N
     if metadata and metadata.get("caption_chunks"):
         try:
             captions = align_caption_chunks_to_marks(metadata.get("caption_chunks") or [], entries)
+            timing_warnings = _caption_timing_warnings(captions)
+            metadata["caption_timing_warnings"] = timing_warnings
+            metadata["caption_timing_status"] = "warning" if timing_warnings else "ok"
+            if timing_warnings and _is_production_env() and not _allow_caption_timing_warning():
+                metadata["caption_alignment_status"] = "failed"
+                metadata["caption_timing_status"] = "failed"
+                metadata["caption_chunk_count"] = 0
+                srt_path.unlink(missing_ok=True)
+                print(f"🚫 Caption timing failed in production for {json_path.name}: {timing_warnings}")
+                return "failed"
             _write_srt_entries(captions, srt_path)
             metadata["caption_alignment_status"] = "aligned"
             metadata["caption_chunk_count"] = len(captions)
@@ -94,32 +105,23 @@ def _write_word_grouping_srt(entries: list[dict], srt_path: Path) -> None:
 
 def align_caption_chunks_to_marks(chunks: list[str], marks: list[dict]) -> list[tuple[int, int, str]]:
     word_marks = [mark for mark in marks if mark.get("type") in (None, "word") and str(mark.get("value") or "").strip()]
-    normalized_marks = [_normalize_words(str(mark.get("value") or "")) for mark in word_marks]
+    normalized_marks = [
+        mark_tokens[0]
+        for mark in word_marks
+        if (mark_tokens := _normalize_words(str(mark.get("value") or "")))
+    ]
     captions: list[tuple[int, int, str]] = []
     cursor = 0
+    max_gap = _caption_chunk_max_token_gap()
     for chunk in chunks:
         clean_chunk = re.sub(r"\s+", " ", str(chunk or "")).strip()
         tokens = _normalize_words(clean_chunk)
         if not tokens:
             continue
-        start_index = None
-        end_index = None
-        for token in tokens:
-            found = None
-            while cursor < len(normalized_marks):
-                mark_tokens = normalized_marks[cursor]
-                if token in mark_tokens:
-                    found = cursor
-                    break
-                cursor += 1
-            if found is None:
-                raise ValueError(f"token_not_found:{token}")
-            if start_index is None:
-                start_index = found
-            end_index = found
-            cursor = found + 1
-        if start_index is None or end_index is None:
-            continue
+        start_index, end_index, reason = find_caption_chunk_span(tokens, normalized_marks, cursor, max_gap)
+        if start_index < 0:
+            raise ValueError(reason)
+        cursor = end_index + 1
         start = int(word_marks[start_index].get("time") or 0)
         if end_index + 1 < len(word_marks):
             end = int(word_marks[end_index + 1].get("time") or start + 500)
@@ -133,6 +135,21 @@ def align_caption_chunks_to_marks(chunks: list[str], marks: list[dict]) -> list[
 
 def _normalize_words(text: str) -> list[str]:
     return [match.group(0).lower().strip("'") for match in re.finditer(r"[A-Za-z0-9']+", str(text or ""))]
+
+
+def _caption_timing_warnings(captions: list[tuple[int, int, str]]) -> list[str]:
+    warnings: list[str] = []
+    min_ms = int(_float_env("CAPTION_MIN_DURATION_SECONDS", 0.35) * 1000)
+    max_ms = int(_float_env("CAPTION_MAX_DURATION_SECONDS", 2.2) * 1000)
+    final_max_ms = int(_float_env("CAPTION_FINAL_QUESTION_MAX_DURATION_SECONDS", 3.0) * 1000)
+    for index, (start, end, text) in enumerate(captions, start=1):
+        duration = int(end) - int(start)
+        max_allowed = final_max_ms if str(text or "").rstrip().endswith("?") else max_ms
+        if duration < min_ms:
+            warnings.append(f"caption_{index}_too_short:{duration / 1000:.2f}s")
+        if duration > max_allowed:
+            warnings.append(f"caption_{index}_too_long:{duration / 1000:.2f}s")
+    return warnings
 
 
 def _write_srt_entries(captions: list[tuple[int, int, str]], srt_path: Path) -> None:
@@ -220,6 +237,24 @@ def _is_production_env() -> bool:
 
 def _allow_caption_alignment_fallback() -> bool:
     return os.getenv("ALLOW_CAPTION_ALIGNMENT_FALLBACK", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _allow_caption_timing_warning() -> bool:
+    return os.getenv("ALLOW_CAPTION_TIMING_WARNING", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _caption_chunk_max_token_gap() -> int:
+    try:
+        return max(0, int(os.getenv("CAPTION_CHUNK_MAX_TOKEN_GAP", "2")))
+    except ValueError:
+        return 2
+
+
+def _float_env(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except ValueError:
+        return default
 
 if __name__ == "__main__":
     convert_all_marks_to_srt()

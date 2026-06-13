@@ -220,3 +220,39 @@ def test_upload_scheduler_skips_missing_video_and_uploads_next_due(monkeypatch, 
     assert [item["id"] for item in storage[upload_scheduler.PUBLISH_METADATA_KEY]] == ["good"]
     assert storage[upload_scheduler.PUBLISH_METADATA_KEY][0]["upload_status"] == "UPLOADED"
     assert storage[upload_scheduler.REJECTED_METADATA_KEY][0]["upload_status"] == "VIDEO_MISSING"
+
+
+def test_legacy_video_fallback_blocked_in_production(monkeypatch, tmp_path):
+    attempted = []
+
+    def fake_download(key, path):
+        attempted.append(key)
+        return key == "shorts/videos/story.mp4"
+
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.delenv("ALLOW_LEGACY_VIDEO_FALLBACK", raising=False)
+    monkeypatch.setattr(upload_scheduler, "download_from_s3", fake_download)
+
+    ok = upload_scheduler._download_video({"id": "story"}, tmp_path / "story.mp4", "videos/final/story.mp4")
+
+    assert ok is False
+    assert attempted == ["videos/final/story.mp4"]
+
+
+def test_legacy_video_fallback_allowed_and_marked(monkeypatch, tmp_path):
+    messages = []
+
+    def fake_download(key, path):
+        return key == "shorts/videos/story.mp4"
+
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("ALLOW_LEGACY_VIDEO_FALLBACK", "1")
+    monkeypatch.setattr(upload_scheduler, "download_from_s3", fake_download)
+    monkeypatch.setattr(upload_scheduler, "send_slack_message", messages.append)
+    item = {"id": "story"}
+
+    ok = upload_scheduler._download_video(item, tmp_path / "story.mp4", "videos/final/story.mp4")
+
+    assert ok is True
+    assert item["legacy_video_key_used"] == "shorts/videos/story.mp4"
+    assert any("legacy video fallback" in message for message in messages)

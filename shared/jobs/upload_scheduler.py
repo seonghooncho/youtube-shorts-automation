@@ -193,9 +193,12 @@ def _mark_upload_skip(item: dict, status: str) -> None:
 def _download_video(item: dict, local_path, video_key: str) -> bool:
     if download_from_s3(video_key, str(local_path)):
         return True
+    if _is_production_env() and not _allow_legacy_video_fallback():
+        return False
     legacy_video_key = f"{LEGACY_VIDEO_PREFIX}/{item['id']}.mp4"
     if legacy_video_key != video_key and download_from_s3(legacy_video_key, str(local_path)):
         item["legacy_video_key_used"] = legacy_video_key
+        send_slack_message(f"⚠️ legacy video fallback used for upload: {legacy_video_key}")
         return True
     return False
 
@@ -237,3 +240,7 @@ def _mark_repo_status(item: dict, status: str, attrs: dict) -> None:
         ContentRepository().mark_status(str(item.get("id") or ""), status, attrs)
     except Exception as repo_error:
         print(f"⚠️ upload status update skipped: {repo_error}")
+
+
+def _allow_legacy_video_fallback() -> bool:
+    return os.getenv("ALLOW_LEGACY_VIDEO_FALLBACK", "").strip().lower() in {"1", "true", "yes", "on"}

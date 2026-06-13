@@ -3,6 +3,7 @@ from generator.text.content_gate import (
     caption_quality_reason,
     evaluate_content_gate,
     normalize_narration_fields,
+    opening_visual_query_relevance_reason,
 )
 
 
@@ -189,6 +190,19 @@ def test_caption_chunks_must_align_with_tts_text():
     assert any(error.startswith("caption_chunks_not_in_tts_text") for error in result["hard_errors"])
 
 
+def test_caption_chunks_must_be_near_contiguous(monkeypatch):
+    monkeypatch.delenv("CAPTION_CHUNK_MAX_TOKEN_GAP", raising=False)
+    exact = _safe_item(caption_chunks=["He parked in my driveway", "Was I wrong to post the clip?"])
+    loose = _safe_item(caption_chunks=["He driveway", "Was I wrong to post the clip?"])
+    punctuation = _safe_item(caption_chunks=["He parked in my driveway.", "Was I wrong to post the clip?"])
+
+    assert caption_chunks_align_with_tts_text(exact)[0] is True
+    assert caption_chunks_align_with_tts_text(punctuation)[0] is True
+    ok, reason = caption_chunks_align_with_tts_text(loose)
+    assert ok is False
+    assert "caption_chunk_not_contiguous" in reason
+
+
 def test_caption_quality_uses_caption_specific_rules():
     assert caption_quality_reason("His car sat there for six hours", is_first=True) == ""
     assert caption_quality_reason("The door camera showed his car", is_first=True) == ""
@@ -199,8 +213,34 @@ def test_caption_quality_uses_caption_specific_rules():
 def test_opening_visual_and_first_frame_are_required():
     generic_query = evaluate_content_gate(_safe_item(opening_visual_query="story"))
     long_frame = evaluate_content_gate(_safe_item(first_frame_text="THIS FIRST FRAME TEXT IS FAR TOO LONG FOR SHORTS"))
-    strong_frame = evaluate_content_gate(_safe_item(first_frame_text="12 DINNERS ON MY CARD", opening_visual_query="restaurant bill on credit card"))
+    card_lines = [
+        "My aunt put twelve dinners on my card before I even sat down.",
+        "The receipt showed every extra entree under my name.",
+        "She told the group chat I was being cheap for asking her to fix it.",
+        "I posted the receipt and asked her to pay me back before dessert.",
+        "Was I wrong to dispute the dinner bill?",
+    ]
+    strong_frame = evaluate_content_gate(
+        _safe_item(
+            script=card_lines,
+            voiceover_lines=card_lines,
+            tts_text=" ".join(card_lines),
+            caption_chunks=["My aunt put twelve dinners on my card", "The receipt showed every extra entree", "Was I wrong to dispute the dinner bill?"],
+            public_title="My Aunt Put Twelve Dinners On My Card",
+            title="My Aunt Put Twelve Dinners On My Card #shorts #story",
+            first_frame_text="12 DINNERS ON MY CARD",
+            opening_visual_query="restaurant bill credit card",
+        )
+    )
 
     assert "generic_opening_visual_query" in generic_query["hard_errors"]
     assert "first_frame_text_too_long" in long_frame["hard_errors"]
     assert strong_frame["ok"] is True
+
+
+def test_opening_visual_query_must_match_hook():
+    relevant = _safe_item(opening_visual_query="parked car driveway")
+    mismatched = _safe_item(opening_visual_query="phone texting")
+
+    assert opening_visual_query_relevance_reason(relevant) == ""
+    assert "opening_visual_query_mismatch" in evaluate_content_gate(mismatched)["hard_errors"]
