@@ -1,6 +1,7 @@
 import json
 
 from generator.text.filter_viable_posts import (
+    SourceScorecard,
     _ask_source_scorecard,
     _gate_fit_passes,
     _ask_yes_no,
@@ -10,6 +11,7 @@ from generator.text.filter_viable_posts import (
     _local_source_scorecard,
     _text_verbosity,
     filter_viable_posts,
+    local_source_priority,
     source_acceptance_score,
 )
 
@@ -143,6 +145,122 @@ def test_source_acceptance_score_uses_gate_aware_fields():
 
     assert source_acceptance_score(strong) > source_acceptance_score(weak)
     assert source_acceptance_score(weak) < 4.0
+
+
+def _strong_scorecard(archetype: str = "roommate_money") -> SourceScorecard:
+    return SourceScorecard(
+        decision="YES",
+        relatability=5,
+        conflict_clarity=5,
+        stakes=5,
+        debate_potential=5,
+        safe_adaptability=5,
+        visualizability=5,
+        gate_fit_score=5,
+        hook_in_one_sentence=5,
+        receipt_strength=5,
+        visual_matchability=5,
+        length_fit_score=5,
+        metadata_repairability=5,
+        retention_risk="low",
+        archetype=archetype,
+        reason="Strong local conflict with receipts.",
+    )
+
+
+def _raw_post(idx: int, *, strong: bool = True) -> dict:
+    if strong:
+        sentence = (
+            f"My roommate charged dinner {idx} to my card without asking, and the receipt, "
+            "group chat messages, screenshot, and timestamp showed exactly what happened."
+        )
+    else:
+        sentence = (
+            f"I had a long disagreement {idx} with someone at home, and we talked about it "
+            "for a while before deciding nobody was sure what to do."
+        )
+    content = " ".join([sentence] * 12) + " Would you have refused to pay?"
+    return {
+        "id": f"post-{idx}",
+        "title": f"Post {idx}",
+        "content": content,
+        "content_char_count": len(content),
+        "content_word_count": len(content.split()),
+        "source_provider": "reddit",
+    }
+
+
+def test_filter_prerank_caps_llm_source_scorecard_calls(monkeypatch, tmp_path):
+    raw_path = tmp_path / "raw_posts.json"
+    viable_path = tmp_path / "viable_posts.json"
+    raw_path.write_text(json.dumps([_raw_post(i, strong=i < 10) for i in range(14)]), encoding="utf-8")
+    calls = {"scorecard": 0}
+
+    def fake_scorecard(*_args, **_kwargs):
+        calls["scorecard"] += 1
+        return _strong_scorecard()
+
+    monkeypatch.setenv("SOURCE_LLM_EVAL_LIMIT", "8")
+    monkeypatch.setenv("SOURCE_LOCAL_PRERANK_ENABLED", "1")
+    monkeypatch.setattr("generator.text.filter_viable_posts.RAW_POSTS_FILE", raw_path)
+    monkeypatch.setattr("generator.text.filter_viable_posts.VIABLE_POSTS_FILE", viable_path)
+    monkeypatch.setattr("generator.text.filter_viable_posts._get_client", lambda: object())
+    monkeypatch.setattr("generator.text.filter_viable_posts._ask_source_scorecard", fake_scorecard)
+
+    filter_viable_posts()
+
+    summary = json.loads((tmp_path / "source_filter_summary.json").read_text(encoding="utf-8"))
+    assert calls["scorecard"] == 8
+    assert summary["source_scorecard_calls"] == 8
+    assert summary["source_scorecard_skipped_by_prerank"] == 6
+
+
+def test_local_priority_sorts_strong_sources_first(monkeypatch, tmp_path):
+    raw_path = tmp_path / "raw_posts.json"
+    viable_path = tmp_path / "viable_posts.json"
+    posts = [_raw_post(1, strong=False), _raw_post(2, strong=True), _raw_post(3, strong=True)]
+    raw_path.write_text(json.dumps(posts), encoding="utf-8")
+    evaluated_titles = []
+
+    def fake_scorecard(_client, prompt, _model):
+        marker = next(line for line in prompt.splitlines() if line.strip().startswith("Title:"))
+        evaluated_titles.append(marker)
+        return _strong_scorecard()
+
+    monkeypatch.setenv("SOURCE_LLM_EVAL_LIMIT", "2")
+    monkeypatch.setenv("SOURCE_LOCAL_PRERANK_ENABLED", "1")
+    monkeypatch.setattr("generator.text.filter_viable_posts.RAW_POSTS_FILE", raw_path)
+    monkeypatch.setattr("generator.text.filter_viable_posts.VIABLE_POSTS_FILE", viable_path)
+    monkeypatch.setattr("generator.text.filter_viable_posts._get_client", lambda: object())
+    monkeypatch.setattr("generator.text.filter_viable_posts._ask_source_scorecard", fake_scorecard)
+
+    filter_viable_posts()
+
+    assert "Title: Post 2" in evaluated_titles[0]
+    assert "Title: Post 3" in evaluated_titles[1]
+    assert local_source_priority(posts[1]) > local_source_priority(posts[0])
+
+
+def test_thin_post_rejected_before_source_scorecard(monkeypatch, tmp_path):
+    raw_path = tmp_path / "raw_posts.json"
+    viable_path = tmp_path / "viable_posts.json"
+    thin = {"id": "thin", "title": "Thin", "content": "Too short.", "source_provider": "reddit"}
+    raw_path.write_text(json.dumps([thin, _raw_post(1)]), encoding="utf-8")
+    calls = {"scorecard": 0}
+
+    def fake_scorecard(*_args, **_kwargs):
+        calls["scorecard"] += 1
+        return _strong_scorecard()
+
+    monkeypatch.setenv("SOURCE_LLM_EVAL_LIMIT", "8")
+    monkeypatch.setattr("generator.text.filter_viable_posts.RAW_POSTS_FILE", raw_path)
+    monkeypatch.setattr("generator.text.filter_viable_posts.VIABLE_POSTS_FILE", viable_path)
+    monkeypatch.setattr("generator.text.filter_viable_posts._get_client", lambda: object())
+    monkeypatch.setattr("generator.text.filter_viable_posts._ask_source_scorecard", fake_scorecard)
+
+    filter_viable_posts()
+
+    assert calls["scorecard"] == 1
 
 
 def test_filter_text_verbosity_uses_medium_for_gpt_41(monkeypatch):

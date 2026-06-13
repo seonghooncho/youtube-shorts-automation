@@ -6,6 +6,7 @@ from generator.text.generate_script import DraftScript, NativeViewerCritic
 from generator.text.generate_scripts_from_filtered import (
     _finalize_candidate,
     generate_scripts_from_filtered,
+    should_run_critic,
     validate_and_parse_metadata,
 )
 
@@ -230,6 +231,65 @@ def test_after_local_gate_critic_runs_once(monkeypatch):
 
     assert calls["critic"] == 1
     assert accepted["critic_passed"] is True
+
+
+def test_strong_candidate_skips_after_local_gate_critic(monkeypatch):
+    monkeypatch.setenv("SCRIPT_CRITIC_ENABLED", "1")
+    post = _post() | {"source_priority_score": 4.8}
+    metadata = validate_and_parse_metadata(_draft(), 0, post)
+    metadata.pop("length_repair_status", None)
+    metadata["script_char_count"] = 760
+    metadata["quality_warnings"] = []
+    metadata["predicted_ai_smell_score"] = 2
+    metadata["repair_actions"] = [
+        {"code": "caption_chunks_rebuilt"},
+        {"code": "first_frame_text_rebuilt"},
+        {"code": "opening_visual_query_rebuilt"},
+        {"code": "public_title_rebuilt"},
+    ]
+    calls = {"critic": 0}
+    monkeypatch.setattr("generator.text.generate_scripts_from_filtered.critique_script", lambda *_a, **_k: calls.__setitem__("critic", calls["critic"] + 1))
+
+    accepted = _finalize_candidate(metadata, [], [], post, append=False)
+
+    assert calls["critic"] == 0
+    assert accepted["critic_policy"] == "skipped_strong_candidate"
+
+
+def test_critic_policy_runs_for_borderline_reasons(monkeypatch):
+    post = _post() | {"source_priority_score": 4.8}
+    metadata = validate_and_parse_metadata(_draft(), 0, post)
+    metadata["quality_warnings"] = []
+    metadata["predicted_ai_smell_score"] = 2
+
+    run, reason = should_run_critic(metadata, post)
+
+    assert run is True
+    assert reason in {"length_repair_status_present", "high_risk_repair_action", "script_under_700_chars"}
+
+    metadata.pop("length_repair_status", None)
+    metadata["repair_actions"] = []
+    metadata["script_char_count"] = 760
+    metadata["marketability_score"] = 4
+
+    run, reason = should_run_critic(metadata, post)
+
+    assert run is True
+    assert reason == "marketability_below_5"
+
+
+def test_critic_always_forces_policy(monkeypatch):
+    monkeypatch.setenv("SCRIPT_CRITIC_ALWAYS", "1")
+    post = _post() | {"source_priority_score": 5.0}
+    metadata = {
+        "quality_warnings": [],
+        "script_char_count": 820,
+        "marketability_score": 5,
+        "predicted_ai_smell_score": 1,
+        "repair_actions": [],
+    }
+
+    assert should_run_critic(metadata, post) == (True, "SCRIPT_CRITIC_ALWAYS=1")
 
 
 def test_critic_failure_causes_at_most_one_rewrite(monkeypatch, tmp_path):
