@@ -78,8 +78,8 @@ def test_repair_metadata_fixes_mechanical_fields_and_length():
 
     assert len(" ".join(metadata["voiceover_lines"])) >= 650
     assert metadata["length_repair_status"] == "added_source_grounded_line"
-    assert metadata["public_title"] == "Her Cat Bit Mine Twice, Then Refused To Pay"
-    assert metadata["first_frame_text"] == "HER CAT BIT MINE TWICE REFUSED TO PAY"
+    assert metadata["public_title"] == "Her Cat Bit Mine Twice, Then She Refused To Pay"
+    assert metadata["first_frame_text"] == "HER CAT BIT MINE TWICE"
     assert metadata["opening_visual_query"] == "cat vet clinic"
     assert caption_chunks_align_with_tts_text(metadata)[0] is True
     assert metadata["caption_repair_status"] == "rebuilt_from_voiceover"
@@ -235,3 +235,32 @@ def test_caption_repair_keeps_readable_phrases_not_single_word_fragments():
     ]
     assert all(len(chunk) <= 42 for chunk in repaired["caption_chunks"])
     assert all(len(chunk.split()) >= 4 for chunk in repaired["caption_chunks"][:-1])
+
+
+def test_length_repair_does_not_add_generic_filler_without_concrete_source():
+    lines = [
+        "Something awkward happened after a small disagreement.",
+        "I answered calmly, but the other person kept pushing.",
+        "The conversation kept going until I felt worn down.",
+        "I finally said no because it did not feel right.",
+        "Now I am wondering if I handled it badly.",
+        "Would you have done the same?",
+    ]
+    metadata = _short_cat_metadata() | {
+        "voiceover_lines": lines,
+        "script": lines,
+        "tts_text": " ".join(lines),
+        "title": "A vague story",
+        "viewer_question": "Would you have done the same?",
+    }
+    post = {
+        "title": "A vague story",
+        "content": " ".join(lines),
+        "source_provider": "pullpush",
+    }
+
+    repaired, actions = repair_metadata(metadata, post)
+
+    assert "length_repair_status" not in repaired
+    assert all(action["code"] != "length_repair_line_added" for action in actions)
+    assert "not just a misunderstanding" not in " ".join(repaired["voiceover_lines"])

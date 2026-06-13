@@ -4,7 +4,7 @@ import pytest
 from openai.lib._pydantic import to_strict_json_schema
 
 from generator.text import generate_script as generate_script_module
-from generator.text.generate_script import NativeViewerCritic, ReturnScript, _text_verbosity, _token_budgets
+from generator.text.generate_script import DraftScript, NativeViewerCritic, ReturnScript, _text_verbosity, _token_budgets
 from generator.text.generate_scripts_from_filtered import (
     EXAMPLE_JSON,
     _build_local_fallback_metadata,
@@ -87,11 +87,20 @@ def test_prompt_example_uses_consistent_voiceover_line_standard():
     example = json.loads(EXAMPLE_JSON)
 
     assert 7 <= len(example["voiceover_lines"]) <= 10
-    assert example["script"] == example["voiceover_lines"]
-    assert example["caption_chunks"][-1].endswith("?")
-    assert all(len(chunk) <= 42 for chunk in example["caption_chunks"])
-    assert len(example["first_frame_text"]) <= 38
-    assert example["opening_visual_query"] == example["visual_beat_queries"][0]["query"]
+    DraftScript.model_validate(example)
+    for mechanical_key in (
+        "caption_chunks",
+        "tts_text",
+        "first_frame_text",
+        "opening_visual_query",
+        "visual_beat_queries",
+        "visual_keywords",
+        "description",
+        "tags",
+        "script",
+        "predicted_retention_score",
+    ):
+        assert mechanical_key not in example
 
 
 def test_critic_failure_causes_rewrite_failure(monkeypatch):

@@ -63,6 +63,24 @@ class ScriptCriticScores(BaseModel):
     comment_potential_score: int = Field(7, ge=1, le=10)
 
 
+class DraftScript(BaseModel):
+    title: str = ""
+    voice: Literal["male", "female", "neutral"]
+    source_summary: str
+    story_beats: List[str] = Field(..., min_length=4, max_length=7)
+    adaptation_strategy: str
+    retention_angle: str
+    turning_point: str
+    payoff_line: str
+    viewer_question: str
+    marketability_score: int = Field(..., ge=1, le=5)
+    retention_risk: str
+    rewrite_notes: str
+    hook_type: str
+    style_variant: str
+    voiceover_lines: List[str] = Field(..., min_length=1)
+
+
 class ReturnScript(BaseModel):
     title: str
     description: str
@@ -114,7 +132,7 @@ class NativeViewerCritic(BaseModel):
     rewrite_instructions: List[str] = Field(default_factory=list)
 
 
-def _assert_no_nulls(rs: ReturnScript) -> None:
+def _assert_no_nulls(rs: BaseModel) -> None:
     data = rs.model_dump(exclude_none=False)
     for k, v in data.items():
         if v is None:
@@ -144,24 +162,35 @@ def _json_slice(s: str) -> Optional[str]:
     return s[: last + 1] if last != -1 else None
 
 # --- Core calls ---
-def _try_structured(client: openai.OpenAI, prompt: str, max_output_tokens: int) -> ReturnScript:
+def draft_to_metadata(draft: DraftScript) -> dict[str, Any]:
+    data = draft.model_dump()
+    lines = [str(line or "").strip() for line in data.get("voiceover_lines") or [] if str(line or "").strip()]
+    data["working_title"] = str(data.get("title") or "").strip()
+    data["_title_is_working"] = True
+    data["public_title"] = ""
+    data["voiceover_lines"] = lines
+    data["script"] = list(lines)
+    return data
+
+
+def _try_structured(client: openai.OpenAI, prompt: str, max_output_tokens: int) -> DraftScript:
     resp = client.responses.parse(
         model=_default_model(),
         input=[
             {"role": "system", "content": _script_system_message()},
             {"role": "user", "content": prompt},
         ],
-        text_format=ReturnScript,
+        text_format=DraftScript,
         max_output_tokens=max_output_tokens,
         text={"verbosity": _text_verbosity()},
     )
-    parsed: ReturnScript = resp.output_parsed
+    parsed: DraftScript = resp.output_parsed
     if parsed is None:
         raise ValueError("output_parsed가 비었습니다.")
     _assert_no_nulls(parsed)
     return parsed
 
-def _fallback_json_mode(client: openai.OpenAI, prompt: str, max_output_tokens: int) -> ReturnScript:
+def _fallback_json_mode(client: openai.OpenAI, prompt: str, max_output_tokens: int) -> DraftScript:
     """
     Structured Outputs 실패 시 JSON 모드로 재시도 후 Pydantic 검증.
     """
@@ -182,11 +211,11 @@ def _fallback_json_mode(client: openai.OpenAI, prompt: str, max_output_tokens: i
     )
     raw = (resp.output_text or "").strip()
     try:
-        return ReturnScript.model_validate_json(raw)
+        return DraftScript.model_validate_json(raw)
     except ValidationError:
         sliced = _json_slice(raw)
         if sliced:
-            return ReturnScript.model_validate_json(sliced)
+            return DraftScript.model_validate_json(sliced)
         raise
 
 
@@ -225,10 +254,16 @@ def _critic_scores(critic: NativeViewerCritic) -> dict:
     }
 
 
-def _critic_prompt(source_prompt: str, draft: ReturnScript) -> str:
+def _draft_payload(draft: BaseModel | dict[str, Any]) -> dict[str, Any]:
+    if isinstance(draft, BaseModel):
+        return draft.model_dump()
+    return dict(draft)
+
+
+def _critic_prompt(source_prompt: str, draft: BaseModel | dict[str, Any]) -> str:
     payload = {
         "source": _compact_source_from_prompt(source_prompt),
-        "draft": draft.model_dump(),
+        "draft": _draft_payload(draft),
         "thresholds": {
             "ai_smell_score_max": 3,
             "native_naturalness_score_min": 8,
@@ -249,7 +284,7 @@ def _critic_prompt(source_prompt: str, draft: ReturnScript) -> str:
     return json.dumps(payload, ensure_ascii=False)
 
 
-def critique_script(prompt: str, draft: ReturnScript) -> NativeViewerCritic:
+def critique_script(prompt: str, draft: BaseModel | dict[str, Any]) -> NativeViewerCritic:
     client = _get_client()
     model = os.getenv("SCRIPT_CRITIC_MODEL") or _default_model()
     resp = client.responses.parse(
@@ -292,31 +327,48 @@ def _compact_source_from_prompt(prompt: str) -> dict[str, str]:
     }
 
 
-def _apply_critic_metadata(script: ReturnScript, critic: NativeViewerCritic) -> ReturnScript:
+def apply_critic_to_metadata(metadata: dict[str, Any], critic: NativeViewerCritic) -> dict[str, Any]:
+    metadata["critic_scores"] = _critic_scores(critic)
+    metadata["critic_problems"] = list(critic.problems or [])
+    metadata["critic_rewrite_instructions"] = list(critic.rewrite_instructions or [])
+    metadata["critic_attempt_count"] = int(metadata.get("critic_attempt_count") or 0) + 1
+    metadata["critic_stage"] = "after_local_gate"
+    metadata["critic_passed"] = True
+    metadata["predicted_retention_score"] = critic.retention_score
+    metadata["predicted_rewatch_score"] = max(1, min(10, round((critic.retention_score + critic.hook_score) / 2)))
+    metadata["predicted_comment_score"] = critic.comment_potential_score
+    metadata["predicted_clarity_score"] = critic.native_naturalness_score
+    metadata["predicted_ai_smell_score"] = critic.ai_smell_score
+    return metadata
+
+
+def _apply_critic_metadata(script: BaseModel, critic: NativeViewerCritic) -> BaseModel:
     data = script.model_dump()
-    data["critic_scores"] = _critic_scores(critic)
-    data["critic_problems"] = list(critic.problems or [])
-    data["critic_rewrite_instructions"] = list(critic.rewrite_instructions or [])
-    data["predicted_retention_score"] = critic.retention_score
-    data["predicted_rewatch_score"] = max(1, min(10, round((critic.retention_score + critic.hook_score) / 2)))
-    data["predicted_comment_score"] = critic.comment_potential_score
-    data["predicted_clarity_score"] = critic.native_naturalness_score
-    data["predicted_ai_smell_score"] = critic.ai_smell_score
-    return ReturnScript.model_validate(data)
+    if isinstance(script, ReturnScript):
+        data["critic_scores"] = _critic_scores(critic)
+        data["critic_problems"] = list(critic.problems or [])
+        data["critic_rewrite_instructions"] = list(critic.rewrite_instructions or [])
+        data["predicted_retention_score"] = critic.retention_score
+        data["predicted_rewatch_score"] = max(1, min(10, round((critic.retention_score + critic.hook_score) / 2)))
+        data["predicted_comment_score"] = critic.comment_potential_score
+        data["predicted_clarity_score"] = critic.native_naturalness_score
+        data["predicted_ai_smell_score"] = critic.ai_smell_score
+        return ReturnScript.model_validate(data)
+    return DraftScript.model_validate(data)
 
 
 def _rewrite_prompt(prompt: str, critic: NativeViewerCritic) -> str:
     instructions = "\n".join(f"- {item}" for item in critic.rewrite_instructions or critic.problems or [])
     return (
         f"{prompt}\n\n[NATIVE VIEWER CRITIC REWRITE]\n"
-        "The previous draft failed the native-viewer critic. Regenerate the full JSON using the same source conflict.\n"
+        "The previous draft failed the native-viewer critic. Regenerate the DraftScript JSON using the same source conflict.\n"
         "Make it more concrete, native-sounding, fast, specific, and payoff-driven. Do not invent unsupported major facts.\n"
         f"Critic failures: {_critic_hard_failure(critic)}\n"
         f"Rewrite instructions:\n{instructions}\n"
     )
 
 # --- Public API ---
-def generate_script(prompt: str) -> ReturnScript:
+def generate_script(prompt: str) -> DraftScript:
     """
     1) Structured Outputs (responses.parse) 우선
     2) 실패 시 JSON 모드 폴백 (responses.create + model_validate_json)
@@ -346,7 +398,7 @@ def generate_script(prompt: str) -> ReturnScript:
     raise RuntimeError(f"GPT 호출/검증 최종 실패: {last_err}")
 
 
-def _run_critic_rewrite_flow(prompt: str, draft: ReturnScript, max_output_tokens: int) -> ReturnScript:
+def _run_critic_rewrite_flow(prompt: str, draft: BaseModel, max_output_tokens: int) -> BaseModel:
     if not _critic_enabled():
         return draft
     critic = critique_script(prompt, draft)

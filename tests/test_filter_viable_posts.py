@@ -10,6 +10,7 @@ from generator.text.filter_viable_posts import (
     _local_source_scorecard,
     _text_verbosity,
     filter_viable_posts,
+    source_acceptance_score,
 )
 
 
@@ -118,7 +119,30 @@ def test_ask_source_scorecard_returns_structured_fields():
     assert scorecard.archetype == "roommate_money"
     assert scorecard.retention_risk == "low"
     assert _gate_fit_passes(scorecard) is True
+    assert source_acceptance_score(scorecard) >= 4.0
     assert client.responses.kwargs["text"]["format"]["type"] == "json_object"
+
+
+def test_source_acceptance_score_uses_gate_aware_fields():
+    strong = _local_source_scorecard(
+        {
+            "title": "My roommate put the whole bill on my card",
+            "content": " ".join(["The receipt and group chat showed the bill was put on my card without asking."] * 20),
+        }
+    )
+    weak = strong.model_copy(
+        update={
+            "gate_fit_score": 2,
+            "hook_in_one_sentence": 2,
+            "receipt_strength": 2,
+            "visual_matchability": 2,
+            "length_fit_score": 2,
+            "metadata_repairability": 2,
+        }
+    )
+
+    assert source_acceptance_score(strong) > source_acceptance_score(weak)
+    assert source_acceptance_score(weak) < 4.0
 
 
 def test_filter_text_verbosity_uses_medium_for_gpt_41(monkeypatch):

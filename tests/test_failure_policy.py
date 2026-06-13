@@ -16,6 +16,9 @@ def test_classifies_weak_narration_as_single_rewrite():
 def test_classifies_fatal_or_repeated_failures_as_skip():
     assert classify_failure("unsafe_visual_keywords: teen romance") == FailureAction.SKIP_SOURCE
     assert classify_failure("weak_market_hook", repeated=True) == FailureAction.SKIP_SOURCE
+    assert classify_failure("source_too_thin: 40 words") == FailureAction.SKIP_SOURCE
+    assert classify_failure("source_truncated: missing ending") == FailureAction.SKIP_SOURCE
+    assert classify_failure("content_gate_failed:title_quality", repeated=True) == FailureAction.SKIP_SOURCE
 
 
 def test_generation_summary_counts_only_explicit_preflight_stage():

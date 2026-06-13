@@ -6,8 +6,17 @@ import re
 from pathlib import Path
 from typing import Any, Dict
 from generator.text.content_gate import ensure_content_gate, normalize_narration_fields
-from generator.text.failure_policy import FailureAction, classify_failure
-from generator.text.generate_script import generate_script, ReturnScript
+from generator.text.failure_policy import FailureAction, classify_failure, script_repair_min_chars
+from generator.text.generate_script import (
+    DraftScript,
+    NativeViewerCritic,
+    ReturnScript,
+    _critic_hard_failure,
+    apply_critic_to_metadata,
+    critique_script,
+    draft_to_metadata,
+    generate_script,
+)
 from generator.text.metadata_repair import repair_metadata
 from generator.text.script_fingerprint import (
     STYLE_VARIANTS,
@@ -36,20 +45,8 @@ _PERFORMANCE_CONTEXT_CACHE: str | None = None
 
 EXAMPLE_JSON = """
 {
-        "title": "Neighbor's Tenants' Kids Invaded My Property",
-        "description": "Dealing with a neighbor's tenants' kids running amok in my driveway. Can you relate to this frustrating situation?",
-        "tags": ["storytime", "neighborhood", "drama", "reddit", "beachhouse"],
+        "title": "Neighbor's Tenants Used My Driveway",
         "voice": "male",
-        "visual_keywords": ["suburban driveway", "security camera", "kids playing", "angry neighbor", "rental house", "phone messages"],
-        "first_frame_text": "KIDS TOOK OVER MY DRIVEWAY",
-        "opening_visual_query": "kids playing driveway security camera",
-        "visual_beat_queries": [
-                {"beat": "hook", "query": "kids playing driveway security camera"},
-                {"beat": "receipt", "query": "phone security camera alert"},
-                {"beat": "decision", "query": "private driveway parking sign"}
-        ],
-        "hook_type": "crossed_boundary",
-        "first_2_seconds": "A dozen kids turned my driveway into their playground",
         "source_summary": "The narrator owns a townhouse near a short-term rental and has repeated problems with renters' kids using his driveway and yard without permission.",
         "story_beats": [
                 "Neighboring rental guests start cutting through the narrator's property.",
@@ -60,28 +57,15 @@ EXAMPLE_JSON = """
         ],
         "adaptation_strategy": "Compressed repeated property issues into one escalating driveway incident, sharpened the neighbor's dismissive response, and kept the same boundary dispute and final dilemma.",
         "retention_angle": "The story has a clear property boundary violation, an unreasonable neighbor response, and a final moral split about whether the narrator was too strict.",
+        "hook_type": "crossed_boundary",
+        "style_variant": "neighbor_dispute",
         "turning_point": "The owner next door dismisses the complaint instead of apologizing.",
         "payoff_line": "I told them my property was not free supervision for their renters.",
         "viewer_question": "Would you have shut it down too?",
         "marketability_score": 5,
         "retention_risk": "The source has repeated incidents, so the rewrite compresses them into one camera-alert scene before the neighbor response.",
-        "cut_plan": ["driveway hook", "phone camera alert", "kids running", "owner text message", "final boundary question"],
-        "bg_strategy": "hybrid",
-        "style_variant": "neighbor_dispute",
-        "voiceover_lines": [
-                "A dozen kids turned my driveway into their playground.",
-                "The unit next door is a short-term rental, so guests change every few days.",
-                "One night my security camera kept pinging while I was trying to work.",
-                "I opened the app and saw kids doing flips on my driveway.",
-                "When one kid fell on the concrete, I used the camera speaker and told them to leave.",
-                "The owner texted back that they were just enjoying the outdoors.",
-                "I sent screenshots and said my driveway was not free supervision.",
-                "Would you have shut it down too?"
-        ],
-        "tts_text": "A dozen kids turned my driveway into their playground. The unit next door is a short-term rental, so guests change every few days. One night my security camera kept pinging while I was trying to work. I opened the app and saw kids doing flips on my driveway. When one kid fell on the concrete, I used the camera speaker and told them to leave. The owner texted back that they were just enjoying the outdoors. I sent screenshots and said my driveway was not free supervision. Would you have shut it down too?",
-        "caption_chunks": ["kids turned my driveway", "security camera kept pinging", "kids doing flips on my driveway", "The owner texted back", "Would you have shut it down too?"],
         "rewrite_notes": "Removed slow vacation-rental context and led with the crossed boundary.",
-        "script": [
+        "voiceover_lines": [
                 "A dozen kids turned my driveway into their playground.",
                 "The unit next door is a short-term rental, so guests change every few days.",
                 "One night my security camera kept pinging while I was trying to work.",
@@ -104,31 +88,27 @@ def call_gpt_generate_script(title, content, post=None, regenerate_reason=None):
         "Outcome: produce a fast, source-faithful, first-person script with strong Shorts retention and structured signals for future performance learning.",
         "Audience: English-speaking Shorts viewers who decide in the first 2 seconds whether to keep watching.",
         "\n[Instructions]",
-        "- Return the response in the exact same JSON structure shown in the example below.",
-        '- **Detect the main character\'s gender** from the original story. Add a new key `"voice"` to the output JSON, whose value is either `"male"` or `"female"`, based on the main character’s gender for TTS selection. If gender is ambiguous, return `"neutral"`.',
+        "- Return only the DraftScript JSON structure shown in the example below.",
+        '- Detect the main character\'s gender from the original story and set `"voice"` to `"male"`, `"female"`, or `"neutral"`.',
         "- Treat the source as a seed story, not a transcript. Preserve the core conflict, relationship type, narrator's decision, consequence, and final moral question.",
         "- You may adapt the source into a more relatable, realistic Shorts story: compress repeated events into one clear scene, add plausible small dialogue, clarify motives, sharpen embarrassment or stakes, and make the conflict feel like something that could happen to a normal person.",
         "- You may improve weak source material by choosing the most relatable angle and making the narrator's dilemma more concrete, as long as the adapted story still belongs to the same conflict archetype.",
         "- Do not invent major unsafe or high-stakes facts: no new crimes, lawsuits, police, violence, sexual content, cheating, medical emergencies, revenge plans, pregnancy, minors, or job loss unless the source clearly supports them.",
         "- Do not change who was in conflict, the broad setting, the narrator's main action, or the final side-taking question.",
+        "- Do not output derived mechanical metadata. The code derives captions, TTS text, title styling, descriptions, tags, first-frame text, stock-video queries, and predicted scores after local repair.",
         "- Fill `source_summary` with the original story's core conflict, not the rewritten script.",
         "- Fill `story_beats` with 4 to 7 source-grounded beats: setup, escalation, decision, consequence, and final dilemma.",
         "- Fill `adaptation_strategy` with a transparent note about what you compressed or plausibly dramatized to make the story more watchable.",
         "- Fill `retention_angle` with the specific reason this story is clickable and watchable: boundary crossed, unfair accusation, betrayal, public embarrassment, money/property conflict, workplace/family pressure, or a hard moral split.",
         "- Fill `hook_type` with a short snake_case label such as unfair_accusation, crossed_boundary, money_pressure, public_embarrassment, betrayal, villain_framing, or family_pressure.",
         f"- Fill `style_variant` with one of: {', '.join(STYLE_VARIANTS)}. Choose the most concrete variant for this source, and avoid repeating the same style in a batch.",
-        "- Fill `first_2_seconds` with the exact opening phrase that carries the first two seconds of attention. It must be concrete, not context.",
         "- Fill `turning_point` with the moment where the situation gets worse, not just a summary.",
         "- Fill `payoff_line` with the final conflict statement before the viewer question.",
         "- Fill `viewer_question` with the exact final comment-bait question. It must be a real question and should not be generic if the source supports a sharper one.",
         "- Fill `marketability_score` from 1 to 5. Use 4 or 5 only when the story has a concrete unfair action, clear stakes, and a debatable final decision.",
-        "- Fill predicted performance scores honestly on a 1-10 scale: retention and clarity must be 8 or higher, comment score must be 7 or higher, and `predicted_ai_smell_score` is reversed where 1 means fully human/native and 10 means very AI/template. Accepted scripts must keep `predicted_ai_smell_score` at 3 or lower.",
-        "- Fill `critic_scores.ai_smell_score` using the same reversed AI-smell scale: 1 is best, 10 is worst. Keep it at 3 or lower for a script you believe should publish.",
         "- Fill `retention_risk` with the main reason viewers might swipe away and how your rewrite prevents it.",
-        "- Fill `cut_plan` with 4 to 6 short visual cut intentions. Use concrete settings, hands, phones, bills, hallway, kitchen, office, vet, car, or message shots.",
-        "- Fill `bg_strategy` as `story`, `asmr`, or `hybrid`. Use `hybrid` for most stories, `story` when concrete visual scenes matter, and `asmr` only when the source is mostly emotional or abstract.",
         "- Fill `rewrite_notes` with one short note about what you tightened for retention.",
-        "- Use a title that names the concrete conflict. Avoid generic titles like 'Did I Overreact?' unless paired with the specific action. Do not add hashtags; the uploader adds the channel hashtag style.",
+        "- `title` may be a plain working title that names the concrete conflict. Do not add hashtags.",
         "- Do not use AITA-style public titles. Never start the title with AITA, Am I the Asshole, Am I wrong, or Did I overreact.",
         "- Write in a **casual, conversational tone**, as if you're sharing a story with a friend.",
         "- Avoid formal or stiff language. Use expressions and tones that are commonly seen in successful YouTube Shorts.",
@@ -138,25 +118,17 @@ def call_gpt_generate_script(title, content, post=None, regenerate_reason=None):
         "- The first 3 voiceover lines must follow this rhythm: hook result, quick context, then unexpected escalation. Do not explain every detail chronologically.",
         "- Every voiceover line should either add a new problem, raise the stakes, or move toward the final decision. Cut neutral reflection.",
         "- Keep the pacing fast. Remove filler, repeated setup, and slow explanations. The narration should still be understandable after a moderate speed-up.",
-        "- Structure the story in `voiceover_lines` as 7 to 10 complete short lines. Keep `script` identical to `voiceover_lines` for compatibility.",
-        "- Fill `tts_text` as the complete narration joined from `voiceover_lines`, with natural punctuation pauses before the receipt/reveal and before the final question.",
-        "- Fill `caption_chunks` as short retention captions: max 42 characters per chunk, final question as its own chunk, first caption clearly shows the conflict, and do not reveal the twist too early.",
-        "- `caption_chunks` must use exact words from `voiceover_lines`/`tts_text` in the same order. They are display chunks from the spoken narration, not summaries or paraphrases.",
-        f"- The joined `script` narration must be {target_min_chars} to {target_max_chars} characters, including spaces.",
+        "- Structure the story in `voiceover_lines` as 7 to 10 complete short lines.",
+        f"- The joined `voiceover_lines` narration should be {target_min_chars} to {target_max_chars} characters, including spaces.",
+        f"- Drafts with {script_repair_min_chars()}-{MIN_SCRIPT_CHARS - 1} characters may be repaired by code with one source-grounded line; do not pad with filler.",
         f"- Anything over {MAX_SCRIPT_CHARS} characters is invalid. Cut harder instead of explaining more.",
         "- Line limits: first line under 120 characters, no voiceover line over 170 characters.",
         "- The final viewer question must be the separate final line.",
-        "- Before returning, silently count the joined `script` characters and cut until it fits the target window. Do not reveal the count.",
+        "- Before returning, silently count the joined narration characters and cut until it fits the target window. Do not reveal the count.",
         "- Prefer 120 to 170 spoken words total. Remove repeated history, extra dialogue, and neutral reflection first.",
         "- The target final narration length is roughly 42 to 65 seconds after a moderate speed-up. Prefer concise sentences over long lines.",
         "- The script should never feel stretched, repetitive, or abruptly shortened; keep only the setup, escalation, decision, and question.",
         "- Keep the final line short. Do not pack new facts and the viewer question into one overloaded sentence.",
-        "- Add `first_frame_text` as max 38 characters of all-caps hook text that shows the core conflict immediately. Do not use generic text like Story, Drama, AITA, or Did I Overreact.",
-        "- Add `opening_visual_query` as the first background-video search query. It must match the first spoken line and `first_frame_text` with concrete overlapping words, not generic mood footage.",
-        "- Add `visual_beat_queries` as ordered objects with `beat` and `query` keys. The first beat should be hook; receipt/reveal beats should prefer camera, phone, receipt, bill, app, screenshot, timestamp, or group chat when the source supports them.",
-        "- Add a `visual_keywords` array with 5 to 8 short English stock-video search phrases that match the story's setting and emotion.",
-        "- Visual keywords should be concrete and searchable, such as 'phone texting', 'couple argument', 'apartment hallway', 'office conversation', 'security camera', or 'angry neighbor'. Avoid generic terms like 'nature', 'background', or 'landscape' unless the story truly needs them.",
-        "- Avoid visual keywords that imply minors, teenagers, school romance, sexual content, or anything that would make stock footage unsafe.",
         "- Do not mention Reddit, JSON, scripts, AI, viewers, or instructions inside the narration.",
         "- End the script with a question or prompt to encourage **viewer engagement**, such as:",
         '  - "So, what do you think?"',
@@ -164,9 +136,9 @@ def call_gpt_generate_script(title, content, post=None, regenerate_reason=None):
         "\n[반환 형식 예시]",
         EXAMPLE_JSON,   # ← 안전: f-string 아님
         "\n[IMPORTANT]",
-        "- The response **must strictly follow the JSON structure** shown above with no missing keys.",
+        "- The response **must strictly follow the DraftScript JSON structure** shown above with no missing keys.",
         "- Any syntax or formatting error in the returned JSON will be considered a failure.",
-        f"- **If the joined voiceover contains fewer than {MIN_SCRIPT_CHARS} characters or more than {MAX_SCRIPT_CHARS} characters, it's considered invalid.**",
+        f"- **If the joined voiceover contains more than {MAX_SCRIPT_CHARS} characters, it's considered invalid.**",
         "\n[Source metadata]",
         f"- Source provider: {source.provider or 'unknown'}",
         f"- Source URL: {source.source_url or 'unknown'}",
@@ -221,92 +193,18 @@ def _max_llm_drafts_per_source() -> int:
     return max(1, _int_env("SCRIPT_MAX_LLM_DRAFTS_PER_SOURCE", 2))
 
 
-def validate_and_parse_metadata(result: ReturnScript, idx, post) -> Dict[str, Any]:
-    """
-    ReturnScript(객체) → dict로 변환하고, 기존 검증 로직(키/타입/길이)을 유지.
-    최종적으로 기존과 동일한 JSON(dict) 형태를 반환.
-    """
+def validate_and_parse_metadata(result: DraftScript | ReturnScript | dict[str, Any], idx, post) -> Dict[str, Any]:
     try:
-        # Pydantic → dict
-        metadata: Dict[str, Any] = result.model_dump()
-
-        # 기존 검증 스펙에 원문 충실도 검증용 필드를 추가한다.
-        required_keys = [
-            "title",
-            "description",
-            "tags",
-            "voice",
-            "visual_keywords",
-            "first_frame_text",
-            "opening_visual_query",
-            "visual_beat_queries",
-            "hook_type",
-            "first_2_seconds",
-            "source_summary",
-            "story_beats",
-            "adaptation_strategy",
-            "retention_angle",
-            "turning_point",
-            "payoff_line",
-            "viewer_question",
-            "marketability_score",
-            "retention_risk",
-            "cut_plan",
-            "bg_strategy",
-            "rewrite_notes",
-            "style_variant",
-            "script",
-        ]
-        if not all(k in metadata for k in required_keys):
-            raise ValueError("❌ 필수 키 누락")
-
-        if not isinstance(metadata["script"], list) or not all(isinstance(line, str) for line in metadata["script"]):
-            raise ValueError("❌ script는 문자열 리스트여야 함")
-        if not isinstance(metadata["visual_keywords"], list) or not all(isinstance(keyword, str) for keyword in metadata["visual_keywords"]):
-            raise ValueError("❌ visual_keywords는 문자열 리스트여야 함")
-        if not isinstance(metadata["first_frame_text"], str) or not metadata["first_frame_text"].strip():
-            raise ValueError("❌ first_frame_text는 문자열이어야 함")
-        metadata["first_frame_text"] = _clean_first_frame_text(
-            metadata.get("first_frame_text")
-            or metadata.get("first_2_seconds")
-            or metadata.get("title")
-        )
-        if not isinstance(metadata["opening_visual_query"], str) or not metadata["opening_visual_query"].strip():
-            raise ValueError("❌ opening_visual_query는 문자열이어야 함")
-        if not isinstance(metadata["visual_beat_queries"], list) or not all(isinstance(beat, dict) for beat in metadata["visual_beat_queries"]):
-            raise ValueError("❌ visual_beat_queries는 객체 리스트여야 함")
-        if not all(isinstance(beat.get("beat"), str) and isinstance(beat.get("query"), str) for beat in metadata["visual_beat_queries"]):
-            raise ValueError("❌ visual_beat_queries 항목은 beat/query 문자열을 포함해야 함")
-        if not isinstance(metadata["story_beats"], list) or not all(isinstance(beat, str) for beat in metadata["story_beats"]):
-            raise ValueError("❌ story_beats는 문자열 리스트여야 함")
-        if not isinstance(metadata["viewer_question"], str) or not metadata["viewer_question"].strip():
-            raise ValueError("❌ viewer_question은 문자열이어야 함")
-        metadata["first_2_seconds"] = _clean_short_hook_text(metadata.get("first_2_seconds"), max_chars=95)
-        if not isinstance(metadata["retention_angle"], str) or not metadata["retention_angle"].strip():
-            raise ValueError("❌ retention_angle은 문자열이어야 함")
-        if not isinstance(metadata["adaptation_strategy"], str) or not metadata["adaptation_strategy"].strip():
-            raise ValueError("❌ adaptation_strategy는 문자열이어야 함")
-        if not isinstance(metadata["cut_plan"], list) or not all(isinstance(cut, str) for cut in metadata["cut_plan"]):
-            raise ValueError("❌ cut_plan은 문자열 리스트여야 함")
-        if metadata.get("bg_strategy") not in {"story", "asmr", "hybrid"}:
-            raise ValueError("❌ bg_strategy는 story, asmr, hybrid 중 하나여야 함")
-
-        metadata["script"] = [line.strip() for line in metadata["script"] if line.strip()]
-        metadata["voiceover_lines"] = [line.strip() for line in metadata.get("voiceover_lines") or [] if str(line).strip()]
-        metadata["story_beats"] = [beat.strip() for beat in metadata["story_beats"] if beat.strip()]
-        metadata["cut_plan"] = [cut.strip() for cut in metadata["cut_plan"] if cut.strip()][:6]
-        metadata.setdefault("critic_scores", {})
-        metadata.setdefault("critic_problems", [])
-        metadata.setdefault("critic_rewrite_instructions", [])
-        metadata.setdefault("critic_attempt_count", 0)
-        normalize_narration_fields(metadata)
-        if post and post.get("content"):
-            metadata, repair_actions = repair_metadata(metadata, post, stage="pre_gate")
-            if repair_actions:
-                print(
-                    f"🛠️ metadata repair applied (post {idx}): "
-                    f"{', '.join(action.get('code', 'unknown') for action in repair_actions)}"
-                )
+        metadata = _metadata_from_generation_result(result)
+        metadata = _normalize_minimal_draft(metadata)
+        metadata, repair_actions = repair_metadata(metadata, post or {}, stage="pre_gate")
+        if repair_actions:
+            print(
+                f"🛠️ metadata repair applied (post {idx}): "
+                f"{', '.join(action.get('code', 'unknown') for action in repair_actions)}"
+            )
+        metadata = _attach_source_metadata(metadata, post)
+        _validate_full_metadata_after_repair(metadata)
 
         if post and post.get("content"):
             marketability_reject = source_reject_reason_for_marketability(post)
@@ -321,22 +219,6 @@ def validate_and_parse_metadata(result: ReturnScript, idx, post) -> Dict[str, An
 
         metadata["visual_keywords"] = _clean_visual_keywords(metadata["visual_keywords"])
         metadata["script_char_count"] = script_length
-        metadata["source_scorecard"] = (post or {}).get("source_scorecard") or {}
-        metadata["source_score"] = (post or {}).get("source_score")
-        metadata["source_archetype"] = (post or {}).get("source_archetype") or metadata.get("hook_type") or ""
-        metadata["source_provider"] = (post or {}).get("source_provider", "")
-        metadata["source_authenticity"] = (post or {}).get("source_authenticity") or metadata["source_provider"] or "unknown"
-        metadata["source_collection_path"] = (post or {}).get("source_collection_path", "")
-        metadata["source_detail_checked"] = bool((post or {}).get("source_detail_checked", False))
-        metadata["source_detail_improved"] = bool((post or {}).get("source_detail_improved", False))
-        metadata["source_quality_status"] = (post or {}).get("source_quality_status", "")
-        metadata["source_rejection_reason"] = (post or {}).get("source_rejection_reason", "")
-        metadata["source_title"] = (post or {}).get("title") or metadata.get("source_title") or metadata.get("title") or ""
-        metadata["source_content_excerpt"] = str((post or {}).get("content") or "")[:3000]
-        metadata["public_title"] = metadata.get("public_title") or metadata.get("title") or metadata["source_title"]
-        metadata["source_subreddit"] = (post or {}).get("subreddit", "")
-        metadata["source_url"] = (post or {}).get("source_url", "")
-        metadata["source_hash"] = (post or {}).get("content_hash", "")
 
         if post and post.get("content"):
             quality_issues = validate_script_quality(metadata, post)
@@ -354,6 +236,146 @@ def validate_and_parse_metadata(result: ReturnScript, idx, post) -> Dict[str, An
         return metadata
     except Exception as e:
         raise ValueError(f"post {idx} 오류: {e}")
+
+
+def _metadata_from_generation_result(result: DraftScript | ReturnScript | dict[str, Any]) -> dict[str, Any]:
+    if isinstance(result, DraftScript):
+        return draft_to_metadata(result)
+    if isinstance(result, ReturnScript):
+        data = result.model_dump()
+        if not data.get("voiceover_lines") and data.get("script"):
+            data["voiceover_lines"] = list(data["script"])
+        if not str(data.get("style_variant") or "").strip():
+            data["style_variant"] = _style_variant_from_hook(data.get("hook_type"))
+        if not str(data.get("rewrite_notes") or "").strip():
+            data["rewrite_notes"] = "Legacy full metadata normalized into the repair-first flow."
+        return data
+    return dict(result)
+
+
+def _style_variant_from_hook(hook_type: str | None) -> str:
+    hook = str(hook_type or "").strip().lower()
+    mapping = {
+        "money_pressure": "money_trap",
+        "crossed_boundary": "last_straw",
+        "unfair_accusation": "false_blame",
+        "family_pressure": "family_pressure",
+        "neighbor_dispute": "neighbor_dispute",
+    }
+    return mapping.get(hook, "last_straw")
+
+
+def _normalize_minimal_draft(metadata: dict[str, Any]) -> dict[str, Any]:
+    required = [
+        "voice",
+        "voiceover_lines",
+        "source_summary",
+        "story_beats",
+        "adaptation_strategy",
+        "retention_angle",
+        "turning_point",
+        "payoff_line",
+        "viewer_question",
+        "marketability_score",
+        "retention_risk",
+        "hook_type",
+        "style_variant",
+        "rewrite_notes",
+    ]
+    missing = [key for key in required if key not in metadata]
+    if missing:
+        raise ValueError(f"❌ minimal draft 필수 키 누락: {', '.join(missing)}")
+    if metadata.get("voice") not in {"male", "female", "neutral"}:
+        raise ValueError("❌ voice는 male, female, neutral 중 하나여야 함")
+    lines = [str(line or "").strip() for line in metadata.get("voiceover_lines") or metadata.get("script") or [] if str(line or "").strip()]
+    if not lines:
+        raise ValueError("❌ voiceover_lines는 비어 있을 수 없음")
+    if not all(isinstance(line, str) for line in lines):
+        raise ValueError("❌ voiceover_lines는 문자열 리스트여야 함")
+    story_beats = [str(beat or "").strip() for beat in metadata.get("story_beats") or [] if str(beat or "").strip()]
+    if len(story_beats) < 4:
+        raise ValueError("❌ story_beats는 최소 4개여야 함")
+    for key in ("source_summary", "adaptation_strategy", "retention_angle", "turning_point", "payoff_line", "viewer_question", "retention_risk", "hook_type", "style_variant", "rewrite_notes"):
+        if not str(metadata.get(key) or "").strip():
+            raise ValueError(f"❌ {key}는 비어 있을 수 없음")
+    metadata["voiceover_lines"] = lines
+    metadata["script"] = list(lines)
+    metadata["story_beats"] = story_beats[:7]
+    metadata["viewer_question"] = str(metadata["viewer_question"]).strip()
+    metadata["marketability_score"] = int(metadata.get("marketability_score") or 0)
+    normalize_narration_fields(metadata)
+    return metadata
+
+
+def _attach_source_metadata(metadata: dict[str, Any], post: dict | None) -> dict[str, Any]:
+    post = post or {}
+    metadata["source_scorecard"] = post.get("source_scorecard") or {}
+    metadata["source_score"] = post.get("source_score")
+    metadata["source_archetype"] = post.get("source_archetype") or metadata.get("hook_type") or ""
+    metadata["source_provider"] = post.get("source_provider", "")
+    metadata["source_authenticity"] = post.get("source_authenticity") or metadata["source_provider"] or "unknown"
+    metadata["source_collection_path"] = post.get("source_collection_path", "")
+    metadata["source_detail_checked"] = bool(post.get("source_detail_checked", False))
+    metadata["source_detail_improved"] = bool(post.get("source_detail_improved", False))
+    metadata["source_quality_status"] = post.get("source_quality_status", "")
+    metadata["source_rejection_reason"] = post.get("source_rejection_reason", "")
+    metadata["source_title"] = post.get("title") or metadata.get("source_title") or metadata.get("title") or ""
+    metadata["source_content_excerpt"] = str(post.get("content") or "")[:3000]
+    metadata["public_title"] = metadata.get("public_title") or metadata.get("title") or metadata["source_title"]
+    metadata["source_subreddit"] = post.get("subreddit", "")
+    metadata["source_url"] = post.get("source_url", "")
+    metadata["source_hash"] = post.get("content_hash", "")
+    return metadata
+
+
+def _validate_full_metadata_after_repair(metadata: dict[str, Any]) -> None:
+    required = [
+        "title",
+        "public_title",
+        "description",
+        "tags",
+        "voice",
+        "visual_keywords",
+        "first_frame_text",
+        "opening_visual_query",
+        "visual_beat_queries",
+        "hook_type",
+        "first_2_seconds",
+        "source_summary",
+        "story_beats",
+        "adaptation_strategy",
+        "retention_angle",
+        "turning_point",
+        "payoff_line",
+        "viewer_question",
+        "marketability_score",
+        "retention_risk",
+        "cut_plan",
+        "bg_strategy",
+        "rewrite_notes",
+        "style_variant",
+        "script",
+        "voiceover_lines",
+        "tts_text",
+        "caption_chunks",
+    ]
+    missing = [key for key in required if key not in metadata]
+    if missing:
+        raise ValueError(f"❌ repair 후 필수 키 누락: {', '.join(missing)}")
+    if not isinstance(metadata["script"], list) or not all(isinstance(line, str) for line in metadata["script"]):
+        raise ValueError("❌ script는 문자열 리스트여야 함")
+    if not isinstance(metadata["visual_keywords"], list) or not all(isinstance(keyword, str) for keyword in metadata["visual_keywords"]):
+        raise ValueError("❌ visual_keywords는 문자열 리스트여야 함")
+    if not isinstance(metadata["visual_beat_queries"], list) or not all(isinstance(beat, dict) for beat in metadata["visual_beat_queries"]):
+        raise ValueError("❌ visual_beat_queries는 객체 리스트여야 함")
+    if not all(isinstance(beat.get("beat"), str) and isinstance(beat.get("query"), str) for beat in metadata["visual_beat_queries"]):
+        raise ValueError("❌ visual_beat_queries 항목은 beat/query 문자열을 포함해야 함")
+    if not isinstance(metadata["caption_chunks"], list) or not all(isinstance(chunk, str) for chunk in metadata["caption_chunks"]):
+        raise ValueError("❌ caption_chunks는 문자열 리스트여야 함")
+    if metadata.get("bg_strategy") not in {"story", "asmr", "hybrid"}:
+        raise ValueError("❌ bg_strategy는 story, asmr, hybrid 중 하나여야 함")
+    metadata["first_frame_text"] = _clean_first_frame_text(metadata.get("first_frame_text"))
+    metadata["first_2_seconds"] = _clean_short_hook_text(metadata.get("first_2_seconds"), max_chars=95)
 
 
 def _source_preflight_error(post: Dict[str, Any]) -> str:
@@ -863,12 +885,131 @@ def _accept_metadata(
     metadata_list: list[Dict[str, Any]],
     previous_history: list[Dict[str, Any]],
 ) -> None:
+    _gate_metadata(metadata, metadata_list, previous_history)
+    metadata_list.append(metadata)
+
+
+def _gate_metadata(
+    metadata: Dict[str, Any],
+    metadata_list: list[Dict[str, Any]],
+    previous_history: list[Dict[str, Any]],
+) -> None:
     apply_script_fingerprint(metadata)
     ensure_content_gate(metadata, stage="script_accept")
     diversity_issues = batch_diversity_issues(metadata, metadata_list, previous_history)
     if diversity_issues:
         raise ValueError(f"batch_diversity_failed: {diversity_issues_to_reason(diversity_issues)}")
-    metadata_list.append(metadata)
+
+
+def _finalize_candidate(
+    metadata: Dict[str, Any],
+    metadata_list: list[Dict[str, Any]],
+    previous_history: list[Dict[str, Any]],
+    post: dict,
+    *,
+    append: bool = True,
+) -> Dict[str, Any]:
+    _gate_metadata(metadata, metadata_list, previous_history)
+    if _after_local_gate_critic_enabled():
+        metadata = _run_after_local_gate_critic(metadata, post)
+        _gate_metadata(metadata, metadata_list, previous_history)
+    if append:
+        metadata_list.append(metadata)
+    return metadata
+
+
+def _after_local_gate_critic_enabled() -> bool:
+    if os.getenv("SCRIPT_CRITIC_STAGE", "after_local_gate").strip().lower() != "after_local_gate":
+        return False
+    return os.getenv("SCRIPT_CRITIC_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _run_after_local_gate_critic(metadata: Dict[str, Any], post: dict) -> Dict[str, Any]:
+    metadata["critic_stage"] = "after_local_gate"
+    critic = critique_script(_source_prompt_for_critic(post), metadata)
+    failure = _critic_hard_failure(critic)
+    if failure:
+        metadata["critic_attempt_count"] = int(metadata.get("critic_attempt_count") or 0) + 1
+        metadata["critic_scores"] = {
+            "ai_smell_score": critic.ai_smell_score,
+            "native_naturalness_score": critic.native_naturalness_score,
+            "retention_score": critic.retention_score,
+            "specificity_score": critic.specificity_score,
+            "hook_score": critic.hook_score,
+            "payoff_score": critic.payoff_score,
+            "comment_potential_score": critic.comment_potential_score,
+        }
+        metadata["critic_problems"] = list(critic.problems or [])
+        metadata["critic_rewrite_instructions"] = list(critic.rewrite_instructions or [])
+        metadata["critic_passed"] = False
+        raise ValueError(
+            "native_viewer_critic_failed: "
+            f"{failure}; problems={critic.problems}; rewrite_instructions={critic.rewrite_instructions}"
+        )
+    return apply_critic_to_metadata(metadata, critic)
+
+
+def _source_prompt_for_critic(post: dict) -> str:
+    source = build_source_profile(post)
+    return "\n".join(
+        [
+            "[Source metadata]",
+            f"- Source provider: {source.provider or 'unknown'}",
+            f"- Source URL: {source.source_url or 'unknown'}",
+            f"- Source length: {source.char_count} chars, {source.word_count} words",
+            "[Original source]",
+            f"Title: {post.get('title', '')}",
+            f"Content:\n{post.get('content', '')}",
+        ]
+    )
+
+
+def _repair_only_retry(
+    metadata: Dict[str, Any],
+    post: dict,
+    metadata_list: list[Dict[str, Any]],
+    previous_history: list[Dict[str, Any]],
+    *,
+    append: bool = True,
+) -> tuple[Dict[str, Any] | None, str]:
+    retry_metadata, repair_actions = repair_metadata(metadata, post, stage="repair_only_retry")
+    retry_metadata["repair_only_retry_attempted"] = True
+    retry_metadata["repair_only_retry_passed"] = False
+    try:
+        retry_metadata = _attach_source_metadata(retry_metadata, post)
+        _validate_full_metadata_after_repair(retry_metadata)
+        script_length = len(script_text(retry_metadata))
+        if script_length < MIN_SCRIPT_CHARS:
+            raise ValueError(f"❌ script가 너무 짧음 (현재 {script_length}자)")
+        if script_length > MAX_SCRIPT_CHARS:
+            raise ValueError(f"❌ script가 쇼츠 목표보다 너무 긺 (현재 {script_length}자)")
+        retry_metadata["visual_keywords"] = _clean_visual_keywords(retry_metadata["visual_keywords"])
+        retry_metadata["script_char_count"] = script_length
+        if post and post.get("content"):
+            quality_issues = validate_script_quality(retry_metadata, post)
+            hard_errors = hard_quality_errors(quality_issues)
+            if hard_errors:
+                raise ValueError(f"❌ 품질검증 실패: {quality_issues_to_regenerate_reason(hard_errors)}")
+            retry_metadata["quality_warnings"] = [
+                {"code": issue.code, "message": issue.message}
+                for issue in quality_issues
+                if not issue.hard
+            ]
+        apply_youtube_metadata_style(retry_metadata)
+        apply_script_fingerprint(retry_metadata)
+        retry_metadata = _finalize_candidate(retry_metadata, metadata_list, previous_history, post, append=append)
+        retry_metadata["repair_only_retry_passed"] = True
+        return retry_metadata, ""
+    except Exception as exc:
+        return None, str(exc)
+
+
+def _script_chars_from_result(result: DraftScript | ReturnScript | None) -> int | None:
+    if result is None:
+        return None
+    if isinstance(result, DraftScript):
+        return len(script_text(draft_to_metadata(result)))
+    return len(script_text(result.model_dump()))
 
 
 def _load_previous_accepted_metadata(limit: int = 50) -> list[Dict[str, Any]]:
@@ -939,11 +1080,12 @@ def generate_scripts_from_filtered():
 
         while try_count <= max_retries:
             result = None
+            metadata = None
             try:
                 if try_count == 0:
-                    result: ReturnScript = call_gpt_generate_script(title, content, post=post)
+                    result: DraftScript = call_gpt_generate_script(title, content, post=post)
                 else:
-                    result: ReturnScript = call_gpt_generate_script(
+                    result: DraftScript = call_gpt_generate_script(
                         title,
                         content,
                         post=post,
@@ -972,13 +1114,12 @@ def generate_scripts_from_filtered():
                 metadata["failure_action"] = ""
                 metadata["final_failure_codes"] = []
 
-                _accept_metadata(metadata, metadata_list, previous_history)
+                metadata = _finalize_candidate(metadata, metadata_list, previous_history, post)
                 break  # 성공 시 루프 종료
 
             except Exception as e:
-                char_count = None
-                if isinstance(result, ReturnScript):
-                    char_count = len(script_text(result.model_dump()))
+                char_count = _script_chars_from_result(result)
+                if result is not None:
                     print(f"⚠️ GPT 응답 검증 실패 (post {idx}, 시도 {try_count+1}, script_chars={char_count}): {e}")
                 msg = str(e)
                 if _is_llm_quota_error(msg) and _local_fallback_enabled():
@@ -993,6 +1134,13 @@ def generate_scripts_from_filtered():
                         print(f"🚫 로컬 fallback 실패 (post {idx}): {fallback_error}")
                         break
                 failure_action = classify_failure(msg, script_chars=char_count, repeated=try_count >= max_retries)
+                if failure_action == FailureAction.REPAIR_ONLY and metadata is not None:
+                    retry_metadata, retry_error = _repair_only_retry(metadata, post, metadata_list, previous_history)
+                    if retry_metadata is not None:
+                        print(f"🛠️ repair-only retry accepted (post {idx}): {origin_id}")
+                        break
+                    msg = retry_error or msg
+                    print(f"🚫 repair-only retry failed (post {idx}): {msg}")
                 if failure_action in {FailureAction.REPAIR_ONLY, FailureAction.SKIP_SOURCE}:
                     failed_items.append(
                         {
@@ -1106,17 +1254,22 @@ def regenerate_post_by_id(post_id, regenerate_reason=None, max_retries=2):
     content = target_post.get("content", "")
     origin_id = target_post.get("id")
     try_count = 0
+    max_retries = max(0, min(max_retries, _max_llm_drafts_per_source() - 1))
+    previous_history = _load_previous_accepted_metadata()
+    scratch_metadata: list[Dict[str, Any]] = []
     preflight_error = _source_preflight_error(target_post)
     if preflight_error:
         print(f"🚫 원문 품질 미달로 재생성 불가 (postId={post_id}): {preflight_error}")
         return None
 
     while try_count <= max_retries:
+        result = None
+        metadata = None
         try:
             if try_count == 0:
-                result: ReturnScript = call_gpt_generate_script(title, content, post=target_post)
+                result: DraftScript = call_gpt_generate_script(title, content, post=target_post)
             else:
-                result: ReturnScript = call_gpt_generate_script(
+                result: DraftScript = call_gpt_generate_script(
                     title,
                     content,
                     post=target_post,
@@ -1136,13 +1289,16 @@ def regenerate_post_by_id(post_id, regenerate_reason=None, max_retries=2):
             if origin_id is not None:
                 metadata["id"] = origin_id
                 metadata["uploaded"] = False
+            metadata["generation_attempt_count"] = try_count + 1
+            metadata["llm_draft_count"] = try_count + 1
+            metadata["failure_action"] = ""
+            metadata["final_failure_codes"] = []
 
-            # ★ final_metadata와 동일 구조(dict) 반환
-            return metadata
+            return _finalize_candidate(metadata, scratch_metadata, previous_history, target_post, append=False)
 
         except Exception as e:
             print(f"⚠️ 오류 (postId={post_id}, 시도 {try_count+1}): {e}")
-            if 'result' in locals() and isinstance(result, ReturnScript):
+            if result is not None:
                 print(
                     f"🧠 마지막 GPT 응답:\n"
                     f"{json.dumps(result.model_dump(), ensure_ascii=False, indent=2)}\n"
@@ -1156,6 +1312,17 @@ def regenerate_post_by_id(post_id, regenerate_reason=None, max_retries=2):
                 except Exception as fallback_error:
                     print(f"🚫 로컬 fallback 재생성 실패 (postId={post_id}): {fallback_error}")
                     return None
+            failure_action = classify_failure(msg, script_chars=_script_chars_from_result(result), repeated=try_count >= max_retries)
+            if failure_action == FailureAction.REPAIR_ONLY and metadata is not None:
+                retry_metadata, retry_error = _repair_only_retry(metadata, target_post, scratch_metadata, previous_history, append=False)
+                if retry_metadata is not None:
+                    print(f"🛠️ repair-only retry 재생성 성공 (postId={post_id})")
+                    return retry_metadata
+                print(f"🚫 repair-only retry 재생성 실패 (postId={post_id}): {retry_error}")
+                return None
+            if failure_action == FailureAction.SKIP_SOURCE:
+                print(f"🚫 재생성 스킵 (postId={post_id}): action={failure_action.value} error={msg}")
+                return None
             regenerate_reason = _regenerate_reason_from_error(msg)
             try_count += 1
 
