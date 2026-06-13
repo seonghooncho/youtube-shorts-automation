@@ -2,7 +2,7 @@ import pytest
 
 from generator.text.generate_script import ReturnScript
 from generator.text.generate_scripts_from_filtered import validate_and_parse_metadata
-from generator.text.script_quality import validate_script_quality
+from generator.text.script_quality import _first_sentence, _has_hook_stakes, validate_script_quality
 
 
 def _market_fields(**overrides):
@@ -299,3 +299,17 @@ def test_without_consent_hook_counts_as_crossed_boundary():
     issues = validate_script_quality(metadata, source)
 
     assert "weak_first_2_seconds" not in {issue.code for issue in issues}
+
+
+def test_sentence_split_handles_closing_quote():
+    text = 'My neighbor called me petty in the chat." Then he kept using my driveway.'
+
+    assert _first_sentence(text) == "My neighbor called me petty in the chat."
+
+
+def test_blocked_and_turned_count_as_hook_stakes():
+    assert _has_hook_stakes("my neighbor blocked my front gate")
+    assert _has_hook_stakes("my neighbor turned two favors into a personal parking spot")
+    assert _has_hook_stakes("my coworkers drank coffee i paid for")
+    assert _has_hook_stakes("my uncle gave away my bedroom")
+    assert _has_hook_stakes("they mocked me for asking them to chip in")

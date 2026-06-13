@@ -19,7 +19,7 @@ MIN_SOURCE_CHARS = 550
 
 _WORD_RE = re.compile(r"[A-Za-z][A-Za-z']+")
 _AGE_RE = re.compile(r"\b(?:1[0-7])\s*(?:f|m|yo|y/o|year old|years old)?\b|\b(?:minor|underage|teen|teenage|high school)\b")
-_SENTENCE_END_RE = re.compile(r"(?<=[.!?])\s+")
+_SENTENCE_END_RE = re.compile(r"(?<=[.!?])[\"'”’)]*\s+")
 _SLOW_HOOK_PREFIXES = (
     "so get this",
     "a little backstory",
@@ -36,6 +36,7 @@ _HOOK_STAKES_TERMS = {
     "blamed",
     "banned",
     "borrowed",
+    "blocked",
     "broke",
     "called me",
     "caught",
@@ -45,10 +46,12 @@ _HOOK_STAKES_TERMS = {
     "demanded",
     "denied",
     "destroyed",
+    "drank",
     "dumped",
     "embarrassed",
     "exposed",
     "forced",
+    "gave away",
     "hid",
     "humiliated",
     "ignored",
@@ -59,7 +62,10 @@ _HOOK_STAKES_TERMS = {
     "lied",
     "locked",
     "made me pay",
+    "mocked",
     "opened",
+    "paid for",
+    "paying",
     "pressured",
     "promised",
     "punctured",
@@ -76,6 +82,7 @@ _HOOK_STAKES_TERMS = {
     "told everyone",
     "took",
     "trashed",
+    "turned",
     "used",
     "without a yes",
     "without asking",
