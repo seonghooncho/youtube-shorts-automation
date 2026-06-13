@@ -135,6 +135,8 @@ def _load_metadata() -> tuple[list[dict[str, Any]], str]:
     if not bucket_name:
         return [], PUBLISH_METADATA_KEY
     for key in (PUBLISH_METADATA_KEY, LEGACY_METADATA_KEY):
+        if key == LEGACY_METADATA_KEY and _is_production_env() and not _bool_setting("ALLOW_LEGACY_UPLOAD_METADATA", False):
+            continue
         try:
             response = s3.get_object(Bucket=bucket_name, Key=key)
             return json.loads(response["Body"].read().decode("utf-8")), key
@@ -212,7 +214,10 @@ def _download_video(video_key: str, content_id: str, local_path: str) -> str:
     bucket_name = _setting("S3_BUCKET_NAME", os.getenv("BUCKET_NAME", ""))
     if not bucket_name:
         raise RuntimeError("S3_BUCKET_NAME is not configured")
-    for key in (video_key, f"shorts/videos/{content_id}.mp4"):
+    candidate_keys = [video_key]
+    if not _is_production_env() or _bool_setting("ALLOW_LEGACY_VIDEO_FALLBACK", False):
+        candidate_keys.append(f"shorts/videos/{content_id}.mp4")
+    for key in candidate_keys:
         try:
             s3.download_file(bucket_name, key, local_path)
             return key
@@ -361,11 +366,22 @@ def _upload_youtube(file_path: str, item: dict[str, Any], config: dict[str, str]
 
 
 def _metadata_safety_error(item: dict[str, Any]) -> str:
-    source_provider = str(item.get("source_provider") or "").strip().lower()
+    if item.get("dry_run") is True:
+        return "unsafe_metadata:dry_run_item_not_allowed_downstream"
+    source_provider = str(item.get("source_provider") or item.get("source_authenticity") or "").strip().lower()
+    if _is_production_env() and source_provider not in {"reddit", "pullpush", "synthetic"} and not _bool_setting("ALLOW_UNKNOWN_SOURCE_PROVIDER", False):
+        return "unsafe_metadata:source_provider:unknown"
     if source_provider == "synthetic" and not _bool_setting("ALLOW_SYNTHETIC_IN_PRODUCTION", False):
         return "unsafe_metadata:source_provider:synthetic_disabled"
     if source_provider in {"reddit", "pullpush"} and not str(item.get("source_url") or "").strip() and not _bool_setting("ALLOW_MISSING_SOURCE_URL", False):
         return "unsafe_metadata:source_url:missing"
+    if (
+        source_provider in {"reddit", "pullpush"}
+        and not _source_context_text(item)
+        and _is_production_env()
+        and not _bool_setting("ALLOW_MISSING_SOURCE_CONTEXT", False)
+    ):
+        return "unsafe_metadata:source_context:missing"
     if item.get("generation_fallback") == "local_template" and not _bool_setting("ALLOW_LOCAL_TEMPLATE_UPLOAD", False):
         return "unsafe_metadata:generation_fallback:local_template_disabled"
     if not str(item.get("public_title") or "").strip():
@@ -384,6 +400,9 @@ def _metadata_safety_error(item: dict[str, Any]) -> str:
     critic_error = _critic_safety_error(item.get("critic_scores") or {})
     if critic_error:
         return critic_error
+    caption_error = _caption_alignment_error(item)
+    if caption_error:
+        return caption_error
     fields = {
         "title": item.get("title", ""),
         "description": item.get("description", ""),
@@ -399,6 +418,55 @@ def _metadata_safety_error(item: dict[str, Any]) -> str:
     except ValueError as exc:
         return str(exc)
     return ""
+
+
+def _source_context_text(item: dict[str, Any]) -> str:
+    return str(item.get("source_content_excerpt") or item.get("source_content") or "").strip()
+
+
+def _caption_alignment_error(item: dict[str, Any]) -> str:
+    chunks = [str(chunk or "").strip() for chunk in item.get("caption_chunks") or [] if str(chunk or "").strip()]
+    if not chunks:
+        return ""
+    narration = str(item.get("tts_text") or " ".join(str(line or "") for line in item.get("voiceover_lines") or item.get("script") or [])).strip()
+    narration_tokens = _word_tokens(narration)
+    cursor = 0
+    max_gap = _int_setting("CAPTION_CHUNK_MAX_TOKEN_GAP", 2)
+    for index, chunk in enumerate(chunks, start=1):
+        chunk_tokens = _word_tokens(chunk)
+        if not chunk_tokens:
+            continue
+        span_start, span_end = _find_token_span(chunk_tokens, narration_tokens, cursor, max_gap)
+        if span_start < 0:
+            return f"unsafe_metadata:caption_chunks_not_in_tts_text:chunk_{index}"
+        cursor = span_end + 1
+    return ""
+
+
+def _find_token_span(chunk_tokens: list[str], narration_tokens: list[str], start: int, max_gap: int) -> tuple[int, int]:
+    for candidate_start in range(start, len(narration_tokens)):
+        if narration_tokens[candidate_start] != chunk_tokens[0]:
+            continue
+        pos = candidate_start
+        ok = True
+        for token in chunk_tokens[1:]:
+            found = -1
+            search_end = min(len(narration_tokens), pos + max_gap + 2)
+            for probe in range(pos + 1, search_end):
+                if narration_tokens[probe] == token:
+                    found = probe
+                    break
+            if found < 0:
+                ok = False
+                break
+            pos = found
+        if ok:
+            return candidate_start, pos
+    return -1, -1
+
+
+def _word_tokens(text: str) -> list[str]:
+    return [match.group(0).lower().strip("'") for match in re.finditer(r"[A-Za-z0-9']+", str(text or ""))]
 
 
 def _predicted_safety_error(item: dict[str, Any]) -> str:
@@ -584,3 +652,7 @@ def _int_setting(name: str, default: int) -> int:
 def _bool_setting(name: str, default: bool) -> bool:
     raw = _setting(name, "1" if default else "0")
     return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _is_production_env() -> bool:
+    return any(_setting(name, os.getenv(name, "")).strip().lower() == "production" for name in ("APP_ENV", "YT_ENV"))

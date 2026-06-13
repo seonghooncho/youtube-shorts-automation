@@ -20,6 +20,8 @@ locals {
   ssm_parameter_prefix = "/ytshorts"
 
   runtime_config_values = {
+    APP_ENV                           = "production"
+    YT_ENV                            = "production"
     AWS_REGION                        = var.aws_region
     AWS_DEFAULT_REGION                = var.aws_region
     S3_BUCKET_NAME                    = aws_s3_bucket.artifacts.bucket
@@ -51,6 +53,14 @@ locals {
     FILTER_MODEL                      = var.openai_filter_model
     SCRIPT_MODEL                      = var.openai_script_model
     SOURCE_SCORE_MIN_AVG              = "4.0"
+    SOURCE_LLM_EVAL_LIMIT             = "8"
+    SOURCE_LOCAL_PRERANK_ENABLED      = "1"
+    SCRIPT_MAX_LLM_DRAFTS_PER_SOURCE  = "2"
+    SCRIPT_ENABLE_JSON_FALLBACK       = "0"
+    SCRIPT_MAX_STRUCTURED_ATTEMPTS    = "1"
+    SCRIPT_RETRY_ON_TOKEN_LIMIT_ONLY  = "1"
+    SCRIPT_OUTPUT_TOKEN_BUDGETS       = "1600,2200,3000"
+    SCRIPT_CRITIC_SAMPLE_RATE         = "0.0"
     SCRIPT_TARGET_MIN_CHARS           = "820"
     SCRIPT_TARGET_MAX_CHARS           = "980"
     TTS_BASE_SPEED                    = "1.18"
@@ -64,10 +74,18 @@ locals {
     SHORTS_BG_FAST_MIN_CLIP_SECONDS   = "2.2"
     SHORTS_BG_FAST_MAX_CLIP_SECONDS   = "3.5"
     CAPTION_FONT_SIZE                 = "114"
+    CAPTION_RENDER_MODE               = "chunk"
+    CAPTION_CHUNK_FONT_SIZE           = "92"
+    CAPTION_CHUNK_MAX_CHARS           = "42"
+    CAPTION_CHUNK_LINE_CHARS          = "22"
+    CAPTION_CHUNK_MAX_TOKEN_GAP       = "2"
     CAPTION_OUTLINE                   = "7"
     CAPTION_SHADOW                    = "0"
     CAPTION_MAX_CHARS                 = "14"
     CAPTION_FADE_MS                   = "0"
+    OPENING_SILENCE_SECONDS           = "0.25"
+    FIRST_FRAME_TEXT_ENABLED          = "1"
+    FIRST_FRAME_TEXT_DURATION         = "0.9"
     SHORTS_SCALE_FILTER               = "lanczos"
     BG_SEGMENT_PRESET                 = "fast"
     BG_SEGMENT_CRF                    = "18"
@@ -91,6 +109,10 @@ locals {
     "HF_TOKEN",
     "PIXABAY_API_KEY",
     "SLACK_WEBHOOK_URL",
+    "YOUTUBE_CLIENT_ID",
+    "YOUTUBE_CLIENT_SECRET",
+    "YOUTUBE_REFRESH_TOKEN",
+    "YOUTUBE_TOKEN_URI",
   ]
 
   batch_runtime_config_names = [
@@ -1473,14 +1495,22 @@ resource "aws_sfn_state_machine" "pipeline" {
         Type = "Succeed"
       }
       PublishReady = {
-        Type     = "Task"
-        Resource = "arn:aws:states:::lambda:invoke"
+        Type       = "Task"
+        Resource   = "arn:aws:states:::batch:submitJob.sync"
+        ResultPath = null
         Parameters = {
-          FunctionName = aws_lambda_function.publisher.arn
-          "Payload.$"  = "$"
+          JobName       = "${var.project_name}-upload"
+          JobQueue      = aws_batch_job_queue.pipeline.arn
+          JobDefinition = aws_batch_job_definition.stage.arn
+          ContainerOverrides = {
+            Environment = [
+              { Name = "MODE", Value = "upload" },
+              { Name = "APP_ENV", Value = "production" },
+              { Name = "YT_ENV", Value = "production" }
+            ]
+          }
         }
-        OutputPath = "$.Payload"
-        End        = true
+        End = true
       }
     }
   })

@@ -149,7 +149,7 @@ def _repair_retention_angle(item: dict, post: dict, actions: list[dict]) -> None
         after = "A home privacy violation, surprise entries, a cat sitter receipt, and a chain-lock decision create a clear debate."
     elif _is_dad_admin_pressure(combined):
         after = "Constant family demands, phone-call receipts, and the choice to stop helping make the conflict highly debatable."
-    elif _has_any(combined, ("van", "dent", "damage", "repair")):
+    elif _is_vehicle_damage_conflict(combined):
         after = "Property damage, a clear driving rule, and a repair bill create a simple but divisive family argument."
     else:
         after = "A concrete crossed line, visible consequence, and final decision give viewers a clear side to argue."
@@ -340,7 +340,7 @@ def _deterministic_title(item: dict, post: dict) -> str:
         return "Her Cat Bit Mine Twice, Then She Refused To Pay"
     if _is_four_kids_conflict(combined):
         return "He Left Me With Four Kids"
-    if _has_any(combined, ("daughter", "van", "dented", "dent")):
+    if _is_vehicle_damage_conflict(combined):
         return "My Daughter Dented My Van"
     if _is_bank_alert_conflict(combined):
         return "My Boyfriend Deleted My Bank Alert"
@@ -391,7 +391,7 @@ def _opening_query(item: dict, post: dict) -> str:
         candidates = ["laundry room washing machines"]
     elif _has_any(combined, ("storage unit", "boxes")):
         candidates = ["storage unit boxes"]
-    elif _has_any(combined, ("van", "dent", "dented")):
+    elif _is_vehicle_damage_conflict(combined):
         candidates = ["dented van parking lot", "damaged van close up"]
     elif _is_bank_alert_conflict(combined):
         candidates = ["bank phone alert", "food order phone"]
@@ -435,7 +435,7 @@ def _decision_query(item: dict, post: dict) -> str:
     combined = _combined_text(item, post)
     if _is_pet_medical_conflict(combined):
         return "person texting vet bill"
-    if _has_any(combined, ("van", "dent")):
+    if _is_vehicle_damage_conflict(combined):
         return "car repair bill decision"
     if _is_bank_alert_conflict(combined):
         return "person checking bank app"
@@ -456,7 +456,7 @@ def _supporting_visual_queries(item: dict, post: dict) -> list[str]:
     combined = _combined_text(item, post)
     if _is_pet_medical_conflict(combined):
         return ["cat apartment living room", "veterinary bill close up", "phone text messages"]
-    if _has_any(combined, ("van", "dent", "dented")):
+    if _is_vehicle_damage_conflict(combined):
         return ["damaged car close up", "auto repair estimate", "parking lot car"]
     if _is_bank_alert_conflict(combined):
         return ["bank app phone close up", "food delivery phone order", "couple arguing kitchen"]
@@ -503,7 +503,7 @@ def _source_grounded_repair_lines(item: dict, post: dict) -> list[str]:
             "He had VA options, but he still handed banks and clinics my phone number.",
             "The appointment texts kept landing on my phone while he ignored the paperwork.",
         ]
-    if _has_any(combined, ("van", "dent", "repair", "damage")):
+    if _is_vehicle_damage_conflict(combined):
         return [
             "That meant a real repair bill, not just an awkward family argument.",
             "The dent was on the van door exactly where I told her not to park it.",
@@ -683,7 +683,14 @@ def _first_line(item: dict) -> str:
 
 
 def _has_any(text: str, terms: tuple[str, ...]) -> bool:
-    return any(term in text for term in terms)
+    lowered = str(text or "").lower()
+    for term in terms:
+        clean = str(term or "").strip().lower()
+        if not clean:
+            continue
+        if re.search(rf"(?<![a-z0-9]){re.escape(clean)}(?![a-z0-9])", lowered):
+            return True
+    return False
 
 
 def _is_pet_medical_conflict(text: str) -> bool:
@@ -752,6 +759,14 @@ def _is_phone_contract_conflict(text: str) -> bool:
     has_phone_bill = bool(re.search(r"\b(?:phone contract|phone bill|mobile contract|20 phone|£20 phone|contract)\b", lowered))
     has_family_accusation = bool(re.search(r"\b(?:stepmum|stepmom|dad|father|accused|raging|furious)\b", lowered))
     return has_phone_bill and has_family_accusation
+
+
+def _is_vehicle_damage_conflict(text: str) -> bool:
+    lowered = str(text or "").lower()
+    has_vehicle = bool(re.search(r"\b(?:van|car|vehicle)\b", lowered))
+    has_damage = bool(re.search(r"\b(?:dent|dented|scratch|scratched|damage|damaged|repair|estimate)\b", lowered))
+    has_actor = bool(re.search(r"\b(?:daughter|son|cousin|sister|brother|friend|roommate|neighbor|she|he|they)\b", lowered))
+    return has_vehicle and has_damage and has_actor
 
 
 def _has_retention_signal(text: str) -> bool:

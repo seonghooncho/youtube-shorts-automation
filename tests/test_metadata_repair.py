@@ -386,6 +386,38 @@ def test_ex_bills_story_repairs_to_message_and_bill_metadata():
     assert repaired["opening_visual_query"] == "phone messages bills"
 
 
+def test_dress_party_story_does_not_match_vehicle_damage_template():
+    lines = [
+        "My boyfriend's sister spilled red wine on my dress at our engagement party.",
+        "She laughed it off in front of everyone and said accidents happen at crowded tables.",
+        "The receipt showed the dress alteration was paid for two days before the party.",
+        "I asked her to cover the cleaning bill, but she told the family I was being dramatic.",
+        "Then his mom said I should forgive it because the photos already looked fine.",
+        "I sent the cleaning quote and stopped letting them rewrite what happened.",
+        "Now they say I ruined the party by caring more about a dress than family.",
+        "Would you ask her to pay for the dress cleaning?",
+    ]
+    metadata = _short_cat_metadata() | {
+        "voiceover_lines": lines,
+        "script": lines,
+        "tts_text": " ".join(lines),
+        "title": "AITA for asking about the dress?",
+        "public_title": "AITA for asking about the dress?",
+        "viewer_question": lines[-1],
+    }
+    post = {
+        "title": "AITA for asking my boyfriend's sister to pay for my dress?",
+        "content": " ".join(lines),
+        "source_provider": "pullpush",
+    }
+
+    repaired, _actions = repair_metadata(metadata, post)
+
+    assert repaired["public_title"] != "My Daughter Dented My Van"
+    assert repaired["opening_visual_query"] != "dented van parking lot"
+    assert "VAN" not in repaired["first_frame_text"]
+
+
 def test_dinner_job_story_repairs_to_insult_metadata():
     lines = [
         "Her boyfriend mocked my job at dinner, then expected to sleep in our guest room.",
