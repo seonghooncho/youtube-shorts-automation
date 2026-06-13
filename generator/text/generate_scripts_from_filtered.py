@@ -1,9 +1,14 @@
 # shared/jobs/generate_scripts_from_filtered.py
 
 import json
+import os
+import re
 from typing import Any, Dict
 from generator.text.generate_script import generate_script, ReturnScript
 from generator.text.script_quality import (
+    MAX_SCRIPT_CHARS,
+    TARGET_MAX_SCRIPT_CHARS,
+    TARGET_MIN_SCRIPT_CHARS,
     build_source_profile,
     hard_quality_errors,
     quality_issues_to_regenerate_reason,
@@ -59,6 +64,7 @@ EXAMPLE_JSON = """
 def call_gpt_generate_script(title, content, post=None, regenerate_reason=None):
     source = build_source_profile(post or {"title": title, "content": content})
     performance_context = _performance_context()
+    target_min_chars, target_max_chars = _script_target_window()
     # 2) f-string은 치환이 필요한 부분(제목/본문)만 사용
     parts = [
         "You are adapting a Reddit story into a YouTube Shorts narration.",
@@ -93,9 +99,12 @@ def call_gpt_generate_script(title, content, post=None, regenerate_reason=None):
         "- The first 3 paragraphs must follow this rhythm: hook result, quick context, then unexpected escalation. Do not explain every detail chronologically.",
         "- Every paragraph should either add a new problem, raise the stakes, or move toward the final decision. Cut neutral reflection.",
         "- Keep the pacing fast. Remove filler, repeated setup, and slow explanations. The narration should still be understandable after a moderate speed-up.",
-        "- Structure the story in a `script` array of 5 to 7 short paragraphs. Never use more than 9 paragraphs.",
-        "- The entire script should target 820 to 980 characters, with an ideal landing point around 900 characters.",
-        "- Anything over 1150 characters is invalid. Cut harder instead of explaining more.",
+        "- Structure the story in a `script` array of exactly 5 or 6 short paragraphs.",
+        f"- The joined `script` narration must be {target_min_chars} to {target_max_chars} characters, including spaces.",
+        f"- Anything over {MAX_SCRIPT_CHARS} characters is invalid. Cut harder instead of explaining more.",
+        "- Paragraph length limits: hook under 135 characters, middle paragraphs under 185 characters each, final paragraph under 170 characters.",
+        "- Before returning, silently count the joined `script` characters and cut until it fits the target window. Do not reveal the count.",
+        "- Prefer 145 to 185 spoken words total. Remove repeated history, extra dialogue, and neutral reflection first.",
         "- The target final narration length is roughly 42 to 65 seconds after a moderate speed-up. Prefer concise sentences over long paragraphs.",
         "- The script should never feel stretched, repetitive, or abruptly shortened; keep only the setup, escalation, decision, and question.",
         "- Keep the final paragraph short. Do not pack new facts and the viewer question into one overloaded sentence.",
@@ -147,6 +156,19 @@ def _performance_context() -> str:
         patterns = {}
     _PERFORMANCE_CONTEXT_CACHE = json.dumps(patterns or {}, ensure_ascii=False)
     return _PERFORMANCE_CONTEXT_CACHE
+
+
+def _int_env(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
+def _script_target_window() -> tuple[int, int]:
+    target_min = _int_env("SCRIPT_TARGET_MIN_CHARS", TARGET_MIN_SCRIPT_CHARS)
+    target_max = _int_env("SCRIPT_TARGET_MAX_CHARS", TARGET_MAX_SCRIPT_CHARS)
+    return target_min, max(target_min, min(target_max, MAX_SCRIPT_CHARS))
 
 
 def validate_and_parse_metadata(result: ReturnScript, idx, post) -> Dict[str, Any]:
@@ -257,9 +279,15 @@ def _source_preflight_error(post: Dict[str, Any]) -> str:
 
 def _regenerate_reason_from_error(message: str) -> str:
     if "너무 짧음" in message or "너무 긺" in message or "character" in message:
+        target_min_chars, target_max_chars = _script_target_window()
+        current_chars = _extract_current_char_count(message)
+        current_phrase = f"The previous joined script was {current_chars} characters. " if current_chars else ""
         return (
-            "The script's length was out of bounds. Please revise it to 780 to 1080 "
-            "characters, ideally around 900 characters, with a concrete conflict hook and no filler."
+            f"{current_phrase}Return the full JSON again, but rewrite the `script` to "
+            f"{target_min_chars}-{target_max_chars} characters total, hard max {MAX_SCRIPT_CHARS}. "
+            "Use exactly 5 short paragraphs. Keep the same source conflict, hook, turning point, payoff, "
+            "and final question. Remove repeated backstory, extra dialogue, and neutral reflection. "
+            "No paragraph may exceed 185 characters."
         )
     if "품질검증 실패" in message:
         return (
@@ -281,6 +309,16 @@ def _regenerate_reason_from_error(message: str) -> str:
     ):
         return "The response did not follow the required JSON structure. Please strictly follow the JSON example format."
     return f"Other error: {message}"
+
+
+def _extract_current_char_count(message: str) -> int | None:
+    match = re.search(r"(?:현재|chars?|characters?)\s*(\d+)|\((\d+)\s*(?:자|chars?)\)", message)
+    if not match:
+        return None
+    for group in match.groups():
+        if group:
+            return int(group)
+    return None
 
 
 def generate_scripts_from_filtered():
@@ -343,10 +381,8 @@ def generate_scripts_from_filtered():
 
             except Exception as e:
                 if isinstance(result, ReturnScript):
-                    print(
-                        f"🧠 GPT 응답 (post {idx}, 시도 {try_count+1}):\n"
-                        f"{json.dumps(result.model_dump(), ensure_ascii=False, indent=2)}\n"
-                    )
+                    char_count = len(script_text(result.model_dump()))
+                    print(f"⚠️ GPT 응답 검증 실패 (post {idx}, 시도 {try_count+1}, script_chars={char_count}): {e}")
                 msg = str(e)
                 regenerate_reason = _regenerate_reason_from_error(msg)
 

@@ -16,6 +16,25 @@ def _get_client() -> openai.OpenAI:
 def _default_model() -> str:
     return os.getenv("SCRIPT_MODEL") or os.getenv("OPENAI_MODEL", "gpt-5.5")
 
+
+def _token_budgets() -> list[int]:
+    raw = os.getenv("SCRIPT_OUTPUT_TOKEN_BUDGETS", "").strip()
+    if raw:
+        budgets: list[int] = []
+        for part in raw.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                value = int(part)
+            except ValueError:
+                continue
+            if value > 0:
+                budgets.append(value)
+        if budgets:
+            return budgets
+    return [3200, 4200, 5200]
+
 # --- Schema ---
 class ReturnScript(BaseModel):
     title: str
@@ -124,7 +143,7 @@ def generate_script(prompt: str) -> ReturnScript:
     2) 실패 시 JSON 모드 폴백 (responses.create + model_validate_json)
     3) 시도별로 토큰 예산 상향 (잘림 방지)
     """
-    budgets = [1800, 2400, 3000]  # 상황에 맞게 조정 가능
+    budgets = _token_budgets()
     last_err: Optional[Exception] = None
     client = _get_client()
 
