@@ -10,10 +10,10 @@ from generator.text.source_integrity import (
 )
 
 
-MIN_SCRIPT_CHARS = 750
-TARGET_MIN_SCRIPT_CHARS = 820
-TARGET_MAX_SCRIPT_CHARS = 980
-MAX_SCRIPT_CHARS = 1150
+MIN_SCRIPT_CHARS = 650
+TARGET_MIN_SCRIPT_CHARS = 650
+TARGET_MAX_SCRIPT_CHARS = 950
+MAX_SCRIPT_CHARS = 1050
 MIN_SOURCE_WORDS = 90
 MIN_SOURCE_CHARS = 550
 
@@ -432,13 +432,14 @@ def build_source_profile(post: Dict[str, Any]) -> SourceProfile:
 
 
 def script_text(metadata: Dict[str, Any]) -> str:
-    return " ".join(str(line or "").strip() for line in metadata.get("script") or []).strip()
+    lines = metadata.get("voiceover_lines") or metadata.get("script") or []
+    return " ".join(str(line or "").strip() for line in lines).strip()
 
 
 def validate_script_quality(metadata: Dict[str, Any], post: Dict[str, Any]) -> List[ScriptQualityIssue]:
     issues: List[ScriptQualityIssue] = []
     source = build_source_profile(post)
-    lines = [str(line or "").strip() for line in metadata.get("script") or [] if str(line or "").strip()]
+    lines = [str(line or "").strip() for line in (metadata.get("voiceover_lines") or metadata.get("script") or []) if str(line or "").strip()]
     text = script_text(metadata)
     lower_text = text.lower()
     char_count = len(text)
@@ -465,18 +466,15 @@ def validate_script_quality(metadata: Dict[str, Any], post: Dict[str, Any]) -> L
         issues.append(ScriptQualityIssue("script_too_short", f"script is too short ({char_count} chars)"))
     if char_count > MAX_SCRIPT_CHARS:
         issues.append(ScriptQualityIssue("script_too_long", f"script is too long ({char_count} chars)"))
-    if len(lines) < 4:
-        issues.append(ScriptQualityIssue("too_few_beats", "script should have at least 4 paragraph beats"))
-    if len(lines) > 9:
-        issues.append(ScriptQualityIssue("too_many_beats", "script should stay within 4 to 9 paragraph beats"))
-    elif len(lines) > 7:
-        issues.append(
-            ScriptQualityIssue(
-                "many_script_paragraphs",
-                f"script is valid but has {len(lines)} paragraphs; 5 to 7 is usually tighter for Shorts",
-                hard=False,
-            )
-        )
+    if len(lines) < 7:
+        issues.append(ScriptQualityIssue("too_few_beats", "script should have 7 to 10 complete voiceover lines"))
+    if len(lines) > 10:
+        issues.append(ScriptQualityIssue("too_many_beats", "script should stay within 7 to 10 complete voiceover lines"))
+    if lines and len(lines[0]) > 120:
+        issues.append(ScriptQualityIssue("hook_too_long", f"first line is too long ({len(lines[0])} chars)"))
+    long_lines = [idx + 1 for idx, line in enumerate(lines) if len(line) > 170]
+    if long_lines:
+        issues.append(ScriptQualityIssue("line_too_long", f"voiceover lines exceed 170 chars: {long_lines[:3]}"))
 
     ai_template_phrase = _first_ai_template_phrase(metadata, lines)
     if ai_template_phrase:
@@ -545,8 +543,10 @@ def validate_script_quality(metadata: Dict[str, Any], post: Dict[str, Any]) -> L
             )
         )
 
-    if "?" not in " ".join(lines[-2:]):
-        issues.append(ScriptQualityIssue("missing_engagement_question", "script should end with a direct question"))
+    if not lines or not lines[-1].strip().endswith("?"):
+        issues.append(ScriptQualityIssue("missing_engagement_question", "final voiceover line should be a separate direct question"))
+    elif any("?" in line for line in lines[:-1]):
+        issues.append(ScriptQualityIssue("question_not_separate", "only the final voiceover line should contain the viewer question"))
 
     hook_type = str(metadata.get("hook_type") or "").strip()
     if len(hook_type) < 3:
@@ -586,7 +586,7 @@ def validate_script_quality(metadata: Dict[str, Any], post: Dict[str, Any]) -> L
             issues.append(
                 ScriptQualityIssue(
                     "late_drag",
-                    f"final paragraph is overloaded ({final_paragraph_len} chars); split payoff and viewer question earlier",
+                    f"final line is overloaded ({final_paragraph_len} chars); split payoff and viewer question earlier",
                     hard=False,
                 )
             )

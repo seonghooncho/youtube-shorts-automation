@@ -1,8 +1,11 @@
+import json
+
 import pytest
 
 from generator.text import generate_script as generate_script_module
 from generator.text.generate_script import NativeViewerCritic, ReturnScript, _token_budgets
 from generator.text.generate_scripts_from_filtered import (
+    EXAMPLE_JSON,
     _build_local_fallback_metadata,
     _is_llm_quota_error,
     _regenerate_reason_from_error,
@@ -30,13 +33,22 @@ def test_regenerate_reason_for_overlength_is_strict(monkeypatch):
 
     assert "1418 characters" in reason
     assert "820-980 characters" in reason
-    assert "exactly 5 short paragraphs" in reason
-    assert "hard max 1150" in reason
+    assert "7 to 10 complete voiceover lines" in reason
+    assert "hard max 1050" in reason
 
 
 def test_llm_quota_error_detection():
     assert _is_llm_quota_error("Error code: 429 - insufficient_quota")
     assert _is_llm_quota_error("You exceeded your current quota")
+
+
+def test_prompt_example_uses_consistent_voiceover_line_standard():
+    example = json.loads(EXAMPLE_JSON)
+
+    assert 7 <= len(example["voiceover_lines"]) <= 10
+    assert example["script"] == example["voiceover_lines"]
+    assert example["caption_chunks"][-1].endswith("?")
+    assert all(len(chunk) <= 42 for chunk in example["caption_chunks"])
 
 
 def test_critic_failure_causes_rewrite_failure(monkeypatch):
@@ -114,7 +126,7 @@ def test_local_fallback_metadata_passes_quality_validation(monkeypatch):
 
     assert metadata["generation_fallback"] == "local_template"
     assert metadata["id"] == "synthetic-test"
-    assert 750 <= metadata["script_char_count"] <= 1150
+    assert 650 <= metadata["script_char_count"] <= 1050
     assert "driveway" in metadata["first_2_seconds"].lower()
 
 
@@ -134,7 +146,7 @@ def test_local_fallback_metadata_covers_synthetic_seed_batch(monkeypatch):
 
     assert len(generated) == 17
     assert all(item["generation_fallback"] == "local_template" for item in generated)
-    assert all(750 <= item["script_char_count"] <= 1150 for item in generated)
+    assert all(650 <= item["script_char_count"] <= 1050 for item in generated)
     assert all("Without asking me first" not in " ".join(item["script"]) for item in generated)
     assert all("one clear boundary in this situation" not in " ".join(item["script"]) for item in generated)
     assert all("At first, My" not in " ".join(item["script"]) for item in generated)

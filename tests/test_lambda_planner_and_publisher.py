@@ -111,9 +111,22 @@ def test_publisher_blocks_internal_upload_metadata(monkeypatch):
     reason = publisher._metadata_safety_error(
         {
             "title": "PENDING",
+            "public_title": "PENDING",
             "description": "A normal story.",
             "tags": ["storytime"],
             "script": ["A normal caption line."],
+            "style_variant": "neighbor_dispute",
+            "script_fingerprint": "abc123",
+            "predicted_retention_score": 8,
+            "predicted_clarity_score": 8,
+            "predicted_ai_smell_score": 3,
+            "predicted_comment_score": 7,
+            "critic_scores": {
+                "ai_smell_score": 3,
+                "native_naturalness_score": 8,
+                "retention_score": 8,
+                "specificity_score": 8,
+            },
         }
     )
 
@@ -148,6 +161,36 @@ def test_publisher_blocks_synthetic_and_local_template_by_default(monkeypatch):
 
     assert synthetic_reason == "unsafe_metadata:source_provider:synthetic_disabled"
     assert fallback_reason == "unsafe_metadata:generation_fallback:local_template_disabled"
+
+
+def test_publisher_blocks_reddit_without_source_url(monkeypatch):
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "ap-northeast-2")
+    publisher = _load_module("publisher_source_url_safety_test_module", "infra/terraform/lambda/publisher.py")
+
+    reason = publisher._metadata_safety_error(
+        {
+            "title": "He Parked In My Driveway #shorts #story",
+            "public_title": "He Parked In My Driveway",
+            "description": "A normal story.",
+            "tags": ["storytime"],
+            "script": ["A normal caption line."],
+            "source_provider": "reddit",
+            "style_variant": "neighbor_dispute",
+            "script_fingerprint": "abc123",
+            "predicted_retention_score": 8,
+            "predicted_clarity_score": 8,
+            "predicted_ai_smell_score": 3,
+            "predicted_comment_score": 7,
+            "critic_scores": {
+                "ai_smell_score": 3,
+                "native_naturalness_score": 8,
+                "retention_score": 8,
+                "specificity_score": 8,
+            },
+        }
+    )
+
+    assert reason == "unsafe_metadata:source_url:missing"
 
 
 def test_publisher_sanitizes_upload_metadata(monkeypatch):

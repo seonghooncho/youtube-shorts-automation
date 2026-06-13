@@ -191,7 +191,7 @@ def test_synthetic_conflict_source_uses_run_batch_id(monkeypatch):
     assert second[0]["id"].startswith("synthetic-run-b-")
 
 
-def test_collect_with_fallback_uses_synthetic_when_external_sources_fail(monkeypatch):
+def test_collect_with_fallback_returns_empty_when_external_sources_fail_by_default(monkeypatch):
     class _BrokenSource:
         def __init__(self, config):
             self.config = config
@@ -205,8 +205,44 @@ def test_collect_with_fallback_uses_synthetic_when_external_sources_fail(monkeyp
 
     posts = collect_with_fallback(config, set())
 
+    assert posts == []
+
+
+def test_collect_with_fallback_uses_synthetic_when_explicitly_enabled(monkeypatch):
+    class _BrokenSource:
+        def __init__(self, config):
+            self.config = config
+
+        def collect(self, scraped_ids):
+            raise RuntimeError("source down")
+
+    monkeypatch.setattr(reddit_sources, "RedditApiSource", _BrokenSource)
+    monkeypatch.setattr(reddit_sources, "PullPushSource", _BrokenSource)
+    config = RedditScrapeConfig(max_posts=2, synthetic_fallback_count=2, synthetic_fallback_enabled=True)
+
+    posts = collect_with_fallback(config, set())
+
     assert len(posts) == 2
     assert all(post["source_provider"] == "synthetic" for post in posts)
+
+
+def test_collect_with_fallback_production_guard_disables_synthetic(monkeypatch):
+    class _BrokenSource:
+        def __init__(self, config):
+            self.config = config
+
+        def collect(self, scraped_ids):
+            raise RuntimeError("source down")
+
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.delenv("ALLOW_SYNTHETIC_IN_PRODUCTION", raising=False)
+    monkeypatch.setattr(reddit_sources, "RedditApiSource", _BrokenSource)
+    monkeypatch.setattr(reddit_sources, "PullPushSource", _BrokenSource)
+    config = RedditScrapeConfig(max_posts=2, synthetic_fallback_count=2, synthetic_fallback_enabled=True)
+
+    posts = collect_with_fallback(config, set())
+
+    assert posts == []
 
 
 def test_collect_with_fallback_supplements_when_pullpush_has_too_few_posts(monkeypatch):
@@ -226,7 +262,7 @@ def test_collect_with_fallback_supplements_when_pullpush_has_too_few_posts(monke
 
     monkeypatch.setattr(reddit_sources, "RedditApiSource", _BrokenReddit)
     monkeypatch.setattr(reddit_sources, "PullPushSource", _EmptyPullPush)
-    config = RedditScrapeConfig(max_posts=4, min_needed=3, synthetic_fallback_count=4)
+    config = RedditScrapeConfig(max_posts=4, min_needed=3, synthetic_fallback_count=4, synthetic_fallback_enabled=True)
 
     posts = collect_with_fallback(config, set())
 

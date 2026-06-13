@@ -1,4 +1,6 @@
+import json
 import os
+import re
 from typing import Any, Dict, List, Literal, Optional
 from dotenv import load_dotenv, find_dotenv
 import openai
@@ -57,6 +59,15 @@ class ReturnScript(BaseModel):
     bg_strategy: Literal["story", "asmr", "hybrid"] = "hybrid"
     rewrite_notes: str = Field("", description="Short note explaining what was tightened for retention.")
     style_variant: str = Field("", description="The concrete storytelling style variant selected for this source.")
+    voiceover_lines: List[str] = Field(default_factory=list)
+    tts_text: str = ""
+    caption_chunks: List[str] = Field(default_factory=list)
+    predicted_retention_score: int = Field(8, ge=1, le=10)
+    predicted_rewatch_score: int = Field(7, ge=1, le=10)
+    predicted_comment_score: int = Field(7, ge=1, le=10)
+    predicted_clarity_score: int = Field(8, ge=1, le=10)
+    predicted_ai_smell_score: int = Field(3, ge=1, le=10)
+    skip_reason: str = ""
     critic_scores: Dict[str, Any] = Field(default_factory=dict)
     critic_problems: List[str] = Field(default_factory=list)
     critic_rewrite_instructions: List[str] = Field(default_factory=list)
@@ -109,7 +120,7 @@ def _try_structured(client: openai.OpenAI, prompt: str, max_output_tokens: int) 
     resp = client.responses.parse(
         model=_default_model(),
         input=[
-            {"role": "system", "content": "You are a YouTube Shorts script writer."},
+            {"role": "system", "content": _script_system_message()},
             {"role": "user", "content": prompt},
         ],
         text_format=ReturnScript,
@@ -130,14 +141,11 @@ def _fallback_json_mode(client: openai.OpenAI, prompt: str, max_output_tokens: i
         model=_default_model(),
         input=[
             {"role": "developer",
-             "content": (
-                  "You are a YouTube Shorts script writer."
-                  "Return content that will be used for TTS. "
-                  "No code fences, no commentary. "
-                  "Do NOT include any control characters (U+0000–U+001F). "
+             "content": _script_system_message() + (
+                  " Return content that will be used for TTS. No code fences, no commentary. "
+                  "Do NOT include any control characters (U+0000-U+001F). "
                   "Do NOT escape them as \\u0001, \\u0002, etc. "
-                  "Output must be clean UTF-8 text only, "
-                  "with plain ASCII quotes and parentheses. "
+                  "Output must be clean UTF-8 text only, with plain ASCII quotes and parentheses."
               )},
             {"role": "user", "content": prompt},
         ],
@@ -188,16 +196,27 @@ def _critic_scores(critic: NativeViewerCritic) -> dict:
 
 
 def _critic_prompt(source_prompt: str, draft: ReturnScript) -> str:
-    return (
-        "Evaluate this draft as a native English-speaking YouTube Shorts viewer.\n"
-        "Return only JSON matching the requested schema.\n\n"
-        "Hard-check whether it sounds like a real person, has a clear first sentence, avoids generic AI Reddit phrasing, "
-        "uses concrete source-grounded details, creates a visual picture each line, and has a payoff before the final question.\n\n"
-        "[Source and generation brief]\n"
-        f"{source_prompt[-6000:]}\n\n"
-        "[Draft JSON]\n"
-        f"{draft.model_dump_json()}"
-    )
+    payload = {
+        "source": _compact_source_from_prompt(source_prompt),
+        "draft": draft.model_dump(),
+        "thresholds": {
+            "ai_smell_score_max": 3,
+            "native_naturalness_score_min": 8,
+            "retention_score_min": 8,
+            "specificity_score_min": 8,
+            "hook_score_min": 8,
+            "payoff_score_min": 8,
+        },
+        "hard_rules": [
+            "Sounds like a real native English speaker, not a template.",
+            "First sentence is immediately clear and concrete.",
+            "Avoid abstract moral framing and banned AI-template phrases.",
+            "Every line creates a visible action, object, message, receipt, bill, camera, app, or place when the source supports it.",
+            "The payoff or receipt appears before the final question.",
+            "The final question is specific, not generic.",
+        ],
+    }
+    return json.dumps(payload, ensure_ascii=False)
 
 
 def critique_script(prompt: str, draft: ReturnScript) -> NativeViewerCritic:
@@ -218,11 +237,40 @@ def critique_script(prompt: str, draft: ReturnScript) -> NativeViewerCritic:
     return parsed
 
 
+def _script_system_message() -> str:
+    return (
+        "You are a native-English Shorts story editor. Write like a real person, not a template. "
+        "Start with a concrete conflict. Do not summarize the structure of the conflict. "
+        "Show concrete actions. Avoid abstract moral framing. Use specific receipts, timestamps, messages, bills, photos, cameras, apps, and group chats when the source supports them. "
+        "Never use banned AI-template phrases such as acted like I was the problem, people are split, keep the peace, let it go, the situation, the issue, what changed everything, The proof was clear, or The boundary was simple. "
+        "Every line must be complete. Weak or generic scripts should fail, not be softened."
+    )
+
+
+def _compact_source_from_prompt(prompt: str) -> dict[str, str]:
+    title_match = re.search(r"Title:\s*(.+)", prompt)
+    provider_match = re.search(r"Source provider:\s*(.+)", prompt)
+    url_match = re.search(r"Source URL:\s*(.+)", prompt)
+    content_match = re.search(r"\[Original source\][\s\S]*?Content:\s*([\s\S]+)$", prompt)
+    content = (content_match.group(1) if content_match else "").strip()
+    return {
+        "source_title": (title_match.group(1) if title_match else "").strip()[:240],
+        "source_provider": (provider_match.group(1) if provider_match else "").strip()[:80],
+        "source_url": (url_match.group(1) if url_match else "").strip()[:500],
+        "source_content_excerpt": content[:3000],
+    }
+
+
 def _apply_critic_metadata(script: ReturnScript, critic: NativeViewerCritic) -> ReturnScript:
     data = script.model_dump()
     data["critic_scores"] = _critic_scores(critic)
     data["critic_problems"] = list(critic.problems or [])
     data["critic_rewrite_instructions"] = list(critic.rewrite_instructions or [])
+    data["predicted_retention_score"] = critic.retention_score
+    data["predicted_rewatch_score"] = max(1, min(10, round((critic.retention_score + critic.hook_score) / 2)))
+    data["predicted_comment_score"] = critic.comment_potential_score
+    data["predicted_clarity_score"] = critic.native_naturalness_score
+    data["predicted_ai_smell_score"] = critic.ai_smell_score
     return ReturnScript.model_validate(data)
 
 
