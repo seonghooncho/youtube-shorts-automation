@@ -135,3 +135,24 @@ def test_publisher_sanitizes_upload_metadata(monkeypatch):
     assert metadata["title"].endswith("#shorts #story #reddit #viral")
     assert metadata["description"] == "A boundary conflict."
     assert metadata["tags"][:2] == ["neighbor", "storytime"]
+
+
+def test_publisher_records_youtube_upload_result(monkeypatch):
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "ap-northeast-2")
+    publisher = _load_module("publisher_upload_result_test_module", "infra/terraform/lambda/publisher.py")
+    target = {"id": "post1"}
+
+    platform_ids = publisher._apply_upload_result(
+        target,
+        youtube_id="abc123",
+        resolved_key="videos/final/post1.mp4",
+        uploaded_at=123456,
+        privacy_status="public",
+    )
+
+    assert platform_ids == {"youtube": "abc123"}
+    assert target["uploaded"] is True
+    assert target["upload_status"] == "UPLOADED"
+    assert target["youtube_id"] == "abc123"
+    assert target["youtube_url"] == "https://www.youtube.com/watch?v=abc123"
+    assert target["privacy_status"] == "public"

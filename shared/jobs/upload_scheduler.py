@@ -70,6 +70,11 @@ def upload_batch_pipeline():
         target["platform_ids"] = platform_ids
         target["upload_status"] = "UPLOADED"
         target["uploaded_at"] = int(time.time())
+        youtube_id = platform_ids.get("youtube")
+        if youtube_id:
+            target["youtube_id"] = youtube_id
+            target["youtube_url"] = f"https://www.youtube.com/watch?v={youtube_id}"
+            target["privacy_status"] = settings.youtube_privacy_status
 
         with open(FINAL_METADATA_FILE, "w", encoding="utf-8") as f:
             json.dump(metadata_list, f, ensure_ascii=False, indent=2)
@@ -80,7 +85,14 @@ def upload_batch_pipeline():
         ContentRepository().mark_status(
             target["id"],
             "UPLOADED",
-            {"platform_ids": platform_ids, "upload_status": "UPLOADED", "uploaded_at": target["uploaded_at"]},
+            {
+                "platform_ids": platform_ids,
+                "youtube_id": youtube_id or "",
+                "youtube_url": target.get("youtube_url", ""),
+                "privacy_status": target.get("privacy_status", ""),
+                "upload_status": "UPLOADED",
+                "uploaded_at": target["uploaded_at"],
+            },
         )
 
         send_slack_message(f"🎉 업로드 완료: {title}")

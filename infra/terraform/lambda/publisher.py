@@ -105,14 +105,9 @@ def handler(event, context):
             return {"status": "blocked", "reason": block_reason, "content_id": content_id}
         youtube_id = _upload_youtube(local_path, target, youtube_config)
 
-    target["uploaded"] = True
-    target["status"] = "UPLOADED"
-    target["upload_status"] = "UPLOADED"
-    target["uploaded_at"] = int(time.time())
-    target["video_key"] = resolved_key
-    platform_ids = target.get("platform_ids") or {}
-    platform_ids["youtube"] = youtube_id
-    target["platform_ids"] = platform_ids
+    uploaded_at = int(time.time())
+    privacy_status = _setting("YOUTUBE_PRIVACY_STATUS", "public")
+    platform_ids = _apply_upload_result(target, youtube_id, resolved_key, uploaded_at, privacy_status)
 
     _save_metadata(metadata, metadata_key)
     _mark_content(
@@ -120,6 +115,9 @@ def handler(event, context):
         "UPLOADED",
         {
             "platform_ids": platform_ids,
+            "youtube_id": youtube_id,
+            "youtube_url": _youtube_url(youtube_id),
+            "privacy_status": privacy_status,
             "uploaded_at": target["uploaded_at"],
             "video_key": resolved_key,
             "upload_status": "UPLOADED",
@@ -227,6 +225,32 @@ def _validate_upload_candidate(local_path: str) -> tuple[bool, str]:
     if size < min_upload_bytes:
         return False, f"video_too_small:{size}<{min_upload_bytes}"
     return True, "ok"
+
+
+def _apply_upload_result(
+    target: dict[str, Any],
+    youtube_id: str,
+    resolved_key: str,
+    uploaded_at: int,
+    privacy_status: str,
+) -> dict[str, str]:
+    platform_ids = target.get("platform_ids") or {}
+    platform_ids["youtube"] = youtube_id
+
+    target["uploaded"] = True
+    target["status"] = "UPLOADED"
+    target["upload_status"] = "UPLOADED"
+    target["uploaded_at"] = uploaded_at
+    target["video_key"] = resolved_key
+    target["platform_ids"] = platform_ids
+    target["youtube_id"] = youtube_id
+    target["youtube_url"] = _youtube_url(youtube_id)
+    target["privacy_status"] = privacy_status
+    return platform_ids
+
+
+def _youtube_url(youtube_id: str) -> str:
+    return f"https://www.youtube.com/watch?v={youtube_id}"
 
 
 def _block_upload(
