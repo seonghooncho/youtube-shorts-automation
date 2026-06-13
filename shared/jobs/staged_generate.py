@@ -288,19 +288,24 @@ def _keep_rendered_metadata_only() -> None:
 
 
 def _render_target_ids() -> list[str] | None:
+    env_ids = _target_ids_from_env()
+    if env_ids:
+        return env_ids
+
+    items = _read_metadata()
+    metadata_ids = [str(item.get("id")) for item in items if item.get("id")]
+
     if os.getenv("RENDER_SHARD_MODE", "").lower().strip() != "array":
-        env_ids = _target_ids_from_env()
-        return env_ids if env_ids else None
+        return metadata_ids
 
     raw_index = os.getenv("AWS_BATCH_JOB_ARRAY_INDEX")
     if raw_index is None:
-        return None
+        return metadata_ids
     try:
         shard_index = int(raw_index)
     except ValueError:
         raise ValueError(f"Invalid AWS_BATCH_JOB_ARRAY_INDEX: {raw_index}")
 
-    items = _read_metadata()
     if shard_index >= len(items):
         return []
     content_id = str(items[shard_index].get("id") or "")
