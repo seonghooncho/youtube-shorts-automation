@@ -341,6 +341,7 @@ def batch_merge_videos_for_tts(target_ids: list[str] | None = None):
 
         video_paths = []
         selected_ids = set()
+        selected_clips = []
         margin = 2.0
         target_duration = tts_length + margin
 
@@ -354,6 +355,7 @@ def batch_merge_videos_for_tts(target_ids: list[str] | None = None):
             current_duration=0.0,
             video_paths=video_paths,
             selected_ids=selected_ids,
+            selected_clips=selected_clips,
             excluded_ids=used_ids | selected_ids,
         )
 
@@ -366,6 +368,7 @@ def batch_merge_videos_for_tts(target_ids: list[str] | None = None):
                 current_duration=total_duration,
                 video_paths=video_paths,
                 selected_ids=selected_ids,
+                selected_clips=selected_clips,
                 excluded_ids=selected_ids,
                 page_salt="reuse",
             )
@@ -393,6 +396,7 @@ def batch_merge_videos_for_tts(target_ids: list[str] | None = None):
         _update_metadata_with_bg_selection(
             content_id=tts_basename,
             selected_ids=selected_ids,
+            selected_clips=selected_clips,
             queries=queries,
             strategy=str(story_metadata.get("bg_strategy") or "hybrid"),
         )
@@ -408,6 +412,7 @@ def _extend_video_selection(
     current_duration: float,
     video_paths: list[str],
     selected_ids: set,
+    selected_clips: list[dict] | None = None,
     excluded_ids: set,
     page_salt: str = "",
 ) -> float:
@@ -427,7 +432,7 @@ def _extend_video_selection(
             )
             if not candidates:
                 break
-            for video_id, video_url, vid_duration in candidates:
+            for rank, (video_id, video_url, vid_duration) in enumerate(candidates, start=1):
                 if video_id in selected_ids or video_id in excluded_ids:
                     continue
                 part_path = BG_PARTS_DIR / f"{tts_basename}_bg_{video_id}.mp4"
@@ -435,12 +440,24 @@ def _extend_video_selection(
                     continue
                 video_paths.append(str(part_path))
                 selected_ids.add(video_id)
-                total_duration += _segment_duration_for_source(
+                segment_duration = _segment_duration_for_source(
                     part_path,
                     vid_duration,
                     target_length=target_duration,
                     current_duration=total_duration,
                 )
+                total_duration += segment_duration
+                if selected_clips is not None:
+                    selected_clips.append(
+                        {
+                            "video_id": str(video_id),
+                            "query": query,
+                            "rank": rank,
+                            "segment_order": len(selected_clips) + 1,
+                            "source_duration": float(vid_duration or 0),
+                            "segment_duration": float(segment_duration or 0),
+                        }
+                    )
                 if total_duration >= target_duration:
                     break
             page += 1
@@ -599,7 +616,13 @@ def _metadata_by_id() -> dict[str, dict]:
     }
 
 
-def _update_metadata_with_bg_selection(content_id: str, selected_ids: set, queries: list[str], strategy: str) -> None:
+def _update_metadata_with_bg_selection(
+    content_id: str,
+    selected_ids: set,
+    selected_clips: list[dict] | None,
+    queries: list[str],
+    strategy: str,
+) -> None:
     if not FINAL_METADATA_FILE.exists():
         return
     try:
@@ -613,7 +636,11 @@ def _update_metadata_with_bg_selection(content_id: str, selected_ids: set, queri
             item["bg_queries"] = queries[:12]
             item["bg_strategy"] = strategy if strategy in {"story", "asmr", "hybrid"} else "hybrid"
             opening_query = _clean_query(item.get("opening_visual_query") or "")
-            item["opening_visual_query_used"] = opening_query if opening_query in queries else (queries[0] if queries else "")
+            clips = selected_clips or []
+            first_clip_query = str((clips[0] or {}).get("query") or "") if clips else ""
+            item["bg_selected_clips"] = clips
+            item["opening_visual_query_used"] = first_clip_query
+            item["opening_visual_query_matched_first_clip"] = bool(opening_query and first_clip_query == opening_query)
             beat_queries = [_clean_query(query) for query in _visual_beat_query_values(item)]
             item["visual_beat_queries_used"] = [query for query in beat_queries if query in queries]
             changed = True

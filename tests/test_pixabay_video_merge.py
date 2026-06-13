@@ -7,6 +7,7 @@ import generator.video.pixabay_video_merge as pixabay_video_merge
 from generator.video.pixabay_video_merge import (
     _concat_segments,
     _download_video_safe,
+    _extend_video_selection,
     _fetch_pixabay_video_urls_safe,
     _image_sharpness_score,
     _is_blocked_pixabay_hit,
@@ -224,6 +225,77 @@ def test_fetch_pixabay_video_urls_safe_returns_empty_on_error(monkeypatch):
     monkeypatch.setattr(pixabay_video_merge, "fetch_pixabay_video_urls", _raise)
 
     assert _fetch_pixabay_video_urls_safe(query="phone texting") == []
+
+
+def test_extend_video_selection_records_actual_first_query(monkeypatch, tmp_path):
+    selected_clips = []
+
+    def fake_fetch(**kwargs):
+        if kwargs["query"] == "parked car driveway":
+            return [(123, "https://example.com/123.mp4", 8.0)]
+        return []
+
+    def fake_download(url, path, content_id, query):
+        path.write_bytes(b"video")
+        return True
+
+    monkeypatch.setattr(pixabay_video_merge, "BG_PARTS_DIR", tmp_path)
+    monkeypatch.setattr(pixabay_video_merge, "_fetch_pixabay_video_urls_safe", fake_fetch)
+    monkeypatch.setattr(pixabay_video_merge, "_download_video_safe", fake_download)
+
+    total = _extend_video_selection(
+        tts_basename="story",
+        queries=["parked car driveway", "phone texting"],
+        target_duration=2.0,
+        current_duration=0.0,
+        video_paths=[],
+        selected_ids=set(),
+        selected_clips=selected_clips,
+        excluded_ids=set(),
+    )
+
+    assert total >= 2.0
+    assert selected_clips[0]["query"] == "parked car driveway"
+    assert selected_clips[0]["segment_order"] == 1
+
+
+def test_bg_metadata_uses_first_selected_clip_query(tmp_path, monkeypatch):
+    metadata_path = tmp_path / "final_metadata.json"
+    metadata_path.write_text(
+        json.dumps(
+            [
+                {
+                    "id": "story",
+                    "opening_visual_query": "parked car driveway",
+                    "visual_beat_queries": [{"beat": "receipt", "query": "phone timestamp screenshot"}],
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(pixabay_video_merge, "FINAL_METADATA_FILE", metadata_path)
+
+    pixabay_video_merge._update_metadata_with_bg_selection(
+        "story",
+        {456},
+        [
+            {
+                "video_id": "456",
+                "query": "phone timestamp screenshot",
+                "rank": 1,
+                "segment_order": 1,
+                "source_duration": 8.0,
+                "segment_duration": 3.0,
+            }
+        ],
+        ["parked car driveway", "phone timestamp screenshot"],
+        "hybrid",
+    )
+
+    updated = json.loads(metadata_path.read_text(encoding="utf-8"))[0]
+    assert updated["opening_visual_query_used"] == "phone timestamp screenshot"
+    assert updated["opening_visual_query_matched_first_clip"] is False
+    assert updated["bg_selected_clips"][0]["video_id"] == "456"
 
 
 def test_metadata_by_id_loads_visual_keywords(tmp_path, monkeypatch):

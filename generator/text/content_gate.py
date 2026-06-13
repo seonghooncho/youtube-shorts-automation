@@ -35,8 +35,12 @@ _CAPTION_OBJECT_TERMS = {
     "laundry",
     "machine",
     "package",
+    "phone",
     "receipt",
+    "screenshot",
     "storage unit",
+    "text",
+    "timestamp",
 }
 _CAPTION_ACTION_TERMS = {
     "accused",
@@ -81,6 +85,56 @@ _GENERIC_OPENING_QUERIES = {
     "viral story",
 }
 _BAD_FIRST_FRAME_PREFIXES = ("aita", "story", "drama", "did i overreact")
+_OPENING_QUERY_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "at",
+    "before",
+    "for",
+    "her",
+    "his",
+    "i",
+    "in",
+    "into",
+    "it",
+    "me",
+    "my",
+    "of",
+    "on",
+    "our",
+    "she",
+    "the",
+    "then",
+    "to",
+    "was",
+    "with",
+}
+_OPENING_QUERY_STRONG_TOKENS = {
+    "bill",
+    "building",
+    "camera",
+    "car",
+    "card",
+    "chat",
+    "dinner",
+    "driveway",
+    "group",
+    "laundry",
+    "machine",
+    "manager",
+    "office",
+    "package",
+    "phone",
+    "receipt",
+    "restaurant",
+    "screenshot",
+    "storage",
+    "text",
+    "timestamp",
+    "unit",
+    "washer",
+}
 _RECEIPT_TERMS = {
     "app",
     "bill",
@@ -253,21 +307,22 @@ def caption_chunks_align_with_tts_text(item: dict[str, Any]) -> tuple[bool, str]
         return False, "missing_tts_text"
 
     position = 0
+    max_gap = _caption_chunk_max_token_gap()
     for chunk_index, chunk in enumerate(chunks, start=1):
         tokens = _caption_tokens(chunk)
         if not tokens:
             return False, f"empty_chunk_{chunk_index}"
-        for token in tokens:
-            found_at = _find_token(narration_tokens, token, position)
-            if found_at < 0:
-                return False, f"chunk_{chunk_index}_token_missing:{token}"
-            position = found_at + 1
+        start, end, reason = find_caption_chunk_span(tokens, narration_tokens, position, max_gap)
+        if start < 0:
+            return False, f"chunk_{chunk_index}_{reason}"
+        position = end + 1
 
     final_line = voiceover_lines(item)[-1] if voiceover_lines(item) else ""
     if final_line.rstrip().endswith("?"):
         final_tokens = _caption_tokens(final_line)
         final_chunk_tokens = _caption_tokens(chunks[-1])
-        if final_chunk_tokens and not _tokens_are_ordered_subset(final_chunk_tokens, final_tokens):
+        start, _end, _reason = find_caption_chunk_span(final_chunk_tokens, final_tokens, 0, max_gap)
+        if final_chunk_tokens and start < 0:
             return False, "final_question_chunk_not_in_final_line"
     return True, ""
 
@@ -400,7 +455,32 @@ def _opening_visual_errors(item: dict[str, Any]) -> list[str]:
         errors.append("missing_opening_visual_query")
     elif _is_generic_opening_query(opening_visual_query):
         errors.append("generic_opening_visual_query")
+    else:
+        relevance_reason = opening_visual_query_relevance_reason(item)
+        if relevance_reason:
+            errors.append(relevance_reason)
     return errors
+
+
+def opening_visual_query_relevance_reason(item: dict[str, Any]) -> str:
+    query_tokens = _meaningful_opening_tokens(str(item.get("opening_visual_query") or ""))
+    if not query_tokens:
+        return "opening_visual_query_mismatch"
+    reference_text = " ".join(
+        [
+            voiceover_lines(item)[0] if voiceover_lines(item) else "",
+            str(item.get("first_2_seconds") or ""),
+            str(item.get("first_frame_text") or ""),
+            str(item.get("source_title") or ""),
+            str(item.get("public_title") or ""),
+        ]
+    )
+    reference_tokens = _meaningful_opening_tokens(reference_text)
+    overlap = query_tokens & reference_tokens
+    strong_overlap = overlap & _OPENING_QUERY_STRONG_TOKENS
+    if strong_overlap or len(overlap) >= 2:
+        return ""
+    return "opening_visual_query_mismatch"
 
 
 def _predicted_score_errors(item: dict[str, Any]) -> list[str]:
@@ -516,6 +596,43 @@ def _caption_tokens(text: str) -> list[str]:
     return re.findall(r"[a-z0-9']+", str(text or "").lower())
 
 
+def find_caption_chunk_span(
+    tokens: list[str],
+    narration_tokens: list[str],
+    start_position: int = 0,
+    max_gap: int | None = None,
+) -> tuple[int, int, str]:
+    if max_gap is None:
+        max_gap = _caption_chunk_max_token_gap()
+    if not tokens:
+        return -1, -1, "empty_chunk"
+    first_token = tokens[0]
+    position = max(0, start_position)
+    saw_first_token = False
+    while position < len(narration_tokens):
+        start_index = _find_token(narration_tokens, first_token, position)
+        if start_index < 0:
+            break
+        saw_first_token = True
+        previous_index = start_index
+        failed_reason = ""
+        for token in tokens[1:]:
+            found_at = _find_token(narration_tokens, token, previous_index + 1)
+            if found_at < 0:
+                failed_reason = f"token_not_found:{token}"
+                break
+            if found_at - previous_index - 1 > max_gap:
+                failed_reason = "caption_chunk_not_contiguous"
+                break
+            previous_index = found_at
+        if not failed_reason:
+            return start_index, previous_index, ""
+        position = start_index + 1
+    if saw_first_token:
+        return -1, -1, "caption_chunk_not_contiguous"
+    return -1, -1, f"token_not_found:{first_token}"
+
+
 def _find_token(tokens: list[str], needle: str, start: int) -> int:
     for index in range(start, len(tokens)):
         if tokens[index] == needle:
@@ -533,6 +650,13 @@ def _tokens_are_ordered_subset(subset: list[str], tokens: list[str]) -> bool:
     return True
 
 
+def _caption_chunk_max_token_gap() -> int:
+    try:
+        return max(0, int(os.getenv("CAPTION_CHUNK_MAX_TOKEN_GAP", "2")))
+    except ValueError:
+        return 2
+
+
 def _is_generic_opening_query(query: str) -> bool:
     lowered = re.sub(r"\s+", " ", str(query or "").strip().lower())
     if lowered in _GENERIC_OPENING_QUERIES:
@@ -543,3 +667,11 @@ def _is_generic_opening_query(query: str) -> bool:
     concrete_tokens = set(_CAPTION_OBJECT_TERMS) | set(_CAPTION_ACTION_TERMS)
     split_concrete = {token for phrase in concrete_tokens for token in phrase.split()}
     return not bool(tokens & split_concrete)
+
+
+def _meaningful_opening_tokens(text: str) -> set[str]:
+    return {
+        token
+        for token in _caption_tokens(text)
+        if len(token) >= 3 and token not in _OPENING_QUERY_STOPWORDS
+    }

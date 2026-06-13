@@ -1,3 +1,5 @@
+import json
+
 import generator.video.create_video as create_video
 from generator.video.create_video import (
     _audio_merge_filter,
@@ -6,6 +8,7 @@ from generator.video.create_video import (
     _ensure_ffmpeg_font_dir,
     _format_chunk_caption_text,
     _format_centered_caption_text,
+    _opening_silence_seconds,
     _video_filter_with_subtitles,
     _write_centered_caption_ass,
     render_video_with_ffmpeg,
@@ -147,6 +150,42 @@ def test_write_centered_caption_ass_chunk_mode_keeps_phrase_event(tmp_path, monk
     assert r"{\c&H00FFFF&}HIS" not in content
 
 
+def test_first_frame_text_overlay_is_written_to_ass(tmp_path, monkeypatch):
+    monkeypatch.setenv("FIRST_FRAME_TEXT_DURATION", "0.9")
+    monkeypatch.setenv("FIRST_FRAME_TEXT_FONT_SIZE", "48")
+
+    ass_path = tmp_path / "captions.ass"
+    debug = _write_centered_caption_ass(
+        [((0.0, 1.0), "his car sat there")],
+        ass_path,
+        offset_seconds=0.25,
+        first_frame_text="HE PARKED HERE",
+    )
+
+    content = ass_path.read_text(encoding="utf-8")
+    assert "Style: Opening,Anton,48" in content
+    assert "Dialogue: 1,0:00:00.00,0:00:00.90,Opening" in content
+    assert "HE PARKED HERE" in content
+    assert debug["first_frame_text_rendered"] is True
+    assert debug["first_caption_start"] == 0.25
+
+
+def test_missing_first_frame_text_still_renders_caption_ass(tmp_path):
+    ass_path = tmp_path / "captions.ass"
+    debug = _write_centered_caption_ass([((0.0, 1.0), "hello world")], ass_path, offset_seconds=0.25)
+
+    content = ass_path.read_text(encoding="utf-8")
+    assert "Dialogue: 0," in content
+    assert "Dialogue: 1," not in content
+    assert debug["first_frame_text_rendered"] is False
+
+
+def test_opening_silence_default_is_short(monkeypatch):
+    monkeypatch.delenv("OPENING_SILENCE_SECONDS", raising=False)
+
+    assert _opening_silence_seconds() == 0.25
+
+
 def test_ensure_ffmpeg_font_dir_allows_missing_font(tmp_path, monkeypatch):
     monkeypatch.setattr(create_video, "FINAL_DIR", tmp_path / "final")
 
@@ -189,8 +228,13 @@ def test_render_video_with_ffmpeg_uses_timeout_and_stable_filter_options(monkeyp
     background_path = tmp_path / "background.mp4"
     background_path.write_bytes(b"video")
     tts_path = tmp_path / "tts_check_result.json"
+    metadata_path = tmp_path / "final_metadata.json"
     tts_path.write_text(
         '[{"filename":"story","speed":1.18,"final_duration":42.0}]',
+        encoding="utf-8",
+    )
+    metadata_path.write_text(
+        '[{"id":"story","first_frame_text":"HE PARKED HERE"}]',
         encoding="utf-8",
     )
     captured = {}
@@ -203,6 +247,7 @@ def test_render_video_with_ffmpeg_uses_timeout_and_stable_filter_options(monkeyp
     monkeypatch.setattr(create_video, "SUBTITLES_DIR", subtitle_dir)
     monkeypatch.setattr(create_video, "FINAL_DIR", final_dir)
     monkeypatch.setattr(create_video, "TTS_RESULT_JSON", tts_path)
+    monkeypatch.setattr(create_video, "FINAL_METADATA_FILE", metadata_path)
     monkeypatch.setattr(create_video, "get_video_source", lambda name: background_path)
     monkeypatch.setattr(create_video, "ensure_anton_font", lambda: tmp_path / "Anton-Regular.ttf")
     monkeypatch.setattr(create_video, "_ffmpeg_bin", lambda: "ffmpeg")
@@ -213,6 +258,11 @@ def test_render_video_with_ffmpeg_uses_timeout_and_stable_filter_options(monkeyp
 
     cmd = captured["cmd"]
     assert cmd[cmd.index("-reinit_filter") + 1] == "0"
+    assert cmd[cmd.index("-f") + 3] == "0.250"
     assert "-drop_changed" not in cmd
     assert captured["kwargs"]["check"] is True
     assert captured["kwargs"]["timeout"] == 123
+    updated = json.loads(metadata_path.read_text(encoding="utf-8"))[0]
+    assert updated["render_opening_silence_seconds"] == 0.25
+    assert updated["first_frame_text_rendered"] is True
+    assert updated["caption_render_mode"] == "chunk"
