@@ -3,7 +3,8 @@ from generator.text.scrape_reddit_and_store import (
     _post_from_child,
     _post_from_pullpush_item,
 )
-from generator.text.reddit_sources import PullPushSource
+from generator.text import reddit_sources
+from generator.text.reddit_sources import PullPushSource, SyntheticConflictSource, collect_with_fallback
 from requests import ReadTimeout
 
 
@@ -163,3 +164,33 @@ def test_pullpush_keeps_partial_collection_when_later_page_times_out():
 
     assert session.calls == 2
     assert [post["id"] for post in posts] == ["partial1"]
+
+
+def test_synthetic_conflict_source_generates_viable_seed_shape():
+    config = RedditScrapeConfig(max_posts=3, synthetic_fallback_count=3)
+
+    posts = SyntheticConflictSource(config).collect(set())
+
+    assert len(posts) == 3
+    assert posts[0]["source_provider"] == "synthetic"
+    assert posts[0]["content_word_count"] >= 90
+    assert posts[0]["content_char_count"] >= 550
+    assert posts[0]["source_is_truncated"] is False
+
+
+def test_collect_with_fallback_uses_synthetic_when_external_sources_fail(monkeypatch):
+    class _BrokenSource:
+        def __init__(self, config):
+            self.config = config
+
+        def collect(self, scraped_ids):
+            raise RuntimeError("source down")
+
+    monkeypatch.setattr(reddit_sources, "RedditApiSource", _BrokenSource)
+    monkeypatch.setattr(reddit_sources, "PullPushSource", _BrokenSource)
+    config = RedditScrapeConfig(max_posts=2, synthetic_fallback_count=2)
+
+    posts = collect_with_fallback(config, set())
+
+    assert len(posts) == 2
+    assert all(post["source_provider"] == "synthetic" for post in posts)
