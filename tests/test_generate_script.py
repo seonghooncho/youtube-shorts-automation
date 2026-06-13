@@ -4,7 +4,15 @@ import pytest
 from openai.lib._pydantic import to_strict_json_schema
 
 from generator.text import generate_script as generate_script_module
-from generator.text.generate_script import DraftScript, NativeViewerCritic, ReturnScript, _text_verbosity, _token_budgets
+from generator.text.generate_script import (
+    DraftScript,
+    NativeViewerCritic,
+    ReturnScript,
+    _text_verbosity,
+    _token_budgets,
+    generate_script,
+    get_last_generation_telemetry,
+)
 from generator.text.generate_scripts_from_filtered import (
     EXAMPLE_JSON,
     _build_local_fallback_metadata,
@@ -16,10 +24,11 @@ from generator.text.generate_scripts_from_filtered import (
 from generator.text.reddit_sources import _SYNTHETIC_SCENARIOS, _synthetic_story_content
 
 
-def test_token_budgets_default_are_high_enough_for_full_schema(monkeypatch):
+def test_token_budgets_default_fit_draft_schema(monkeypatch):
     monkeypatch.delenv("SCRIPT_OUTPUT_TOKEN_BUDGETS", raising=False)
 
-    assert _token_budgets() == [3200, 4200, 5200]
+    assert _token_budgets() == [1600, 2200, 3000]
+    assert max(_token_budgets()) <= 3000
 
 
 def test_return_script_schema_is_strict_response_compatible():
@@ -31,9 +40,81 @@ def test_return_script_schema_is_strict_response_compatible():
 
 
 def test_token_budgets_accept_env_override(monkeypatch):
-    monkeypatch.setenv("SCRIPT_OUTPUT_TOKEN_BUDGETS", "2600, bad, 3600, 0")
+    monkeypatch.setenv("SCRIPT_OUTPUT_TOKEN_BUDGETS", "1200, bad, 2400, 0")
 
-    assert _token_budgets() == [2600, 3600]
+    assert _token_budgets() == [1200, 2400]
+
+
+def _draft_script() -> DraftScript:
+    return DraftScript(
+        title="Neighbor Used My Driveway",
+        voice="neutral",
+        source_summary="A neighbor used a driveway without permission.",
+        story_beats=["driveway", "camera", "chat", "sign"],
+        adaptation_strategy="Compressed the source into a driveway incident and camera receipt.",
+        retention_angle="A driveway misuse, camera receipt, and neighborhood chat create a quick debate.",
+        turning_point="The camera showed the car sitting there for hours.",
+        payoff_line="I sent the clip and stopped answering.",
+        viewer_question="Would you have posted the clip?",
+        marketability_score=5,
+        retention_risk="The story starts with the driveway misuse instead of slow context.",
+        rewrite_notes="Opened on the crossed property line.",
+        hook_type="neighbor_dispute",
+        style_variant="neighbor_dispute",
+        voiceover_lines=[
+            "My neighbor parked in my driveway for six hours.",
+            "The door camera showed his car sitting there.",
+            "He complained in the group chat after I asked him to move.",
+            "Would you have posted the clip?",
+        ],
+    )
+
+
+def test_json_fallback_disabled_by_default(monkeypatch):
+    monkeypatch.setenv("SCRIPT_OUTPUT_TOKEN_BUDGETS", "1600")
+    monkeypatch.delenv("SCRIPT_ENABLE_JSON_FALLBACK", raising=False)
+    calls = {"fallback": 0}
+
+    monkeypatch.setattr(generate_script_module, "_get_client", lambda: object())
+    monkeypatch.setattr(generate_script_module, "_try_structured", lambda *_args: (_ for _ in ()).throw(ValueError("structured failed")))
+
+    def fallback(*_args):
+        calls["fallback"] += 1
+        return _draft_script()
+
+    monkeypatch.setattr(generate_script_module, "_fallback_json_mode", fallback)
+
+    with pytest.raises(RuntimeError):
+        generate_script("prompt")
+
+    assert calls["fallback"] == 0
+    assert get_last_generation_telemetry()["structured_attempts"] == 1
+    assert get_last_generation_telemetry()["json_fallback_attempts"] == 0
+
+
+def test_json_fallback_enabled_records_telemetry(monkeypatch):
+    monkeypatch.setenv("SCRIPT_OUTPUT_TOKEN_BUDGETS", "1600")
+    monkeypatch.setenv("SCRIPT_ENABLE_JSON_FALLBACK", "1")
+    calls = {"fallback": 0}
+
+    monkeypatch.setattr(generate_script_module, "_get_client", lambda: object())
+    monkeypatch.setattr(generate_script_module, "_try_structured", lambda *_args: (_ for _ in ()).throw(ValueError("structured failed")))
+
+    def fallback(*_args):
+        calls["fallback"] += 1
+        return _draft_script()
+
+    monkeypatch.setattr(generate_script_module, "_fallback_json_mode", fallback)
+
+    draft = generate_script("prompt")
+
+    assert isinstance(draft, DraftScript)
+    assert calls["fallback"] == 1
+    telemetry = get_last_generation_telemetry()
+    assert telemetry["structured_attempts"] == 1
+    assert telemetry["structured_failures"] == 1
+    assert telemetry["json_fallback_attempts"] == 1
+    assert telemetry["json_fallback_failures"] == 0
 
 
 def test_text_verbosity_uses_medium_for_gpt_41(monkeypatch):

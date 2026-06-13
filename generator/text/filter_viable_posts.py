@@ -260,6 +260,151 @@ def _local_precheck(post: dict) -> str:
     return ""
 
 
+def _truthy_env(name: str, default: str = "0") -> bool:
+    return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _int_env(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
+def local_source_priority(post: dict) -> float:
+    source = build_source_profile(post)
+    title = str(post.get("title") or "")
+    content = str(post.get("content") or "")
+    lowered = f"{title} {content}".lower()
+    score = 0.0
+    words = max(0, source.word_count)
+    if words >= 120:
+        score += 1.2
+    elif words >= 90:
+        score += 0.8
+    if words > 260:
+        score -= 0.2
+
+    conflict_terms = (
+        "accused",
+        "blamed",
+        "charged",
+        "demanded",
+        "refused",
+        "used my",
+        "without asking",
+        "without permission",
+        "put it on my card",
+        "parked",
+        "locked",
+        "reported",
+        "spent",
+        "took",
+        "lied",
+    )
+    receipt_terms = ("text", "messages", "receipt", "screenshot", "camera", "bill", "appointment", "timestamp", "estimate")
+    pressure_terms = (
+        "card",
+        "deposit",
+        "driveway",
+        "package",
+        "landlord",
+        "manager",
+        "coworker",
+        "roommate",
+        "aunt",
+        "brother",
+        "family",
+        "bank",
+        "vet",
+        "bloodwork",
+    )
+    visual_terms = (
+        "car",
+        "door",
+        "hallway",
+        "phone",
+        "chat",
+        "camera",
+        "receipt",
+        "bill",
+        "apartment",
+        "office",
+        "driveway",
+        "package",
+        "cat",
+    )
+    unsafe_terms = ("underage", "minor", "teen romance", "sexual", "nude", "graphic", "slur")
+
+    score += min(2.0, sum(0.45 for term in conflict_terms if term in lowered))
+    score += min(1.6, sum(0.35 for term in receipt_terms if term in lowered))
+    score += min(1.4, sum(0.25 for term in pressure_terms if term in lowered))
+    score += min(1.0, sum(0.15 for term in visual_terms if term in lowered))
+    if "?" in content[-500:]:
+        score += 0.3
+    if any(term in lowered for term in unsafe_terms):
+        score -= 4.0
+    return round(score, 2)
+
+
+def _source_scorecard_prompt(post: dict) -> str:
+    title, content = post.get("title", ""), post.get("content", "")
+    return f"""
+        Evaluate whether this source can become a high-retention 42-65 second YouTube Shorts story.
+
+        Return JSON with this exact schema:
+        {{
+          "decision": "YES" or "NO",
+          "relatability": integer 1-5,
+          "conflict_clarity": integer 1-5,
+          "stakes": integer 1-5,
+          "debate_potential": integer 1-5,
+          "safe_adaptability": integer 1-5,
+          "visualizability": integer 1-5,
+          "gate_fit_score": integer 1-5,
+          "hook_in_one_sentence": integer 1-5,
+          "receipt_strength": integer 1-5,
+          "visual_matchability": integer 1-5,
+          "length_fit_score": integer 1-5,
+          "metadata_repairability": integer 1-5,
+          "retention_risk": "low" or "medium" or "high",
+          "archetype": short snake_case label such as roommate_money, family_boundary, pet_medical_bill, workplace_accusation, neighbor_property, wedding_drama,
+          "reason": one concise sentence
+        }}
+
+        Use YES only if all conditions are true:
+        - The story is complete enough to adapt without inventing major facts.
+        - There is a clear first-person conflict with a concrete crossed line, unfair accusation,
+          betrayal, property/money pressure, family/workplace pressure, or public embarrassment.
+        - The story has enough concrete detail for 4-7 fast narration beats.
+        - The content can be made broadly safe for YouTube Shorts.
+        - The likely narration will not need filler to reach 42 seconds.
+        - The ending naturally creates a comment debate where reasonable viewers could disagree.
+        - The story feels like a 4/5 or 5/5 retention candidate, not merely "understandable."
+        - gate_fit_score, hook_in_one_sentence, visual_matchability, and length_fit_score are all 4 or 5.
+        - receipt_strength is at least 3.
+        - The story can produce 650-950 narration characters without filler.
+
+        Use NO if the source is mostly contextless, a question without a story, rage bait without events,
+        low-stakes relationship ambiguity, graphic/sexual content involving minors, teen/high-school romance,
+        explicit hate or slurs, a post that requires major fabrication, or a source that is understandable
+        but likely to fail title/caption/opening-visual/length gates.
+
+        Title: {title}
+        Source metadata:
+        - chars: {post.get('content_char_count', len(content))}
+        - words: {post.get('content_word_count', len(content.split()))}
+        - provider: {post.get('source_provider', 'unknown')}
+
+        Content:
+        {content}
+        """
+
+
+def _source_filter_summary_path():
+    return VIABLE_POSTS_FILE.with_name("source_filter_summary.json")
+
+
 def _is_llm_quota_error(message: str) -> bool:
     lowered = (message or "").lower()
     return "insufficient_quota" in lowered or "exceeded your current quota" in lowered or "rate_limit_exceeded" in lowered
@@ -353,66 +498,37 @@ def filter_viable_posts():
 
     selected_posts: List[dict] = []
     llm_unavailable_reason = ""
+    source_scorecard_calls = 0
+    source_scorecard_skipped_by_prerank = 0
+    source_precheck_rejected = 0
+    candidate_posts: List[dict] = []
 
     for post in raw_posts:
-        title, content = post.get("title", ""), post.get("content", "")
         local_reject_reason = _local_precheck(post)
         if local_reject_reason:
             post["source_quality_status"] = "rejected"
             post["source_rejection_reason"] = local_reject_reason
+            source_precheck_rejected += 1
             print(f"⏭️ 로컬 precheck 실패로 스킵: {post.get('id', 'unknown')} - {local_reject_reason}")
             continue
+        post["local_source_priority"] = local_source_priority(post)
+        candidate_posts.append(post)
 
-        prompt = f"""
-        Evaluate whether this source can become a high-retention 42-65 second YouTube Shorts story.
+    if _truthy_env("SOURCE_LOCAL_PRERANK_ENABLED", "1"):
+        candidate_posts.sort(key=lambda item: float(item.get("local_source_priority") or 0), reverse=True)
+        eval_limit = max(0, _int_env("SOURCE_LLM_EVAL_LIMIT", 8))
+        posts_to_evaluate = candidate_posts[:eval_limit] if eval_limit else []
+        skipped_by_prerank = candidate_posts[eval_limit:] if eval_limit else candidate_posts
+        for post in skipped_by_prerank:
+            post["source_quality_status"] = "skipped"
+            post["source_rejection_reason"] = "below_local_prerank_cutoff"
+        source_scorecard_skipped_by_prerank = len(skipped_by_prerank)
+    else:
+        posts_to_evaluate = candidate_posts
 
-        Return JSON with this exact schema:
-        {{
-          "decision": "YES" or "NO",
-          "relatability": integer 1-5,
-          "conflict_clarity": integer 1-5,
-          "stakes": integer 1-5,
-          "debate_potential": integer 1-5,
-          "safe_adaptability": integer 1-5,
-          "visualizability": integer 1-5,
-          "gate_fit_score": integer 1-5,
-          "hook_in_one_sentence": integer 1-5,
-          "receipt_strength": integer 1-5,
-          "visual_matchability": integer 1-5,
-          "length_fit_score": integer 1-5,
-          "metadata_repairability": integer 1-5,
-          "retention_risk": "low" or "medium" or "high",
-          "archetype": short snake_case label such as roommate_money, family_boundary, pet_medical_bill, workplace_accusation, neighbor_property, wedding_drama,
-          "reason": one concise sentence
-        }}
-
-        Use YES only if all conditions are true:
-        - The story is complete enough to adapt without inventing major facts.
-        - There is a clear first-person conflict with a concrete crossed line, unfair accusation,
-          betrayal, property/money pressure, family/workplace pressure, or public embarrassment.
-        - The story has enough concrete detail for 4-7 fast narration beats.
-        - The content can be made broadly safe for YouTube Shorts.
-        - The likely narration will not need filler to reach 42 seconds.
-        - The ending naturally creates a comment debate where reasonable viewers could disagree.
-        - The story feels like a 4/5 or 5/5 retention candidate, not merely "understandable."
-        - gate_fit_score, hook_in_one_sentence, visual_matchability, and length_fit_score are all 4 or 5.
-        - receipt_strength is at least 3.
-        - The story can produce 650-950 narration characters without filler.
-
-        Use NO if the source is mostly contextless, a question without a story, rage bait without events,
-        low-stakes relationship ambiguity, graphic/sexual content involving minors, teen/high-school romance,
-        explicit hate or slurs, a post that requires major fabrication, or a source that is understandable
-        but likely to fail title/caption/opening-visual/length gates.
-
-        Title: {title}
-        Source metadata:
-        - chars: {post.get('content_char_count', len(content))}
-        - words: {post.get('content_word_count', len(content.split()))}
-        - provider: {post.get('source_provider', 'unknown')}
-
-        Content:
-        {content}
-        """
+    for post in posts_to_evaluate:
+        title = post.get("title", "")
+        prompt = _source_scorecard_prompt(post)
 
         try:
             if client is None:
@@ -430,6 +546,7 @@ def filter_viable_posts():
                 scorecard = _local_source_scorecard(post, llm_unavailable_reason)
                 print(f"🧩 로컬 source scorecard 사용: id={post.get('id', 'unknown')} reason=llm_unavailable")
             elif client is not None:
+                source_scorecard_calls += 1
                 scorecard = _ask_source_scorecard(client, prompt, model)
             if not scorecard:
                 print("⚠️ GPT scorecard 응답 없음/불명. 해당 포스트 스킵")
@@ -509,6 +626,17 @@ def filter_viable_posts():
     selected_posts.sort(key=lambda item: float(item.get("source_priority_score") or item.get("source_acceptance_score") or item.get("source_score") or 0), reverse=True)
     with open(VIABLE_POSTS_FILE, "w", encoding="utf-8") as f:
         json.dump(selected_posts, f, ensure_ascii=False, indent=2)
+    summary = {
+        "raw_posts": len(raw_posts),
+        "local_precheck_rejected": source_precheck_rejected,
+        "local_prerank_enabled": _truthy_env("SOURCE_LOCAL_PRERANK_ENABLED", "1"),
+        "source_llm_eval_limit": _int_env("SOURCE_LLM_EVAL_LIMIT", 8),
+        "source_scorecard_calls": source_scorecard_calls,
+        "source_scorecard_skipped_by_prerank": source_scorecard_skipped_by_prerank,
+        "accepted": len(selected_posts),
+    }
+    with open(_source_filter_summary_path(), "w", encoding="utf-8") as f:
+        json.dump(summary, f, ensure_ascii=False, indent=2)
 
     print(f"✅ 적합한 게시물 {len(selected_posts)}개 저장됨 → {VIABLE_POSTS_FILE}")
 

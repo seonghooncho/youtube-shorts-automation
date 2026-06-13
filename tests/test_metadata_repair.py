@@ -264,3 +264,28 @@ def test_length_repair_does_not_add_generic_filler_without_concrete_source():
     assert "length_repair_status" not in repaired
     assert all(action["code"] != "length_repair_line_added" for action in actions)
     assert "not just a misunderstanding" not in " ".join(repaired["voiceover_lines"])
+
+
+def test_missing_subject_then_title_is_repaired():
+    metadata = _short_cat_metadata() | {
+        "public_title": "Her Cat Bit Mine Twice, Then Refused To Pay",
+        "title": "Her Cat Bit Mine Twice, Then Refused To Pay",
+        "first_frame_text": "HER CAT BIT MINE TWICE REFUSED TO PAY",
+    }
+
+    repaired, _actions = repair_metadata(metadata, _cat_post())
+
+    assert repaired["public_title"] == "Her Cat Bit Mine Twice, Then She Refused To Pay"
+    assert repaired["first_frame_text"] == "HER CAT BIT MINE TWICE"
+
+
+def test_overpacked_vet_first_frame_is_simplified():
+    metadata = _short_cat_metadata() | {
+        "public_title": "She Refused The Vet Bill After The Bite",
+        "title": "She Refused The Vet Bill After The Bite",
+        "first_frame_text": "HER CAT BIT MINE TWICE REFUSED TO PAY",
+    }
+
+    repaired, _actions = repair_metadata(metadata, _cat_post())
+
+    assert repaired["first_frame_text"] in {"HER CAT BIT MINE TWICE", "SHE REFUSED THE VET BILL"}

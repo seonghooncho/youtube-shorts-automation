@@ -16,6 +16,7 @@ from generator.text.generate_script import (
     critique_script,
     draft_to_metadata,
     generate_script,
+    get_last_generation_telemetry,
 )
 from generator.text.metadata_repair import repair_metadata
 from generator.text.script_fingerprint import (
@@ -82,6 +83,11 @@ def call_gpt_generate_script(title, content, post=None, regenerate_reason=None):
     source = build_source_profile(post or {"title": title, "content": content})
     performance_context = _performance_context()
     target_min_chars, target_max_chars = _script_target_window()
+    prompt_post = post or {"title": title, "content": content}
+    prompt_content = compact_source_for_prompt(prompt_post, _source_prompt_max_chars(content))
+    if post is not None:
+        post["source_prompt_compacted"] = prompt_content != str(content or "")
+        post["source_prompt_char_count"] = len(prompt_content)
     # 2) f-string은 치환이 필요한 부분(제목/본문)만 사용
     parts = [
         "You are adapting a Reddit story into a YouTube Shorts narration.",
@@ -148,7 +154,7 @@ def call_gpt_generate_script(title, content, post=None, regenerate_reason=None):
         f"- Recent winning patterns: {performance_context}",
         "\n[Original source]",
         f"Title: {title}",
-        f"\nContent:\n{content}",
+        f"\nContent:\n{prompt_content}",
     ]
     prompt = "\n".join(parts)
 
@@ -191,6 +197,85 @@ def _script_target_window() -> tuple[int, int]:
 
 def _max_llm_drafts_per_source() -> int:
     return max(1, _int_env("SCRIPT_MAX_LLM_DRAFTS_PER_SOURCE", 2))
+
+
+def _source_prompt_max_chars(content: str) -> int:
+    default_limit = _int_env("SCRIPT_SOURCE_MAX_CHARS", 3500)
+    long_limit = _int_env("SCRIPT_SOURCE_LONG_POST_MAX_CHARS", 2200)
+    if len(str(content or "")) > default_limit:
+        return max(800, min(default_limit, long_limit))
+    return default_limit
+
+
+def compact_source_for_prompt(post: dict, max_chars: int) -> str:
+    content = str((post or {}).get("content") or "")
+    max_chars = max(500, int(max_chars or 3500))
+    if len(content) <= max_chars:
+        return content
+
+    normalized = re.sub(r"\s+", " ", content).strip()
+    leading = normalized[:1200].rsplit(" ", 1)[0].strip()
+    sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+", normalized) if part.strip()]
+    keyword_terms = (
+        "bill",
+        "receipt",
+        "camera",
+        "text",
+        "message",
+        "screenshot",
+        "appointment",
+        "bloodwork",
+        "vet",
+        "card",
+        "driveway",
+        "package",
+        "landlord",
+        "manager",
+        "bank",
+        "timestamp",
+        "group chat",
+    )
+    evidence_sentences: list[str] = []
+    for sentence in sentences:
+        lowered = sentence.lower()
+        if any(term in lowered for term in keyword_terms) and sentence not in evidence_sentences:
+            evidence_sentences.append(sentence)
+        if len(" ".join(evidence_sentences)) > 850:
+            break
+
+    question_sentence = ""
+    for sentence in reversed(sentences):
+        if sentence.endswith("?"):
+            question_sentence = sentence
+            break
+    paragraphs = [part.strip() for part in re.split(r"\n{2,}", content) if part.strip()]
+    final_context = question_sentence or (paragraphs[-1] if paragraphs else (sentences[-1] if sentences else ""))
+    final_context = re.sub(r"\s+", " ", final_context).strip()
+    if len(final_context) > 500:
+        final_context = final_context[:500].rsplit(" ", 1)[0].strip()
+
+    sections = [leading]
+    if evidence_sentences:
+        sections.append(" ".join(evidence_sentences))
+    if final_context and final_context not in sections[-1]:
+        sections.append(final_context)
+    compacted = "\n...\n".join(section for section in sections if section).strip()
+    if len(compacted) <= max_chars:
+        return compacted
+
+    evidence_text = " ".join(evidence_sentences).strip()
+    if len(evidence_text) > 500:
+        evidence_text = evidence_text[:500].rsplit(" ", 1)[0].strip()
+    final_budget = min(len(final_context), 350)
+    final_tail = final_context[-final_budget:] if final_context else ""
+    middle = evidence_text
+    remaining = max_chars - len(middle) - len(final_tail) - 20
+    if remaining <= 0:
+        compacted = "\n...\n".join(part for part in (middle, final_tail) if part)
+        return compacted[:max_chars].strip()
+    head = leading[:remaining].rsplit(" ", 1)[0].strip()
+    compacted = "\n...\n".join(part for part in (head, middle, final_tail) if part)
+    return compacted[:max_chars].strip()
 
 
 def validate_and_parse_metadata(result: DraftScript | ReturnScript | dict[str, Any], idx, post) -> Dict[str, Any]:
@@ -240,7 +325,12 @@ def validate_and_parse_metadata(result: DraftScript | ReturnScript | dict[str, A
 
 def _metadata_from_generation_result(result: DraftScript | ReturnScript | dict[str, Any]) -> dict[str, Any]:
     if isinstance(result, DraftScript):
-        return draft_to_metadata(result)
+        data = draft_to_metadata(result)
+        telemetry = getattr(result, "_generation_telemetry", None)
+        if telemetry:
+            data["generation_telemetry"] = dict(telemetry)
+            data.update({f"llm_{key}": value for key, value in dict(telemetry).items()})
+        return data
     if isinstance(result, ReturnScript):
         data = result.model_dump()
         if not data.get("voiceover_lines") and data.get("script"):
@@ -325,6 +415,8 @@ def _attach_source_metadata(metadata: dict[str, Any], post: dict | None) -> dict
     metadata["source_subreddit"] = post.get("subreddit", "")
     metadata["source_url"] = post.get("source_url", "")
     metadata["source_hash"] = post.get("content_hash", "")
+    metadata["source_prompt_compacted"] = bool(post.get("source_prompt_compacted", False))
+    metadata["source_prompt_char_count"] = int(post.get("source_prompt_char_count") or 0)
     return metadata
 
 
@@ -911,8 +1003,16 @@ def _finalize_candidate(
 ) -> Dict[str, Any]:
     _gate_metadata(metadata, metadata_list, previous_history)
     if _after_local_gate_critic_enabled():
-        metadata = _run_after_local_gate_critic(metadata, post)
-        _gate_metadata(metadata, metadata_list, previous_history)
+        run_critic, critic_reason = should_run_critic(metadata, post)
+        if run_critic:
+            metadata["critic_policy"] = "forced" if _truthy_env("SCRIPT_CRITIC_ALWAYS") else "run_borderline_candidate"
+            metadata["critic_skipped_reason"] = ""
+            metadata["critic_policy_reason"] = critic_reason
+            metadata = _run_after_local_gate_critic(metadata, post)
+            _gate_metadata(metadata, metadata_list, previous_history)
+        else:
+            metadata["critic_policy"] = "skipped_strong_candidate"
+            metadata["critic_skipped_reason"] = critic_reason
     if append:
         metadata_list.append(metadata)
     return metadata
@@ -922,6 +1022,52 @@ def _after_local_gate_critic_enabled() -> bool:
     if os.getenv("SCRIPT_CRITIC_STAGE", "after_local_gate").strip().lower() != "after_local_gate":
         return False
     return os.getenv("SCRIPT_CRITIC_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def should_run_critic(metadata: dict, post: dict) -> tuple[bool, str]:
+    if _truthy_env("SCRIPT_CRITIC_ALWAYS"):
+        return True, "SCRIPT_CRITIC_ALWAYS=1"
+    quality_warnings = metadata.get("quality_warnings") or []
+    if quality_warnings:
+        return True, "quality_warnings_present"
+    if metadata.get("length_repair_status"):
+        return True, "length_repair_status_present"
+    if int(metadata.get("script_char_count") or 0) < 700:
+        return True, "script_under_700_chars"
+    if int(metadata.get("marketability_score") or 0) < 5:
+        return True, "marketability_below_5"
+    source_priority = _float_value((post or {}).get("source_priority_score", metadata.get("source_priority_score")), 0.0)
+    if source_priority < 4.4:
+        return True, "source_priority_below_4_4"
+    if int(metadata.get("predicted_ai_smell_score") or 0) > 2:
+        return True, "predicted_ai_smell_above_2"
+    repair_codes = {
+        str(action.get("code") or "")
+        for action in metadata.get("repair_actions") or []
+        if isinstance(action, dict)
+    }
+    if repair_codes & {"length_repair_line_added", "retention_angle_rebuilt"}:
+        return True, "high_risk_repair_action"
+    mechanical = {
+        "caption_chunks_rebuilt",
+        "first_frame_text_rebuilt",
+        "metadata_defaults_filled",
+        "opening_visual_query_rebuilt",
+        "public_title_rebuilt",
+    }
+    if repair_codes and not repair_codes <= mechanical:
+        return True, "non_mechanical_repair_action"
+    script_chars = int(metadata.get("script_char_count") or 0)
+    if 700 <= script_chars <= 950 and int(metadata.get("marketability_score") or 0) == 5:
+        return False, "strong_candidate_passed_deterministic_gates"
+    return True, "borderline_candidate"
+
+
+def _float_value(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _run_after_local_gate_critic(metadata: Dict[str, Any], post: dict) -> Dict[str, Any]:
@@ -1012,6 +1158,57 @@ def _script_chars_from_result(result: DraftScript | ReturnScript | None) -> int 
     return len(script_text(result.model_dump()))
 
 
+def _generation_telemetry_from_result(result: DraftScript | ReturnScript | None) -> dict[str, int]:
+    if result is not None:
+        telemetry = getattr(result, "_generation_telemetry", None)
+        if telemetry:
+            return dict(telemetry)
+    return get_last_generation_telemetry()
+
+
+def _failure_record(
+    *,
+    idx: Any,
+    origin_id: Any,
+    title: str,
+    error: str,
+    stage: str,
+    generation_attempt_count: int | None = None,
+    failure_action: str | None = None,
+    result: DraftScript | ReturnScript | None = None,
+    metadata: dict | None = None,
+) -> dict[str, Any]:
+    record: dict[str, Any] = {
+        "idx": idx,
+        "id": origin_id,
+        "title": title,
+        "error": error,
+        "stage": stage,
+    }
+    if generation_attempt_count is not None:
+        record["generation_attempt_count"] = generation_attempt_count
+    if failure_action:
+        record["failure_action"] = failure_action
+    telemetry = _generation_telemetry_from_result(result)
+    if telemetry:
+        record["generation_telemetry"] = telemetry
+        record.update({f"llm_{key}": value for key, value in telemetry.items()})
+    if metadata:
+        for key in (
+            "critic_attempt_count",
+            "critic_passed",
+            "critic_policy",
+            "critic_skipped_reason",
+            "prior_critic_attempt_count",
+            "prior_critic_failed_count",
+            "repair_only_retry_attempted",
+            "repair_only_retry_passed",
+        ):
+            if key in metadata:
+                record[key] = metadata[key]
+    return record
+
+
 def _load_previous_accepted_metadata(limit: int = 50) -> list[Dict[str, Any]]:
     if os.getenv("SCRIPT_DIVERSITY_HISTORY_ENABLED", "1").strip().lower() in {"0", "false", "no", "off"}:
         return []
@@ -1062,19 +1259,22 @@ def generate_scripts_from_filtered():
         origin_id = post.get("id", None)
         regenerate_reason = None
         try_count = 0
+        prior_critic_attempt_count = 0
+        prior_critic_failed_count = 0
         max_retries = _max_llm_drafts_per_source() - 1
         preflight_error = _source_preflight_error(post)
         if preflight_error:
-            failed_items.append({"idx": idx, "id": origin_id, "title": title, "error": preflight_error, "stage": "source_preflight"})
+            failed_items.append(_failure_record(idx=idx, origin_id=origin_id, title=title, error=preflight_error, stage="source_preflight"))
             print(f"🚫 원문 품질 미달로 스킵 (post {idx}): {preflight_error}")
             continue
         if llm_unavailable_reason and _local_fallback_enabled():
+            fallback_metadata = None
             try:
-                metadata = _build_local_fallback_metadata(post, llm_unavailable_reason)
-                _accept_metadata(metadata, metadata_list, previous_history)
+                fallback_metadata = _build_local_fallback_metadata(post, llm_unavailable_reason)
+                _accept_metadata(fallback_metadata, metadata_list, previous_history)
                 print(f"🧩 로컬 fallback 대본 생성 완료 (post {idx}): {origin_id}")
             except Exception as fallback_error:
-                failed_items.append({"idx": idx, "id": origin_id, "title": title, "error": str(fallback_error), "stage": "script_generation"})
+                failed_items.append(_failure_record(idx=idx, origin_id=origin_id, title=title, error=str(fallback_error), stage="script_generation", metadata=fallback_metadata))
                 print(f"🚫 로컬 fallback 실패 (post {idx}): {fallback_error}")
             continue
 
@@ -1113,6 +1313,9 @@ def generate_scripts_from_filtered():
                 metadata["llm_draft_count"] = try_count + 1
                 metadata["failure_action"] = ""
                 metadata["final_failure_codes"] = []
+                if prior_critic_attempt_count:
+                    metadata["prior_critic_attempt_count"] = prior_critic_attempt_count
+                    metadata["prior_critic_failed_count"] = prior_critic_failed_count
 
                 metadata = _finalize_candidate(metadata, metadata_list, previous_history, post)
                 break  # 성공 시 루프 종료
@@ -1122,6 +1325,9 @@ def generate_scripts_from_filtered():
                 if result is not None:
                     print(f"⚠️ GPT 응답 검증 실패 (post {idx}, 시도 {try_count+1}, script_chars={char_count}): {e}")
                 msg = str(e)
+                if metadata and metadata.get("critic_passed") is False:
+                    prior_critic_attempt_count += int(metadata.get("critic_attempt_count") or 0)
+                    prior_critic_failed_count += 1
                 if _is_llm_quota_error(msg) and _local_fallback_enabled():
                     llm_unavailable_reason = msg
                     try:
@@ -1130,7 +1336,7 @@ def generate_scripts_from_filtered():
                         print(f"🧩 OpenAI quota 오류로 로컬 fallback 대본 생성 완료 (post {idx}): {origin_id}")
                         break
                     except Exception as fallback_error:
-                        failed_items.append({"idx": idx, "id": origin_id, "title": title, "error": str(fallback_error), "stage": "script_generation"})
+                        failed_items.append(_failure_record(idx=idx, origin_id=origin_id, title=title, error=str(fallback_error), stage="script_generation", result=result, metadata=metadata))
                         print(f"🚫 로컬 fallback 실패 (post {idx}): {fallback_error}")
                         break
                 failure_action = classify_failure(msg, script_chars=char_count, repeated=try_count >= max_retries)
@@ -1142,16 +1348,21 @@ def generate_scripts_from_filtered():
                     msg = retry_error or msg
                     print(f"🚫 repair-only retry failed (post {idx}): {msg}")
                 if failure_action in {FailureAction.REPAIR_ONLY, FailureAction.SKIP_SOURCE}:
+                    if metadata and prior_critic_attempt_count:
+                        metadata["prior_critic_attempt_count"] = prior_critic_attempt_count
+                        metadata["prior_critic_failed_count"] = prior_critic_failed_count
                     failed_items.append(
-                        {
-                            "idx": idx,
-                            "id": origin_id,
-                            "title": title,
-                            "error": msg,
-                            "stage": "script_generation",
-                            "generation_attempt_count": try_count + 1,
-                            "failure_action": failure_action.value,
-                        }
+                        _failure_record(
+                            idx=idx,
+                            origin_id=origin_id,
+                            title=title,
+                            error=msg,
+                            stage="script_generation",
+                            generation_attempt_count=try_count + 1,
+                            failure_action=failure_action.value,
+                            result=result,
+                            metadata=metadata,
+                        )
                     )
                     print(f"🚫 repair-first 스킵 (post {idx}): action={failure_action.value} error={msg}")
                     break
@@ -1160,16 +1371,21 @@ def generate_scripts_from_filtered():
 
                 try_count += 1
                 if try_count > max_retries:
+                    if metadata and prior_critic_attempt_count:
+                        metadata["prior_critic_attempt_count"] = prior_critic_attempt_count
+                        metadata["prior_critic_failed_count"] = prior_critic_failed_count
                     failed_items.append(
-                        {
-                            "idx": idx,
-                            "id": origin_id,
-                            "title": title,
-                            "error": msg,
-                            "stage": "script_generation",
-                            "generation_attempt_count": try_count,
-                            "failure_action": FailureAction.SKIP_SOURCE.value,
-                        }
+                        _failure_record(
+                            idx=idx,
+                            origin_id=origin_id,
+                            title=title,
+                            error=msg,
+                            stage="script_generation",
+                            generation_attempt_count=try_count,
+                            failure_action=FailureAction.SKIP_SOURCE.value,
+                            result=result,
+                            metadata=metadata,
+                        )
                     )
                     print(f"🚫 최종 실패 (post {idx}): {msg}")
 
@@ -1190,6 +1406,16 @@ def generate_scripts_from_filtered():
 
 
 def _generation_summary(posts: list[dict], accepted: list[dict], failed: list[dict]) -> dict:
+    all_items = accepted + failed
+    generation_telemetry = _sum_generation_telemetry(all_items)
+    source_filter_summary = _load_source_filter_summary()
+    critic_attempted = sum(
+        int(item.get("critic_attempt_count") or 0) + int(item.get("prior_critic_attempt_count") or 0)
+        for item in all_items
+    )
+    source_scorecard_calls = int(source_filter_summary.get("source_scorecard_calls") or 0)
+    source_scorecard_skipped = int(source_filter_summary.get("source_scorecard_skipped_by_prerank") or 0)
+    critic_budget = _int_env("SCRIPT_CRITIC_MAX_OUTPUT_TOKENS", 1400)
     failure_codes = _failure_code_counts([str(item.get("error") or "") for item in failed])
     return {
         "sources_considered": len(posts),
@@ -1198,12 +1424,68 @@ def _generation_summary(posts: list[dict], accepted: list[dict], failed: list[di
         + sum(int(item.get("generation_attempt_count") or 0) for item in failed),
         "llm_rewrites": sum(max(0, int(item.get("generation_attempt_count") or 0) - 1) for item in accepted)
         + sum(max(0, int(item.get("generation_attempt_count") or 0) - 1) for item in failed),
-        "critic_calls": sum(int(item.get("critic_attempt_count") or 0) for item in accepted),
+        "critic_calls": critic_attempted,
+        "critic_calls_attempted": critic_attempted,
+        "critic_passed": sum(1 for item in all_items if item.get("critic_passed") is True),
+        "critic_failed": sum(1 for item in all_items if item.get("critic_passed") is False)
+        + sum(int(item.get("prior_critic_failed_count") or 0) for item in all_items),
+        "critic_skipped": sum(1 for item in all_items if item.get("critic_policy") == "skipped_strong_candidate"),
         "repair_successes": sum(1 for item in accepted if item.get("repair_actions")),
+        "repair_only_retries": sum(1 for item in all_items if item.get("repair_only_retry_attempted")),
+        "repair_only_retry_successes": sum(1 for item in all_items if item.get("repair_only_retry_passed")),
+        "structured_attempts": generation_telemetry["structured_attempts"],
+        "json_fallback_attempts": generation_telemetry["json_fallback_attempts"],
+        "structured_failures": generation_telemetry["structured_failures"],
+        "json_fallback_failures": generation_telemetry["json_fallback_failures"],
+        "source_scorecard_calls": source_scorecard_calls,
+        "source_scorecard_skipped_by_prerank": source_scorecard_skipped,
+        "llm_call_estimate_total": (
+            generation_telemetry["structured_attempts"]
+            + generation_telemetry["json_fallback_attempts"]
+            + source_scorecard_calls
+            + critic_attempted
+        ),
+        "estimated_output_token_budget_total": (
+            generation_telemetry["estimated_output_token_budget_total"]
+            + source_scorecard_calls * 512
+            + critic_attempted * critic_budget
+        ),
         "final_accepted": len(accepted),
         "final_rejected": len(failed),
         "top_failure_codes": failure_codes[:10],
     }
+
+
+def _sum_generation_telemetry(items: list[dict]) -> dict[str, int]:
+    totals = {
+        "structured_attempts": 0,
+        "json_fallback_attempts": 0,
+        "structured_failures": 0,
+        "json_fallback_failures": 0,
+        "estimated_output_token_budget_total": 0,
+    }
+    for item in items:
+        telemetry = item.get("generation_telemetry") or {}
+        for key in totals:
+            totals[key] += int(item.get(f"llm_{key}") or telemetry.get(key) or 0)
+    return totals
+
+
+def _load_source_filter_summary() -> dict:
+    candidates = [
+        FINAL_METADATA_FILE.with_name("source_filter_summary.json"),
+        VIABLE_POSTS_FILE.with_name("source_filter_summary.json"),
+    ]
+    for path in candidates:
+        try:
+            if path.exists():
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+        except Exception:
+            continue
+    return {}
 
 
 def _failure_code_counts(errors: list[str]) -> list[dict]:

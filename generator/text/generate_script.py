@@ -6,6 +6,8 @@ from dotenv import load_dotenv, find_dotenv
 import openai
 from pydantic import BaseModel, Field, ValidationError
 
+_LAST_GENERATION_TELEMETRY: dict[str, int] = {}
+
 # --- ENV & Client ---
 def _get_client() -> openai.OpenAI:
     env_path = find_dotenv(usecwd=True)
@@ -35,7 +37,35 @@ def _token_budgets() -> list[int]:
                 budgets.append(value)
         if budgets:
             return budgets
-    return [3200, 4200, 5200]
+    return [1600, 2200, 3000]
+
+
+def _json_fallback_enabled() -> bool:
+    return os.getenv("SCRIPT_ENABLE_JSON_FALLBACK", "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _new_generation_telemetry() -> dict[str, int]:
+    return {
+        "structured_attempts": 0,
+        "json_fallback_attempts": 0,
+        "structured_failures": 0,
+        "json_fallback_failures": 0,
+        "estimated_output_token_budget_total": 0,
+    }
+
+
+def get_last_generation_telemetry() -> dict[str, int]:
+    return dict(_LAST_GENERATION_TELEMETRY)
+
+
+def _record_last_generation_telemetry(telemetry: dict[str, int]) -> None:
+    global _LAST_GENERATION_TELEMETRY
+    _LAST_GENERATION_TELEMETRY = dict(telemetry)
+
+
+def _attach_generation_telemetry(draft: BaseModel, telemetry: dict[str, int]) -> BaseModel:
+    object.__setattr__(draft, "_generation_telemetry", dict(telemetry))
+    return draft
 
 
 def _text_verbosity(model: str | None = None) -> str:
@@ -377,22 +407,38 @@ def generate_script(prompt: str) -> DraftScript:
     budgets = _token_budgets()
     last_err: Optional[Exception] = None
     client = _get_client()
+    telemetry = _new_generation_telemetry()
+    _record_last_generation_telemetry(telemetry)
 
     for i, max_tokens in enumerate(budgets, start=1):
         try:
             # 1차: Structured
+            telemetry["structured_attempts"] += 1
+            telemetry["estimated_output_token_budget_total"] += max_tokens
+            _record_last_generation_telemetry(telemetry)
             draft = _try_structured(client, prompt, max_tokens)
-            return _run_critic_rewrite_flow(prompt, draft, max_tokens)
+            draft = _run_critic_rewrite_flow(prompt, draft, max_tokens)
+            return _attach_generation_telemetry(draft, telemetry)
         except Exception as e1:
             last_err = e1
+            telemetry["structured_failures"] += 1
+            _record_last_generation_telemetry(telemetry)
             print(f"⚠️ Structured 실패 (시도 {i}/{len(budgets)} | tokens={max_tokens}): {e1}")
+            if not _json_fallback_enabled():
+                continue
             try:
                 # 2차: 폴백(JSON 모드)
+                telemetry["json_fallback_attempts"] += 1
+                telemetry["estimated_output_token_budget_total"] += max_tokens
+                _record_last_generation_telemetry(telemetry)
                 rs = _fallback_json_mode(client, prompt, max_tokens)
                 _assert_no_nulls(rs)
-                return _run_critic_rewrite_flow(prompt, rs, max_tokens)
+                rs = _run_critic_rewrite_flow(prompt, rs, max_tokens)
+                return _attach_generation_telemetry(rs, telemetry)
             except Exception as e2:
                 last_err = e2
+                telemetry["json_fallback_failures"] += 1
+                _record_last_generation_telemetry(telemetry)
                 print(f"⚠️ JSON 폴백 실패 (시도 {i}/{len(budgets)} | tokens={max_tokens}): {e2}")
 
     raise RuntimeError(f"GPT 호출/검증 최종 실패: {last_err}")
