@@ -365,12 +365,13 @@ def collect_with_fallback(config: RedditScrapeConfig, scraped_ids: Set[str]) -> 
             raise
         print(f"⚠️ Reddit 공식/API 수집 실패, PullPush fallback 사용: {e}")
         try:
-            return PullPushSource(config).collect(scraped_ids)
+            posts = PullPushSource(config).collect(scraped_ids)
         except Exception as pullpush_error:
             if not config.synthetic_fallback_enabled:
                 raise
             print(f"⚠️ PullPush 수집 실패, synthetic conflict fallback 사용: {pullpush_error}")
             return SyntheticConflictSource(config).collect(scraped_ids)
+        return _supplement_with_synthetic_if_needed(config, scraped_ids, posts)
 
 
 def _get_json_with_retries(
@@ -399,6 +400,28 @@ def _get_json_with_retries(
             if wait > 0:
                 time.sleep(wait)
     raise RuntimeError(f"{label} failed after {attempts} attempts: {last_error}") from last_error
+
+
+def _supplement_with_synthetic_if_needed(
+    config: RedditScrapeConfig,
+    scraped_ids: Set[str],
+    posts: List[Dict[str, str]],
+) -> List[Dict[str, str]]:
+    if not config.synthetic_fallback_enabled:
+        return posts
+    target_count = min(config.max_posts, config.min_needed)
+    if len(posts) >= target_count:
+        return posts
+
+    seen_ids = {str(post.get("id")) for post in posts if post.get("id")}
+    synthetic_posts = SyntheticConflictSource(config).collect(scraped_ids | seen_ids)
+    remaining = max(0, config.max_posts - len(posts))
+    supplemented = posts + synthetic_posts[:remaining]
+    print(
+        "⚠️ PullPush accepted too few posts; "
+        f"supplemented with synthetic seeds: {len(posts)} -> {len(supplemented)}"
+    )
+    return supplemented
 
 
 def _synthetic_story_content(scenario: Dict[str, str]) -> str:

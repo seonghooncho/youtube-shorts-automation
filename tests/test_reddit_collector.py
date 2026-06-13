@@ -194,3 +194,28 @@ def test_collect_with_fallback_uses_synthetic_when_external_sources_fail(monkeyp
 
     assert len(posts) == 2
     assert all(post["source_provider"] == "synthetic" for post in posts)
+
+
+def test_collect_with_fallback_supplements_when_pullpush_has_too_few_posts(monkeypatch):
+    class _BrokenReddit:
+        def __init__(self, config):
+            self.config = config
+
+        def collect(self, scraped_ids):
+            raise RuntimeError("reddit down")
+
+    class _EmptyPullPush:
+        def __init__(self, config):
+            self.config = config
+
+        def collect(self, scraped_ids):
+            return []
+
+    monkeypatch.setattr(reddit_sources, "RedditApiSource", _BrokenReddit)
+    monkeypatch.setattr(reddit_sources, "PullPushSource", _EmptyPullPush)
+    config = RedditScrapeConfig(max_posts=4, min_needed=3, synthetic_fallback_count=4)
+
+    posts = collect_with_fallback(config, set())
+
+    assert len(posts) == 4
+    assert all(post["source_provider"] == "synthetic" for post in posts)
