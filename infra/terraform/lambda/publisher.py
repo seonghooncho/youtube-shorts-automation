@@ -21,24 +21,28 @@ PUBLISH_METADATA_KEY = os.getenv("PUBLISH_METADATA_KEY", "publish-ready/final_me
 LEGACY_METADATA_KEY = os.getenv("LEGACY_METADATA_KEY", "shorts/state/final_metadata.json")
 SSM_PREFIX = os.getenv("SSM_PARAMETER_PREFIX", "/ytshorts")
 _CONFIG_CACHE: dict[str, str] = {}
-TITLE_HASHTAGS = ("#shorts", "#story", "#reddit", "#viral")
+TITLE_HASHTAGS = ("#shorts", "#story")
 DEFAULT_VIDEO_TAGS = (
     "shorts",
     "story",
-    "reddit",
-    "viral",
     "storytime",
-    "reddit story",
-    "aita",
     "drama",
     "short story",
 )
 MAX_TITLE_CHARS = 100
-MAX_TITLE_CONFLICT_CHARS = 70
+MAX_TITLE_CONFLICT_CHARS = 68
 MAX_DESCRIPTION_CHARS = 4800
 MAX_TAGS = 15
 _HASHTAG_RE = re.compile(r"#\w+")
 _SPACE_RE = re.compile(r"\s+")
+_BANNED_PUBLIC_TITLE_PREFIX_RE = re.compile(
+    r"^\s*(?:aita\b|am\s+i\s+the\s+asshole\b|am\s+i\s+wrong\b|did\s+i\s+overreact\b)",
+    re.IGNORECASE,
+)
+_AITA_CLEANUP_RE = re.compile(
+    r"^\s*(?:aita|am\s+i\s+the\s+asshole|am\s+i\s+wrong|did\s+i\s+overreact)\s*(?:for|because|when|after|about)?\s*",
+    re.IGNORECASE,
+)
 _SECRET_VALUE_RE = re.compile(
     r"(sk-[A-Za-z0-9_-]{16,}|AIza[0-9A-Za-z_-]{20,}|AKIA[0-9A-Z]{16}|hf_[A-Za-z0-9]{20,})"
 )
@@ -357,6 +361,11 @@ def _upload_youtube(file_path: str, item: dict[str, Any], config: dict[str, str]
 
 
 def _metadata_safety_error(item: dict[str, Any]) -> str:
+    source_provider = str(item.get("source_provider") or "").strip().lower()
+    if source_provider == "synthetic" and not _bool_setting("SCRIPT_ALLOW_SYNTHETIC_SOURCES", False):
+        return "unsafe_metadata:source_provider:synthetic_disabled"
+    if item.get("generation_fallback") == "local_template" and not _bool_setting("SCRIPT_LOCAL_FALLBACK_ENABLED", False):
+        return "unsafe_metadata:generation_fallback:local_template_disabled"
     fields = {
         "title": item.get("title", ""),
         "description": item.get("description", ""),
@@ -375,7 +384,7 @@ def _metadata_safety_error(item: dict[str, Any]) -> str:
 
 
 def _sanitize_upload_metadata(item: dict[str, Any]) -> dict[str, Any]:
-    title = _format_youtube_title(str(item.get("title") or "Untitled Short"))
+    title = _format_youtube_title(str(item.get("public_title") or item.get("title") or "Untitled Short"))
     description = _clean_public_text(str(item.get("description") or ""))[:MAX_DESCRIPTION_CHARS].strip()
     tags = _merge_youtube_tags(item.get("tags") or [])
     if not title.strip():
@@ -386,13 +395,27 @@ def _sanitize_upload_metadata(item: dict[str, Any]) -> dict[str, Any]:
 
 
 def _format_youtube_title(title: str) -> str:
-    clean_title = _strip_hashtags(_clean_public_text(title)).strip(" .,-")
-    clean_title = _SPACE_RE.sub(" ", clean_title).strip() or "Reddit Story"
+    clean_title = _public_title(_strip_hashtags(_clean_public_text(title)).strip(" .,-") or "Story")
     suffix = " ".join(_normalize_hashtag(tag) for tag in TITLE_HASHTAGS if _normalize_hashtag(tag))
     budget = min(MAX_TITLE_CONFLICT_CHARS, MAX_TITLE_CHARS - len(suffix) - 1)
     if len(clean_title) > budget:
         clean_title = _truncate_at_word(clean_title, budget).strip(" .,-")
     return f"{clean_title} {suffix}".strip()[:MAX_TITLE_CHARS]
+
+
+def _public_title(title: str) -> str:
+    clean_title = _SPACE_RE.sub(" ", str(title or "")).strip(" .,-")
+    if _BANNED_PUBLIC_TITLE_PREFIX_RE.search(clean_title):
+        clean_title = _AITA_CLEANUP_RE.sub("", clean_title).strip(" .,-")
+    if clean_title == clean_title.upper() or clean_title == clean_title.lower():
+        clean_title = clean_title.title()
+    else:
+        clean_title = clean_title[:1].upper() + clean_title[1:]
+    if not clean_title:
+        clean_title = "A Family Bill Turned Into A Group Argument"
+    if _BANNED_PUBLIC_TITLE_PREFIX_RE.search(clean_title):
+        clean_title = "The Argument Started Before I Even Sat Down"
+    return clean_title
 
 
 def _format_youtube_description(description: str) -> str:

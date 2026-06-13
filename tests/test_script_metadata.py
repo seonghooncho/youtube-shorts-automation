@@ -1,7 +1,7 @@
 import pytest
 
 from generator.text.generate_script import ReturnScript
-from generator.text.generate_scripts_from_filtered import validate_and_parse_metadata
+from generator.text.generate_scripts_from_filtered import _source_preflight_error, validate_and_parse_metadata
 from generator.text.script_quality import _first_sentence, _has_hook_stakes, validate_script_quality
 
 
@@ -319,3 +319,101 @@ def test_blocked_and_turned_count_as_hook_stakes():
     assert _has_hook_stakes("my friend put a wedding invoice in my name")
     assert _has_hook_stakes("she told everyone i volunteered to pay it")
     assert _has_hook_stakes("they said i was covering the cost")
+
+
+def test_ai_template_phrases_fail_validation():
+    source = {
+        "title": "AITA for correcting my neighbor after he used my driveway?",
+        "content": (
+            "My neighbor parked in my driveway for six hours. My door camera showed his car there. "
+            "He complained in the neighborhood chat when I asked him to move it. I posted the clip "
+            "and a screenshot of the text where he admitted it was his car."
+        ),
+    }
+    metadata = {
+        "title": "Neighbor Used My Driveway",
+        "hook_type": "neighbor_dispute",
+        "first_2_seconds": "My neighbor parked in my driveway for six hours",
+        "turning_point": "The neighbor complained in the building chat after the camera clip showed his car.",
+        "payoff_line": "The proof was clear.",
+        "viewer_question": "Now people are split because I refused to smooth it over.",
+        "marketability_score": 5,
+        "retention_risk": "The story moves quickly from driveway misuse to camera proof and public accusation.",
+        "cut_plan": ["driveway", "door camera", "phone chat", "parking sign"],
+        "bg_strategy": "hybrid",
+        "source_summary": "A neighbor uses the narrator's driveway, gets caught by camera, and complains publicly.",
+        "story_beats": ["driveway", "camera", "chat", "clip"],
+        "adaptation_strategy": "Compressed the parking argument into a camera receipt and public correction without changing the neighbor dispute.",
+        "retention_angle": "The story has a concrete driveway misuse, a camera receipt, and a public accusation.",
+        "visual_keywords": ["driveway", "door camera", "phone chat", "parking sign"],
+        "script": [
+            "My neighbor parked in my driveway for six hours, then complained when I asked him to move.",
+            "The proof was clear.",
+            "Now people are split because I refused to smooth it over.",
+            "Was I too harsh?",
+        ],
+    }
+
+    issues = validate_script_quality(metadata, source)
+
+    assert "ai_template_phrase" in {issue.code for issue in issues}
+
+
+def test_incomplete_sentence_endings_fail_validation():
+    source = {
+        "title": "AITA for refusing to move my car?",
+        "content": (
+            "My neighbor used my driveway. My door camera showed the car. "
+            "He texted me twice and complained in the group chat when I posted the clip."
+        ),
+    }
+    examples = [
+        "AITA for refusing to move my car after my neighbor used my",
+        "I tried to keep it calm, but it already felt like.",
+        "because I was the one who made the, then acted.",
+        "So I put up a small private parking sign and stopped answering his.",
+        "So I posted the clip, asked her to correct herself, and stopped taking.",
+    ]
+    for line in examples:
+        metadata = {
+            "title": "Neighbor Driveway Clip",
+            "hook_type": "neighbor_dispute",
+            "first_2_seconds": "My neighbor used my driveway",
+            "turning_point": "The door camera showed the car sitting there.",
+            "payoff_line": "I posted the driveway clip.",
+            "viewer_question": "Would you have posted the clip?",
+            "marketability_score": 5,
+            "retention_risk": "The script gets to the driveway camera clip quickly.",
+            "cut_plan": ["driveway", "door camera", "phone chat", "parking sign"],
+            "bg_strategy": "hybrid",
+            "source_summary": "A neighbor uses the driveway and gets caught on camera.",
+            "story_beats": ["driveway", "camera", "chat", "clip"],
+            "adaptation_strategy": "Compressed the driveway story into the camera receipt and public correction.",
+            "retention_angle": "The story has driveway misuse, a camera receipt, and a public correction.",
+            "visual_keywords": ["driveway", "door camera", "phone chat", "parking sign"],
+            "script": [
+                "My neighbor used my driveway, and the door camera caught the whole thing.",
+                line,
+                "The group chat showed he admitted it was his car.",
+                "Would you have posted the clip?",
+            ],
+        }
+
+        issues = validate_script_quality(metadata, source)
+
+        assert "template_storytelling" in {issue.code for issue in issues}
+
+
+def test_synthetic_source_rejected_in_production(monkeypatch):
+    monkeypatch.delenv("SCRIPT_ALLOW_SYNTHETIC_SOURCES", raising=False)
+    monkeypatch.delenv("ALLOW_SYNTHETIC_SOURCES", raising=False)
+
+    reason = _source_preflight_error(
+        {
+            "title": "A synthetic conflict",
+            "content": "A neighbor parked in a driveway and the camera showed the car for six hours.",
+            "source_provider": "synthetic",
+        }
+    )
+
+    assert "synthetic source is disabled" in reason

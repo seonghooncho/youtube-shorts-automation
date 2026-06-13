@@ -4,20 +4,16 @@ import re
 from typing import Any, Dict, Iterable, List
 
 
-TITLE_HASHTAGS = ("#shorts", "#story", "#reddit", "#viral")
+TITLE_HASHTAGS = ("#shorts", "#story")
 DEFAULT_VIDEO_TAGS = (
     "shorts",
     "story",
-    "reddit",
-    "viral",
     "storytime",
-    "reddit story",
-    "aita",
     "drama",
     "short story",
 )
 MAX_TITLE_CHARS = 100
-MAX_TITLE_CONFLICT_CHARS = 70
+MAX_TITLE_CONFLICT_CHARS = 68
 MAX_DESCRIPTION_CHARS = 4800
 MAX_TAGS = 15
 
@@ -50,18 +46,35 @@ _INTERNAL_MARKERS = (
     "NULL",
     "NAN",
 )
+_BANNED_PUBLIC_TITLE_PREFIX_RE = re.compile(
+    r"^\s*(?:aita\b|am\s+i\s+the\s+asshole\b|am\s+i\s+wrong\b|did\s+i\s+overreact\b)",
+    re.IGNORECASE,
+)
+_AITA_CLEANUP_RE = re.compile(
+    r"^\s*(?:aita|am\s+i\s+the\s+asshole|am\s+i\s+wrong|did\s+i\s+overreact)\s*(?:for|because|when|after|about)?\s*",
+    re.IGNORECASE,
+)
 
 
 def apply_youtube_metadata_style(metadata: Dict[str, Any]) -> Dict[str, Any]:
     """Apply the channel's Shorts metadata house style in-place and return metadata."""
     viewer_question = str(metadata.get("viewer_question") or "").strip()
+    source_title = str(metadata.get("source_title") or metadata.get("title") or "").strip()
+    metadata["source_title"] = source_title
+    metadata["public_title"] = build_public_title(
+        str(metadata.get("public_title") or metadata.get("title") or source_title),
+        source_title=source_title,
+    )
+    hashtags = title_hashtags_for_source(str(metadata.get("source_provider") or ""))
     styled = sanitize_upload_metadata(
-        title=format_youtube_title(str(metadata.get("title") or "Untitled Short")),
+        title=format_youtube_title(metadata["public_title"], hashtags=hashtags),
         description=format_youtube_description(
             str(metadata.get("description") or ""),
             viewer_question=viewer_question,
+            hashtags=hashtags,
         ),
         tags=merge_youtube_tags(metadata.get("tags") or []),
+        title_hashtags=hashtags,
     )
     metadata["title"] = styled["title"]
     metadata["description"] = styled["description"]
@@ -69,17 +82,23 @@ def apply_youtube_metadata_style(metadata: Dict[str, Any]) -> Dict[str, Any]:
     return metadata
 
 
-def sanitize_upload_metadata(title: str, description: str, tags: Iterable[str]) -> Dict[str, Any]:
+def sanitize_upload_metadata(
+    title: str,
+    description: str,
+    tags: Iterable[str],
+    title_hashtags: Iterable[str] = TITLE_HASHTAGS,
+) -> Dict[str, Any]:
     """Return upload-safe YouTube metadata or raise when internal values are present."""
     unsafe_field = unsafe_upload_metadata_reason(title, description, tags)
     if unsafe_field:
         raise ValueError(unsafe_field)
-    clean_title = format_youtube_title(_clean_public_text(title) or "Reddit Story")
+    clean_title = format_youtube_title(_clean_public_text(title) or "Story", hashtags=title_hashtags)
     clean_description = _clean_public_text(description)[:MAX_DESCRIPTION_CHARS].strip()
     clean_tags = merge_youtube_tags(_clean_public_text(tag) for tag in tags or [])
     if not clean_description:
         clean_description = format_youtube_description(
-            "A fast storytime Short about a relatable everyday conflict."
+            "A fast storytime Short about a relatable everyday conflict.",
+            hashtags=title_hashtags,
         )
     return {
         "title": clean_title,
@@ -103,7 +122,7 @@ def unsafe_upload_metadata_reason(title: str, description: str, tags: Iterable[s
 
 def format_youtube_title(title: str, hashtags: Iterable[str] = TITLE_HASHTAGS) -> str:
     clean_title = _strip_hashtags(_clean_public_text(title)).strip(" .,-")
-    clean_title = _SPACE_RE.sub(" ", clean_title).strip() or "Reddit Story"
+    clean_title = build_public_title(_SPACE_RE.sub(" ", clean_title).strip() or "Story")
     suffix = " ".join(_normalize_hashtag(tag) for tag in hashtags if _normalize_hashtag(tag))
     if not suffix:
         return clean_title[:MAX_TITLE_CHARS]
@@ -142,6 +161,53 @@ def merge_youtube_tags(tags: Iterable[str]) -> list[str]:
         if len(merged) >= MAX_TAGS:
             break
     return merged
+
+
+def build_public_title(candidate: str, source_title: str = "") -> str:
+    """Return a human-facing title without hashtags or AITA-style framing."""
+    title = _strip_hashtags(_clean_public_text(candidate)).strip(" .,-")
+    source = _strip_hashtags(_clean_public_text(source_title)).strip(" .,-")
+    if _is_banned_public_title(title):
+        title = _AITA_CLEANUP_RE.sub("", title).strip(" .,-")
+    if not title and source:
+        title = _AITA_CLEANUP_RE.sub("", source).strip(" .,-")
+    if _is_banned_public_title(title) and source:
+        title = _AITA_CLEANUP_RE.sub("", source).strip(" .,-")
+    title = _SPACE_RE.sub(" ", title).strip(" .,-")
+    title = _sentence_title_case(title)
+    if title.isupper():
+        title = title.title()
+    if not title:
+        title = "A Family Bill Turned Into A Group Argument"
+    if len(title) > MAX_TITLE_CONFLICT_CHARS:
+        title = _truncate_at_word(title, MAX_TITLE_CONFLICT_CHARS).strip(" .,-")
+    if _is_banned_public_title(title):
+        title = "The Argument Started Before I Even Sat Down"
+    return title
+
+
+def title_hashtags_for_source(source_provider: str) -> tuple[str, ...]:
+    if str(source_provider or "").strip().lower() == "reddit" and _include_reddit_hashtag():
+        return ("#shorts", "#story", "#reddit")
+    return TITLE_HASHTAGS
+
+
+def _include_reddit_hashtag() -> bool:
+    # Default channel style intentionally avoids Reddit-looking titles.
+    return False
+
+
+def _is_banned_public_title(title: str) -> bool:
+    return bool(_BANNED_PUBLIC_TITLE_PREFIX_RE.search(str(title or "")))
+
+
+def _sentence_title_case(title: str) -> str:
+    title = str(title or "").strip()
+    if not title:
+        return ""
+    if title == title.upper() or title == title.lower():
+        return title.title()
+    return title[:1].upper() + title[1:]
 
 
 def _strip_hashtags(text: str) -> str:
