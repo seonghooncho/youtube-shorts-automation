@@ -321,6 +321,176 @@ def _extract_current_char_count(message: str) -> int | None:
     return None
 
 
+def _local_fallback_enabled() -> bool:
+    return os.getenv("SCRIPT_LOCAL_FALLBACK_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _is_llm_quota_error(message: str) -> bool:
+    lowered = (message or "").lower()
+    return "insufficient_quota" in lowered or "exceeded your current quota" in lowered or "rate_limit_exceeded" in lowered
+
+
+def _build_local_fallback_metadata(post: Dict[str, Any], reason: str = "") -> Dict[str, Any]:
+    """Create a conservative script from source text when the LLM API is unavailable."""
+    title = _clean_sentence(post.get("title") or "Boundary Story", max_chars=92)
+    content = str(post.get("content") or "")
+    parts = _extract_source_parts(content)
+    boundary = parts.get("boundary") or "I was clear about the boundary before anything happened"
+    setup = parts.get("setup") or _sentence_at(content, 0) or "At first, I tried to handle it calmly."
+    crossed_line = parts.get("crossed_line") or _sentence_at(content, 1) or "someone crossed the line and acted like I was the problem"
+    public_pressure = parts.get("public_pressure") or _sentence_at(content, 2) or "people around us started taking sides"
+    escalation = parts.get("escalation") or _sentence_at(content, 3) or "the pressure kept building instead of anyone owning the mistake"
+    proof = parts.get("proof") or _sentence_at(content, 4) or "the messages showed exactly what I had agreed to"
+    consequence = parts.get("consequence") or _sentence_at(content, 5) or "I held the boundary and stopped covering for it"
+    debate = parts.get("debate") or "Was I wrong to hold the boundary?"
+
+    hook = _clean_sentence(f"{_sentence_case(boundary)}, but {crossed_line}", max_chars=132)
+    if not hook.endswith((".", "?", "!")):
+        hook = f"{hook}."
+    first_two = _clean_sentence(hook, max_chars=96).rstrip(".!?")
+    viewer_question = _ensure_question(_clean_sentence(debate, max_chars=150))
+    payoff = _clean_sentence(consequence, max_chars=120)
+    source_summary = _clean_sentence(f"{setup} {crossed_line}", max_chars=220)
+    story_beats = [
+        _clean_sentence(setup, max_chars=120),
+        f"The boundary was: {_clean_sentence(boundary, max_chars=110)}",
+        _clean_sentence(crossed_line, max_chars=130),
+        _clean_sentence(public_pressure, max_chars=130),
+        _clean_sentence(proof, max_chars=130),
+        _clean_sentence(consequence, max_chars=130),
+    ]
+    visual_keywords = _fallback_visual_keywords(title, content)
+
+    script = [
+        hook,
+        _clean_sentence(f"The boundary was simple: {boundary}. {setup}", max_chars=185),
+        _clean_sentence(f"Then {crossed_line}. I tried to keep it calm, but it already felt like my limit did not matter.", max_chars=185),
+        _clean_sentence(f"What made it worse was {public_pressure}. {escalation}", max_chars=185),
+        _clean_sentence(f"The proof was clear: {proof}. So {consequence}.", max_chars=185),
+        _clean_sentence(f"Now people are split because I refused to smooth it over. {viewer_question}", max_chars=185),
+    ]
+    script = _fit_fallback_script(script, story_beats)
+
+    metadata = ReturnScript(
+        title=title,
+        description=f"A fast storytime about a crossed boundary and the fallout after {title.lower()}.",
+        tags=["storytime", "boundaries", "redditstories", "aita", "familydrama"],
+        voice="neutral",
+        visual_keywords=visual_keywords,
+        hook_type=_fallback_hook_type(content),
+        first_2_seconds=first_two,
+        source_summary=source_summary,
+        story_beats=story_beats[:6],
+        adaptation_strategy="Compressed the source into a boundary, escalation, proof, decision, and final dilemma while preserving the core conflict.",
+        retention_angle="The story has a concrete boundary crossed, public pressure, proof, and a debatable final decision.",
+        turning_point=_clean_sentence(public_pressure if public_pressure else proof, max_chars=140),
+        payoff_line=payoff,
+        viewer_question=viewer_question,
+        marketability_score=4,
+        retention_risk="A local fallback can feel summarized, so the script opens on the crossed line and moves quickly to proof.",
+        cut_plan=visual_keywords[:6],
+        bg_strategy="hybrid",
+        rewrite_notes=f"Local fallback used after LLM generation became unavailable: {_clean_sentence(reason, max_chars=120)}",
+        script=script,
+    )
+    parsed = validate_and_parse_metadata(metadata, "local_fallback", post)
+    parsed["generation_fallback"] = "local_template"
+    parsed["generation_fallback_reason"] = _clean_sentence(reason, max_chars=240)
+    if post.get("id") is not None:
+        parsed["id"] = post.get("id")
+        parsed["uploaded"] = False
+    return parsed
+
+
+def _extract_source_parts(content: str) -> Dict[str, str]:
+    text = " ".join(str(content or "").split())
+    patterns = {
+        "boundary": r"one clear boundary in this situation:\s*(.*?)(?:\.|$)",
+        "crossed_line": r"Then\s+(.*?)(?:,\s*and acted like| and acted like|\.|$)",
+        "public_pressure": r"The part that made people take sides was\s+(.*?)(?:\.|$)",
+        "escalation": r"but\s+(.*?)(?:\.|$)",
+        "proof": r"What changed everything was\s+(.*?)(?:\.|$)",
+        "consequence": r"After that,\s+(.*?)(?:\.|$)",
+    }
+    parts = {}
+    for key, pattern in patterns.items():
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            parts[key] = _clean_sentence(match.group(1), max_chars=180).rstrip(".")
+    questions = re.findall(r"[^.!?]*\?", text)
+    if questions:
+        parts["debate"] = _clean_sentence(questions[-1], max_chars=160)
+    return parts
+
+
+def _sentence_at(content: str, index: int) -> str:
+    sentences = [item.strip() for item in re.split(r"(?<=[.!?])\s+", str(content or "")) if item.strip()]
+    return sentences[index] if 0 <= index < len(sentences) else ""
+
+
+def _clean_sentence(text: str, *, max_chars: int) -> str:
+    cleaned = re.sub(r"\s+", " ", str(text or "")).strip(" -")
+    if len(cleaned) <= max_chars:
+        return cleaned
+    truncated = cleaned[: max(0, max_chars - 1)].rstrip()
+    if " " in truncated:
+        truncated = truncated.rsplit(" ", 1)[0]
+    return f"{truncated.rstrip('.,;:')}."
+
+
+def _sentence_case(text: str) -> str:
+    text = str(text or "").strip()
+    return text[:1].upper() + text[1:] if text else text
+
+
+def _ensure_question(text: str) -> str:
+    text = text.strip()
+    if not text:
+        return "Was I wrong to hold the boundary?"
+    return text if text.endswith("?") else f"{text.rstrip('.!')}?"
+
+
+def _fallback_visual_keywords(title: str, content: str) -> list[str]:
+    lowered = f"{title} {content}".lower()
+    if any(term in lowered for term in ("bill", "card", "invoice", "restaurant", "receipt")):
+        return ["credit card close up", "restaurant bill", "phone group chat", "receipt on table", "awkward dinner table", "person leaving restaurant"]
+    if any(term in lowered for term in ("driveway", "parking", "car", "gate")):
+        return ["suburban driveway", "doorbell camera", "parked car", "phone neighborhood chat", "private parking sign", "package by gate"]
+    if any(term in lowered for term in ("apartment", "room", "bedroom", "couch")):
+        return ["apartment hallway", "bedroom door", "family dinner table", "phone messages", "couch in living room", "tense conversation"]
+    if any(term in lowered for term in ("office", "coworker", "team", "manager")):
+        return ["office conversation", "workplace break room", "phone screenshots", "desk close up", "team chat messages", "tense meeting"]
+    return ["phone messages", "tense conversation", "kitchen table", "receipt close up", "person thinking", "final question screen"]
+
+
+def _fallback_hook_type(content: str) -> str:
+    lowered = str(content or "").lower()
+    if any(term in lowered for term in ("bill", "card", "invoice", "deposit", "pay")):
+        return "money_pressure"
+    if any(term in lowered for term in ("driveway", "bedroom", "apartment", "car", "property")):
+        return "crossed_boundary"
+    if any(term in lowered for term in ("accused", "blamed", "called me")):
+        return "unfair_accusation"
+    return "boundary_conflict"
+
+
+def _fit_fallback_script(script: list[str], story_beats: list[str]) -> list[str]:
+    joined_len = len(" ".join(script))
+    if joined_len < TARGET_MIN_SCRIPT_CHARS:
+        script.insert(
+            -1,
+            _clean_sentence(
+                "The frustrating part was not just the mistake. It was being expected to absorb it quietly so nobody else had to feel uncomfortable.",
+                max_chars=185,
+            ),
+        )
+    if len(" ".join(script)) < TARGET_MIN_SCRIPT_CHARS and story_beats:
+        script.insert(-1, _clean_sentence(f"That is why this felt bigger than one awkward moment: {story_beats[0]}", max_chars=185))
+    while len(" ".join(script)) > TARGET_MAX_SCRIPT_CHARS and len(script) > 5:
+        script.pop(-2)
+    return script
+
+
 def generate_scripts_from_filtered():
     if not VIABLE_POSTS_FILE.exists():
         print("❌ viable_posts.json이 없습니다.")
@@ -331,6 +501,7 @@ def generate_scripts_from_filtered():
 
     metadata_list = []
     failed_items = []
+    llm_unavailable_reason = None
 
     for idx, post in enumerate(posts):
         title = post.get("title", "")
@@ -343,6 +514,14 @@ def generate_scripts_from_filtered():
         if preflight_error:
             failed_items.append({"idx": idx, "id": origin_id, "title": title, "error": preflight_error})
             print(f"🚫 원문 품질 미달로 스킵 (post {idx}): {preflight_error}")
+            continue
+        if llm_unavailable_reason and _local_fallback_enabled():
+            try:
+                metadata_list.append(_build_local_fallback_metadata(post, llm_unavailable_reason))
+                print(f"🧩 로컬 fallback 대본 생성 완료 (post {idx}): {origin_id}")
+            except Exception as fallback_error:
+                failed_items.append({"idx": idx, "id": origin_id, "title": title, "error": str(fallback_error)})
+                print(f"🚫 로컬 fallback 실패 (post {idx}): {fallback_error}")
             continue
 
         while try_count <= max_retries:
@@ -384,6 +563,16 @@ def generate_scripts_from_filtered():
                     char_count = len(script_text(result.model_dump()))
                     print(f"⚠️ GPT 응답 검증 실패 (post {idx}, 시도 {try_count+1}, script_chars={char_count}): {e}")
                 msg = str(e)
+                if _is_llm_quota_error(msg) and _local_fallback_enabled():
+                    llm_unavailable_reason = msg
+                    try:
+                        metadata_list.append(_build_local_fallback_metadata(post, msg))
+                        print(f"🧩 OpenAI quota 오류로 로컬 fallback 대본 생성 완료 (post {idx}): {origin_id}")
+                        break
+                    except Exception as fallback_error:
+                        failed_items.append({"idx": idx, "id": origin_id, "title": title, "error": str(fallback_error)})
+                        print(f"🚫 로컬 fallback 실패 (post {idx}): {fallback_error}")
+                        break
                 regenerate_reason = _regenerate_reason_from_error(msg)
 
                 try_count += 1
@@ -468,6 +657,14 @@ def regenerate_post_by_id(post_id, regenerate_reason=None, max_retries=2):
                     f"{json.dumps(result.model_dump(), ensure_ascii=False, indent=2)}\n"
                 )
             msg = str(e)
+            if _is_llm_quota_error(msg) and _local_fallback_enabled():
+                try:
+                    metadata = _build_local_fallback_metadata(target_post, msg)
+                    print(f"🧩 OpenAI quota 오류로 로컬 fallback 재생성 완료 (postId={post_id})")
+                    return metadata
+                except Exception as fallback_error:
+                    print(f"🚫 로컬 fallback 재생성 실패 (postId={post_id}): {fallback_error}")
+                    return None
             regenerate_reason = _regenerate_reason_from_error(msg)
             try_count += 1
 
