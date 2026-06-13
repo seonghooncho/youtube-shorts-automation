@@ -137,7 +137,15 @@ def _repair_retention_angle(item: dict, post: dict, actions: list[dict]) -> None
         after = "A pet injury, expired shots, a bloodwork bill, and a roommate refusing to pay create an immediate debate."
     elif _has_any(combined, ("landlord", "apartment", "painter", "cat sitter", "walked in")):
         after = "A home privacy violation, surprise entries, a cat sitter receipt, and a chain-lock decision create a clear debate."
-    elif _has_any(combined, ("dad", "va", "medicare", "bank", "appointment")):
+    elif _is_bank_alert_conflict(combined):
+        after = "A deleted bank alert, a late-night charge, and a partner hiding the evidence create an immediate trust debate."
+    elif _is_babysitting_conflict(combined):
+        after = "A last-minute babysitting demand, family guilt, and a two-hour notice create a relatable boundary debate."
+    elif _is_ex_bills_conflict(combined):
+        after = "Flirty messages, unpaid bills, and a relationship trust problem give viewers a clear side to argue."
+    elif _is_dinner_job_insult_conflict(combined):
+        after = "A dinner-table insult, a guest-room expectation, and family pressure make the disrespect easy to judge."
+    elif _is_dad_admin_pressure(combined):
         after = "Constant family demands, phone-call receipts, and the choice to stop helping make the conflict highly debatable."
     elif _has_any(combined, ("van", "dent", "damage", "repair")):
         after = "Property damage, a clear driving rule, and a repair bill create a simple but divisive family argument."
@@ -325,7 +333,15 @@ def _deterministic_title(item: dict, post: dict) -> str:
         return "My Landlord Walked Into My Apartment"
     if _has_any(combined, ("daughter", "van", "dented", "dent")):
         return "My Daughter Dented My Van"
-    if _has_any(combined, ("dad", "bank", "doctor", "va", "medicare")):
+    if _is_bank_alert_conflict(combined):
+        return "My Boyfriend Deleted My Bank Alert"
+    if _is_babysitting_conflict(combined):
+        return "My Sister Called Me A Bad Aunt"
+    if _is_ex_bills_conflict(combined):
+        return "She Texted Her Ex While I Paid Bills"
+    if _is_dinner_job_insult_conflict(combined):
+        return "Her Boyfriend Mocked My Job At Dinner"
+    if _is_dad_admin_pressure(combined):
         return "My Dad Gave My Number To Every Bank"
     if _has_any(combined, ("driveway", "parked")):
         return "My Neighbor Parked In My Driveway"
@@ -366,7 +382,15 @@ def _opening_query(item: dict, post: dict) -> str:
         candidates = ["apartment landlord door", "apartment hallway door"]
     elif _has_any(combined, ("van", "dent", "dented")):
         candidates = ["dented van parking lot", "damaged van close up"]
-    elif _has_any(combined, ("dad", "bank", "va", "medicare", "phone")):
+    elif _is_bank_alert_conflict(combined):
+        candidates = ["bank phone alert", "food order phone"]
+    elif _is_babysitting_conflict(combined):
+        candidates = ["babysitting notice sister", "family childcare phone message"]
+    elif _is_ex_bills_conflict(combined):
+        candidates = ["phone messages bills", "couple bills phone"]
+    elif _is_dinner_job_insult_conflict(combined):
+        candidates = ["dinner table job argument", "guest room family dinner"]
+    elif _is_dad_admin_pressure(combined):
         candidates = ["phone bank paperwork", "phone calls bills paperwork"]
     elif _has_any(combined, ("groceries", "roommate", "grocery")):
         candidates = ["shared kitchen groceries"]
@@ -400,6 +424,14 @@ def _decision_query(item: dict, post: dict) -> str:
         return "tenant locking apartment door"
     if _has_any(combined, ("van", "dent")):
         return "car repair bill decision"
+    if _is_bank_alert_conflict(combined):
+        return "person checking bank app"
+    if _is_babysitting_conflict(combined):
+        return "person refusing babysitting text"
+    if _is_ex_bills_conflict(combined):
+        return "person reading phone messages"
+    if _is_dinner_job_insult_conflict(combined):
+        return "person leaving dinner table"
     return "person texting decision"
 
 
@@ -411,7 +443,15 @@ def _supporting_visual_queries(item: dict, post: dict) -> list[str]:
         return ["apartment hallway door", "door camera phone", "tenant locking door"]
     if _has_any(combined, ("van", "dent", "dented")):
         return ["damaged car close up", "auto repair estimate", "parking lot car"]
-    if _has_any(combined, ("dad", "bank", "va", "medicare", "phone")):
+    if _is_bank_alert_conflict(combined):
+        return ["bank app phone close up", "food delivery phone order", "couple arguing kitchen"]
+    if _is_babysitting_conflict(combined):
+        return ["family childcare phone message", "person checking clock", "home doorway text message"]
+    if _is_ex_bills_conflict(combined):
+        return ["phone messages close up", "bills on kitchen table", "couple arguing at home"]
+    if _is_dinner_job_insult_conflict(combined):
+        return ["family dinner table", "guest room doorway", "person upset at dinner"]
+    if _is_dad_admin_pressure(combined):
         return ["phone calls paperwork", "bank forms close up", "medical appointment calendar"]
     if _has_any(combined, ("driveway", "parking", "parked")):
         return ["doorbell camera driveway", "private parking sign", "suburban driveway car"]
@@ -448,6 +488,26 @@ def _source_grounded_repair_lines(item: dict, post: dict) -> list[str]:
         return [
             "That meant a real repair bill, not just an awkward family argument.",
             "The dent was on the van door exactly where I told her not to park it.",
+        ]
+    if _is_bank_alert_conflict(combined):
+        return [
+            "The bank alert was still in my notifications until he deleted it.",
+            "The food charge showed up while I was asleep and my phone was beside him.",
+        ]
+    if _is_babysitting_conflict(combined):
+        return [
+            "The message came with barely two hours of notice before she expected me there.",
+            "She called me a bad aunt before I had even answered the childcare request.",
+        ]
+    if _is_ex_bills_conflict(combined):
+        return [
+            "The messages were still open while the bills were sitting on the table.",
+            "I was paying the bills while she was texting him right beside me.",
+        ]
+    if _is_dinner_job_insult_conflict(combined):
+        return [
+            "He made the job joke at dinner and still expected our guest room afterward.",
+            "The insult happened in front of everyone before he asked to sleep over.",
         ]
     if _has_any(combined, ("message", "text", "receipt", "screenshot")):
         return [
@@ -504,6 +564,14 @@ def _first_frame_text(text: str) -> str:
         return "HER CAT BIT MINE TWICE"
     if "refused the vet bill" in lowered:
         return "SHE REFUSED THE VET BILL"
+    if "deleted my bank alert" in lowered or "bank alert" in lowered:
+        return "MY BOYFRIEND DELETED MY BANK ALERT"
+    if "bad aunt" in lowered or "babysit" in lowered:
+        return "MY SISTER CALLED ME A BAD AUNT"
+    if "texted her ex" in lowered or "paid bills" in lowered:
+        return "SHE TEXTED HER EX WHILE I PAID BILLS"
+    if "mocked my job" in lowered or "job at dinner" in lowered:
+        return "HE MOCKED MY JOB AT DINNER"
     cleaned = _strip_hashtags(text).upper()
     cleaned = re.sub(r"[^A-Z0-9 $'&-]+", "", cleaned)
     cleaned = re.sub(r"\b(?:THEN|JUST|THE|A)\b", "", cleaned)
@@ -595,6 +663,44 @@ def _is_pet_medical_conflict(text: str) -> bool:
     has_pet = bool(re.search(r"\b(?:cat|cats|pet|pets)\b", lowered))
     has_medical = bool(re.search(r"\b(?:bit|bite|bitten|bloodwork|vaccinated|vaccine|shots?|puncture|vet)\b", lowered))
     return has_pet and has_medical
+
+
+def _is_dad_admin_pressure(text: str) -> bool:
+    lowered = str(text or "").lower()
+    has_parent = bool(re.search(r"\b(?:dad|father|parent|elderly father)\b", lowered))
+    has_admin_pressure = bool(
+        re.search(r"\b(?:bank|banks|doctor|va|medicare|appointment|paperwork|phone number|gave my number)\b", lowered)
+    )
+    return has_parent and has_admin_pressure
+
+
+def _is_bank_alert_conflict(text: str) -> bool:
+    lowered = str(text or "").lower()
+    has_bank_alert = bool(re.search(r"\b(?:bank account|bank alert|alert|charge|charged|food order|1\s*a\.?m\.?|1am)\b", lowered))
+    has_hidden_action = bool(re.search(r"\b(?:deleted|erased|hid|used my bank|used my account)\b", lowered))
+    has_partner = bool(re.search(r"\b(?:boyfriend|girlfriend|partner)\b", lowered))
+    return has_bank_alert and has_hidden_action and has_partner
+
+
+def _is_babysitting_conflict(text: str) -> bool:
+    lowered = str(text or "").lower()
+    has_childcare = bool(re.search(r"\b(?:babysit|babysitting|babysitter|childcare|niece|bad aunt)\b", lowered))
+    has_pressure = bool(re.search(r"\b(?:two hours|notice|last minute|bad aunt|called me)\b", lowered))
+    return has_childcare and has_pressure
+
+
+def _is_ex_bills_conflict(text: str) -> bool:
+    lowered = str(text or "").lower()
+    has_messages = bool(re.search(r"\b(?:texted|texting|messages|flirty|ex)\b", lowered))
+    has_bills = bool(re.search(r"\b(?:bill|bills|paying|paid|rent)\b", lowered))
+    return has_messages and has_bills and "ex" in lowered
+
+
+def _is_dinner_job_insult_conflict(text: str) -> bool:
+    lowered = str(text or "").lower()
+    has_dinner_insult = bool(re.search(r"\b(?:mocked|insulted|job|career)\b", lowered)) and "dinner" in lowered
+    has_guest_pressure = bool(re.search(r"\b(?:guest room|sleep over|sleep in|stay over|expected to sleep)\b", lowered))
+    return has_dinner_insult and has_guest_pressure
 
 
 def _has_retention_signal(text: str) -> bool:
