@@ -52,17 +52,19 @@ def script_repair_min_chars() -> int:
 def classify_failure(message: str | Iterable[str], *, script_chars: int | None = None, repeated: bool = False) -> FailureAction:
     text = " ".join(message) if not isinstance(message, str) else message
     lowered = text.lower()
-    if repeated:
-        return FailureAction.SKIP_SOURCE
     if any(code in lowered for code in _SKIP_CODES):
         return FailureAction.SKIP_SOURCE
     if "script가 너무 짧" in lowered or "script_too_short" in lowered:
         count = script_chars if script_chars is not None else _extract_char_count(lowered)
         if count is not None and count >= script_repair_min_chars():
             return FailureAction.REPAIR_ONLY
+        if repeated:
+            return FailureAction.SKIP_SOURCE
         return FailureAction.LLM_REWRITE_ONCE
     if any(code in lowered for code in _REPAIR_ONLY_CODES):
         return FailureAction.REPAIR_ONLY
+    if repeated:
+        return FailureAction.SKIP_SOURCE
     if any(code in lowered for code in _REWRITE_ONCE_CODES):
         return FailureAction.LLM_REWRITE_ONCE
     return FailureAction.LLM_REWRITE_ONCE

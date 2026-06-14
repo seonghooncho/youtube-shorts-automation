@@ -29,14 +29,19 @@ def test_terraform_runtime_config_enforces_production_and_cost_controls():
     main_tf = (ROOT / "infra/terraform/main.tf").read_text(encoding="utf-8")
 
     for expected in (
-        'APP_ENV                           = "production"',
-        'YT_ENV                            = "production"',
-        'SOURCE_LLM_EVAL_LIMIT             = "8"',
-        'SCRIPT_MAX_LLM_DRAFTS_PER_SOURCE  = "2"',
-        'SCRIPT_ENABLE_JSON_FALLBACK       = "0"',
-        'SCRIPT_MAX_STRUCTURED_ATTEMPTS    = "1"',
-        'CAPTION_RENDER_MODE               = "chunk"',
-        'OPENING_SILENCE_SECONDS           = "0.25"',
+        'APP_ENV                                       = "production"',
+        'YT_ENV                                        = "production"',
+        'TARGET_ACCEPTED_SCRIPTS                       = "2"',
+        'SOURCE_LLM_EVAL_LIMIT                         = "4"',
+        'SOURCE_LLM_EVAL_LIMIT_MAX                     = "6"',
+        'SCRIPT_MAX_LLM_DRAFTS_PER_SOURCE              = "1"',
+        'SCRIPT_ALLOW_LLM_REWRITE_ON_NARRATIVE_FAILURE = "0"',
+        'SCRIPT_ENABLE_JSON_FALLBACK                   = "0"',
+        'SCRIPT_MAX_STRUCTURED_ATTEMPTS                = "1"',
+        'FILTER_LOCAL_FALLBACK_ENABLED                 = "0"',
+        'SCRIPT_LOCAL_FALLBACK_ENABLED                 = "0"',
+        'CAPTION_RENDER_MODE                           = "chunk"',
+        'OPENING_SILENCE_SECONDS                       = "0.25"',
     ):
         assert expected in main_tf
 

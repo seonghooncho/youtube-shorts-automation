@@ -5,6 +5,13 @@ from typing import Any, List, Literal, Optional
 from dotenv import load_dotenv, find_dotenv
 import openai
 from pydantic import BaseModel, Field, ValidationError
+from shared.llm.circuit_breaker import (
+    LlmCircuitOpen,
+    assert_llm_circuit_closed,
+    is_llm_quota_or_auth_error,
+    is_llm_rate_limit_error,
+    open_llm_circuit,
+)
 
 _LAST_GENERATION_TELEMETRY: dict[str, Any] = {}
 
@@ -18,10 +25,12 @@ class GenerateScriptError(RuntimeError):
 
 # --- ENV & Client ---
 def _get_client() -> openai.OpenAI:
+    assert_llm_circuit_closed("script_client")
     env_path = find_dotenv(usecwd=True)
     load_dotenv(env_path)
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
+        open_llm_circuit("OPENAI_API_KEY is not configured", "script_client")
         raise RuntimeError("OPENAI_API_KEY가 설정되지 않았습니다.")
     return openai.OpenAI(api_key=api_key)
 
@@ -226,16 +235,22 @@ def draft_to_metadata(draft: DraftScript) -> dict[str, Any]:
 
 
 def _try_structured(client: openai.OpenAI, prompt: str, max_output_tokens: int) -> DraftScript:
-    resp = client.responses.parse(
-        model=_default_model(),
-        input=[
-            {"role": "system", "content": _script_system_message()},
-            {"role": "user", "content": prompt},
-        ],
-        text_format=DraftScript,
-        max_output_tokens=max_output_tokens,
-        text={"verbosity": _text_verbosity()},
-    )
+    assert_llm_circuit_closed("script_generation")
+    try:
+        resp = client.responses.parse(
+            model=_default_model(),
+            input=[
+                {"role": "system", "content": _script_system_message()},
+                {"role": "user", "content": prompt},
+            ],
+            text_format=DraftScript,
+            max_output_tokens=max_output_tokens,
+            text={"verbosity": _text_verbosity()},
+        )
+    except Exception as exc:
+        if is_llm_quota_or_auth_error(exc) or is_llm_rate_limit_error(exc):
+            open_llm_circuit(str(exc), "script_generation")
+        raise
     parsed: DraftScript = resp.output_parsed
     if parsed is None:
         raise ValueError("output_parsed가 비었습니다.")
@@ -246,21 +261,27 @@ def _fallback_json_mode(client: openai.OpenAI, prompt: str, max_output_tokens: i
     """
     Structured Outputs 실패 시 JSON 모드로 재시도 후 Pydantic 검증.
     """
-    resp = client.responses.create(
-        model=_default_model(),
-        input=[
-            {"role": "developer",
-             "content": _script_system_message() + (
-                  " Return content that will be used for TTS. No code fences, no commentary. "
-                  "Do NOT include any control characters (U+0000-U+001F). "
-                  "Do NOT escape them as \\u0001, \\u0002, etc. "
-                  "Output must be clean UTF-8 text only, with plain ASCII quotes and parentheses."
-              )},
-            {"role": "user", "content": prompt},
-        ],
-        text={"format": {"type": "json_object"}, "verbosity": _text_verbosity()},
-        max_output_tokens=max_output_tokens,
-    )
+    assert_llm_circuit_closed("script_json_fallback")
+    try:
+        resp = client.responses.create(
+            model=_default_model(),
+            input=[
+                {"role": "developer",
+                 "content": _script_system_message() + (
+                      " Return content that will be used for TTS. No code fences, no commentary. "
+                      "Do NOT include any control characters (U+0000-U+001F). "
+                      "Do NOT escape them as \\u0001, \\u0002, etc. "
+                      "Output must be clean UTF-8 text only, with plain ASCII quotes and parentheses."
+                  )},
+                {"role": "user", "content": prompt},
+            ],
+            text={"format": {"type": "json_object"}, "verbosity": _text_verbosity()},
+            max_output_tokens=max_output_tokens,
+        )
+    except Exception as exc:
+        if is_llm_quota_or_auth_error(exc) or is_llm_rate_limit_error(exc):
+            open_llm_circuit(str(exc), "script_json_fallback")
+        raise
     raw = (resp.output_text or "").strip()
     try:
         return DraftScript.model_validate_json(raw)
@@ -337,18 +358,24 @@ def _critic_prompt(source_prompt: str, draft: BaseModel | dict[str, Any]) -> str
 
 
 def critique_script(prompt: str, draft: BaseModel | dict[str, Any]) -> NativeViewerCritic:
+    assert_llm_circuit_closed("script_critic")
     client = _get_client()
     model = os.getenv("SCRIPT_CRITIC_MODEL") or _default_model()
-    resp = client.responses.parse(
-        model=model,
-        input=[
-            {"role": "system", "content": "You are a ruthless native English Shorts viewer critic."},
-            {"role": "user", "content": _critic_prompt(prompt, draft)},
-        ],
-        text_format=NativeViewerCritic,
-        max_output_tokens=int(os.getenv("SCRIPT_CRITIC_MAX_OUTPUT_TOKENS", "1400")),
-        text={"verbosity": _text_verbosity(model)},
-    )
+    try:
+        resp = client.responses.parse(
+            model=model,
+            input=[
+                {"role": "system", "content": "You are a ruthless native English Shorts viewer critic."},
+                {"role": "user", "content": _critic_prompt(prompt, draft)},
+            ],
+            text_format=NativeViewerCritic,
+            max_output_tokens=int(os.getenv("SCRIPT_CRITIC_MAX_OUTPUT_TOKENS", "1400")),
+            text={"verbosity": _text_verbosity(model)},
+        )
+    except Exception as exc:
+        if is_llm_quota_or_auth_error(exc) or is_llm_rate_limit_error(exc):
+            open_llm_circuit(str(exc), "script_critic")
+        raise
     parsed: NativeViewerCritic = resp.output_parsed
     if parsed is None:
         raise ValueError("critic output_parsed가 비었습니다.")
@@ -476,12 +503,13 @@ def generate_script(prompt: str) -> DraftScript:
     """
     budgets = _token_budgets()[: _max_structured_attempts()]
     last_err: Optional[Exception] = None
-    client = _get_client()
     telemetry = _new_generation_telemetry()
     _record_last_generation_telemetry(telemetry)
 
     for i, max_tokens in enumerate(budgets, start=1):
         try:
+            assert_llm_circuit_closed("script_generation")
+            client = _get_client()
             # 1차: Structured
             telemetry["structured_attempts"] += 1
             telemetry["estimated_output_token_budget_total"] += max_tokens
@@ -490,9 +518,14 @@ def generate_script(prompt: str) -> DraftScript:
             draft = _run_critic_rewrite_flow(prompt, draft, max_tokens)
             return _attach_generation_telemetry(draft, telemetry)
         except Exception as e1:
-            last_err = e1
+            if isinstance(e1, LlmCircuitOpen):
+                _raise_generate_script_error(str(e1), telemetry, e1)
             telemetry["structured_failures"] += 1
             _record_last_generation_telemetry(telemetry)
+            if is_llm_quota_or_auth_error(e1) or is_llm_rate_limit_error(e1):
+                open_llm_circuit(str(e1), "script_generation")
+                _raise_generate_script_error(f"GPT 호출/검증 최종 실패: {e1}", telemetry, e1)
+            last_err = e1
             print(f"⚠️ Structured 실패 (시도 {i}/{len(budgets)} | tokens={max_tokens}): {e1}")
             token_reason = _token_limit_failure_reason(e1)
             has_next_budget = i < len(budgets)

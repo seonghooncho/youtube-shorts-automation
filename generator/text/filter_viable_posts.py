@@ -8,6 +8,14 @@ from dotenv import load_dotenv, find_dotenv
 import openai
 from pydantic import BaseModel, Field, ValidationError
 from generator.text.script_quality import build_source_profile, source_reject_reason_for_marketability
+from shared.llm.circuit_breaker import (
+    LlmCircuitOpen,
+    assert_llm_circuit_closed,
+    is_llm_quota_or_auth_error,
+    is_llm_rate_limit_error,
+    llm_circuit_summary,
+    open_llm_circuit,
+)
 from shared.utils.config import RAW_POSTS_FILE, VIABLE_POSTS_FILE
 
 
@@ -15,12 +23,14 @@ from shared.utils.config import RAW_POSTS_FILE, VIABLE_POSTS_FILE
 # Env & OpenAI Client
 # -----------------------------
 def _get_client() -> openai.OpenAI:
+    assert_llm_circuit_closed("source_filter_client")
     # 현재 작업 디렉터리 기준으로 .env 탐색/로드
     env_path = find_dotenv(usecwd=True)
     load_dotenv(env_path)
 
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
+        open_llm_circuit("OPENAI_API_KEY is not configured", "source_filter_client")
         raise RuntimeError("OPENAI_API_KEY가 설정되어 있지 않습니다. .env 또는 환경변수를 확인하세요.")
     return openai.OpenAI(api_key=api_key)
 
@@ -141,6 +151,7 @@ def _parse_source_scorecard(raw: str) -> SourceScorecard:
 
 
 def _ask_source_scorecard(client: openai.OpenAI, prompt: str, model: str) -> SourceScorecard | None:
+    assert_llm_circuit_closed("source_filter")
     system_base = (
         "You are a strict YouTube Shorts source evaluator. "
         "Return only valid JSON matching the requested scorecard schema. "
@@ -162,6 +173,7 @@ def _ask_source_scorecard(client: openai.OpenAI, prompt: str, model: str) -> Sou
     quota_error: Exception | None = None
     for attempt, messages in enumerate(messages_templates, start=1):
         try:
+            assert_llm_circuit_closed("source_filter")
             kwargs = {
                 "model": model,
                 "input": messages,
@@ -173,7 +185,8 @@ def _ask_source_scorecard(client: openai.OpenAI, prompt: str, model: str) -> Sou
             return _parse_source_scorecard(resp.output_text or "")
         except Exception as e:
             print(f"⚠️ source scorecard 호출 실패 (시도 {attempt}/{len(messages_templates)}): {e}")
-            if _is_llm_quota_error(str(e)):
+            if _is_llm_quota_error(str(e)) or is_llm_quota_or_auth_error(e) or is_llm_rate_limit_error(e):
+                open_llm_circuit(str(e), "source_filter")
                 quota_error = e
                 break
     if quota_error:
@@ -211,6 +224,7 @@ def _ask_yes_no(client: openai.OpenAI, prompt: str, model: str) -> str:
 
     for attempt, messages in enumerate(messages_templates, start=1):
         try:
+            assert_llm_circuit_closed("source_filter_yes_no")
             kwargs = {
                 "model": model,
                 "input": messages,
@@ -224,6 +238,9 @@ def _ask_yes_no(client: openai.OpenAI, prompt: str, model: str) -> str:
                 return verdict
         except Exception as e:
             print(f"⚠️ YES/NO 호출 실패 (시도 {attempt}/{len(messages_templates)}): {e}")
+            if _is_llm_quota_error(str(e)) or is_llm_quota_or_auth_error(e) or is_llm_rate_limit_error(e):
+                open_llm_circuit(str(e), "source_filter_yes_no")
+                raise
 
     return ""  # 불명
 
@@ -345,6 +362,163 @@ def local_source_priority(post: dict) -> float:
     if any(term in lowered for term in unsafe_terms):
         score -= 4.0
     return round(score, 2)
+
+
+_FEASIBILITY_ACTION_TERMS = (
+    "accused",
+    "blamed",
+    "charged",
+    "demanded",
+    "refused",
+    "parked",
+    "locked",
+    "reported",
+    "spent",
+    "took",
+    "used",
+    "returned",
+    "changed",
+    "moved",
+    "posted",
+    "left",
+    "ignored",
+    "exposed",
+    "recorded",
+    "showed",
+    "blocked",
+    "borrowed",
+    "deleted",
+    "kept",
+    "without asking",
+    "without permission",
+    "put it on my card",
+    "lied",
+)
+
+_FEASIBILITY_OBJECT_TERMS = (
+    "car",
+    "driveway",
+    "card",
+    "bill",
+    "receipt",
+    "group chat",
+    "building chat",
+    "camera",
+    "package",
+    "laundry",
+    "washer",
+    "machine",
+    "storage unit",
+    "apartment",
+    "landlord",
+    "phone",
+    "text",
+    "message",
+    "screenshot",
+    "timestamp",
+    "bank",
+    "vet",
+    "bloodwork",
+    "cat",
+    "van",
+    "dinner",
+    "manager",
+    "office",
+    "deposit",
+    "keys",
+)
+
+_FEASIBILITY_ACTOR_TERMS = (
+    "neighbor",
+    "roommate",
+    "coworker",
+    "manager",
+    "aunt",
+    "brother",
+    "sister",
+    "landlord",
+    "tenant",
+    "friend",
+    "family",
+    "he ",
+    "she ",
+)
+
+_FEASIBILITY_RECEIPT_TERMS = (
+    "receipt",
+    "screenshot",
+    "camera",
+    "door camera",
+    "text",
+    "message",
+    "group chat",
+    "bill",
+    "invoice",
+    "estimate",
+    "timestamp",
+    "appointment",
+    "photo",
+    "app",
+)
+
+
+def local_source_feasibility(post: dict) -> dict:
+    source = build_source_profile(post)
+    title = str(post.get("title") or "")
+    content = str(post.get("content") or "")
+    lowered = f"{title} {content}".lower()
+    has_action = any(term in lowered for term in _FEASIBILITY_ACTION_TERMS)
+    has_object = any(term in lowered for term in _FEASIBILITY_OBJECT_TERMS)
+    has_actor = any(term in lowered for term in _FEASIBILITY_ACTOR_TERMS)
+    has_receipt = any(term in lowered for term in _FEASIBILITY_RECEIPT_TERMS)
+    can_make_title = has_action and (has_object or has_actor)
+    can_make_opening_visual_query = has_object
+    can_make_first_frame_text = has_action and (has_object or has_actor)
+    can_make_caption_hooks = has_action and has_object
+    estimated_min = min(950, max(0, source.word_count * 5))
+    estimated_max = min(1050, max(estimated_min, source.word_count * 8))
+    failure_reasons: list[str] = []
+    if not can_make_title:
+        failure_reasons.append("cannot_make_title")
+    if not can_make_opening_visual_query:
+        failure_reasons.append("cannot_make_opening_visual_query")
+    if not can_make_first_frame_text:
+        failure_reasons.append("cannot_make_first_frame_text")
+    if not can_make_caption_hooks:
+        failure_reasons.append("cannot_make_caption_hooks")
+    if not (has_receipt or (has_action and has_object)):
+        failure_reasons.append("missing_receipt_or_concrete_detail")
+    if estimated_max < 650:
+        failure_reasons.append("estimated_narration_too_short")
+    likely_fit = not failure_reasons
+    return {
+        "can_make_title": can_make_title,
+        "can_make_opening_visual_query": can_make_opening_visual_query,
+        "can_make_first_frame_text": can_make_first_frame_text,
+        "can_make_caption_hooks": can_make_caption_hooks,
+        "has_receipt_or_concrete_detail": has_receipt or (has_action and has_object),
+        "estimated_narration_chars_min": estimated_min,
+        "estimated_narration_chars_max": estimated_max,
+        "likely_script_gate_fit": likely_fit,
+        "failure_reasons": failure_reasons,
+    }
+
+
+def _source_llm_eval_limit() -> int:
+    explicit = os.getenv("SOURCE_LLM_EVAL_LIMIT")
+    if explicit is not None and explicit.strip():
+        return max(0, _int_env("SOURCE_LLM_EVAL_LIMIT", 4))
+    default = _int_env("SOURCE_LLM_EVAL_LIMIT_DEFAULT", 4)
+    max_limit = _int_env("SOURCE_LLM_EVAL_LIMIT_MAX", 6)
+    return max(0, min(default, max_limit))
+
+
+def _target_accepted_scripts() -> int:
+    return max(1, _int_env("TARGET_ACCEPTED_SCRIPTS", 2))
+
+
+def _preflight_only() -> bool:
+    return _truthy_env("GENERATION_PREFLIGHT_ONLY", "0")
 
 
 def _filter_source_max_chars(content: str) -> int:
@@ -496,7 +670,15 @@ def _source_filter_summary_path():
 
 def _is_llm_quota_error(message: str) -> bool:
     lowered = (message or "").lower()
-    return "insufficient_quota" in lowered or "exceeded your current quota" in lowered or "rate_limit_exceeded" in lowered
+    return (
+        "llm_quota_unavailable" in lowered
+        or "llm_circuit_open" in lowered
+        or "insufficient_quota" in lowered
+        or "exceeded your current quota" in lowered
+        or "rate_limit_exceeded" in lowered
+        or is_llm_quota_or_auth_error(message)
+        or is_llm_rate_limit_error(message)
+    )
 
 
 def _local_fallback_enabled() -> bool:
@@ -636,6 +818,10 @@ def filter_viable_posts():
     filter_prompt_total_chars_before = 0
     filter_prompt_total_chars_after = 0
     source_scorecard_skipped_after_quota = 0
+    local_feasibility_rejected = 0
+    local_feasibility_rejection_reasons: dict[str, int] = {}
+    local_feasibility_rejected_examples: list[dict] = []
+    source_filter_stopped_after_target = False
     candidate_posts: List[dict] = []
 
     for post in raw_posts:
@@ -646,12 +832,74 @@ def filter_viable_posts():
             source_precheck_rejected += 1
             print(f"⏭️ 로컬 precheck 실패로 스킵: {post.get('id', 'unknown')} - {local_reject_reason}")
             continue
+        feasibility = local_source_feasibility(post)
+        post["local_feasibility"] = feasibility
+        if not feasibility.get("likely_script_gate_fit"):
+            post["source_quality_status"] = "skipped"
+            post["source_rejection_reason"] = "local_feasibility_failed:" + ",".join(feasibility.get("failure_reasons") or [])
+            local_feasibility_rejected += 1
+            for reason in feasibility.get("failure_reasons") or []:
+                local_feasibility_rejection_reasons[reason] = local_feasibility_rejection_reasons.get(reason, 0) + 1
+            if len(local_feasibility_rejected_examples) < 5:
+                local_feasibility_rejected_examples.append(
+                    {
+                        "id": post.get("id", ""),
+                        "title": str(post.get("title") or "")[:120],
+                        "reasons": list(feasibility.get("failure_reasons") or [])[:5],
+                    }
+                )
+            print(
+                f"⏭️ local feasibility 실패로 LLM scorecard 스킵: "
+                f"{post.get('id', 'unknown')} - {post['source_rejection_reason']}"
+            )
+            continue
         post["local_source_priority"] = local_source_priority(post)
         candidate_posts.append(post)
 
+    if _preflight_only():
+        candidate_posts.sort(key=lambda item: float(item.get("local_source_priority") or 0), reverse=True)
+        likely_viable = [post for post in candidate_posts if (post.get("local_feasibility") or {}).get("likely_script_gate_fit")]
+        expected_source_calls = min(len(likely_viable), _source_llm_eval_limit())
+        expected_script_calls = min(len(likely_viable), _target_accepted_scripts())
+        summary = {
+            "preflight_only": True,
+            "raw_posts": len(raw_posts),
+            "local_precheck_rejected": source_precheck_rejected,
+            "local_feasibility_rejected": local_feasibility_rejected,
+            "local_feasibility_rejection_reasons": dict(sorted(local_feasibility_rejection_reasons.items(), key=lambda item: item[1], reverse=True)[:10]),
+            "local_feasibility_rejected_examples": local_feasibility_rejected_examples,
+            "likely_viable_sources": len(likely_viable),
+            "target_accepted_scripts": _target_accepted_scripts(),
+            "expected_source_scorecard_calls": expected_source_calls,
+            "expected_script_draft_calls": expected_script_calls,
+            "estimated_zero_acceptance_risk": "high" if len(likely_viable) < _target_accepted_scripts() else "medium",
+            "candidate_examples": [
+                {
+                    "id": post.get("id", ""),
+                    "title": str(post.get("title") or "")[:120],
+                    "local_source_priority": float(post.get("local_source_priority") or 0),
+                    "local_feasibility": post.get("local_feasibility") or {},
+                }
+                for post in likely_viable[:5]
+            ],
+            **llm_circuit_summary(),
+        }
+        with open(VIABLE_POSTS_FILE, "w", encoding="utf-8") as f:
+            json.dump([], f, ensure_ascii=False, indent=2)
+        with open(_source_filter_summary_path(), "w", encoding="utf-8") as f:
+            json.dump(summary, f, ensure_ascii=False, indent=2)
+        with open(VIABLE_POSTS_FILE.with_name("source_preflight_summary.json"), "w", encoding="utf-8") as f:
+            json.dump(summary, f, ensure_ascii=False, indent=2)
+        print(
+            "PREFLIGHT SUMMARY "
+            f"raw={len(raw_posts)} likely_viable={len(likely_viable)} "
+            f"expected_scorecard_calls={expected_source_calls} expected_script_draft_calls={expected_script_calls}"
+        )
+        return
+
     if _truthy_env("SOURCE_LOCAL_PRERANK_ENABLED", "1"):
         candidate_posts.sort(key=lambda item: float(item.get("local_source_priority") or 0), reverse=True)
-        eval_limit = max(0, _int_env("SOURCE_LLM_EVAL_LIMIT", 8))
+        eval_limit = _source_llm_eval_limit()
         posts_to_evaluate = candidate_posts[:eval_limit] if eval_limit else []
         skipped_by_prerank = candidate_posts[eval_limit:] if eval_limit else candidate_posts
         for post in skipped_by_prerank:
@@ -718,6 +966,17 @@ def filter_viable_posts():
                 post["source_quality_status"] = "accepted"
                 post["source_rejection_reason"] = ""
                 selected_posts.append(post)
+                if len(selected_posts) >= _target_accepted_scripts():
+                    source_filter_stopped_after_target = True
+                    remaining = posts_to_evaluate[post_index + 1 :]
+                    for remaining_post in remaining:
+                        remaining_post["source_quality_status"] = "skipped"
+                        remaining_post["source_rejection_reason"] = "source_filter_stopped_after_target"
+                    print(
+                        "✅ target accepted sources reached; "
+                        f"stopping source scorecard after {len(selected_posts)} accepted"
+                    )
+                    break
             else:
                 post["source_quality_status"] = "rejected"
                 post["source_rejection_reason"] = scorecard.reason
@@ -729,7 +988,7 @@ def filter_viable_posts():
                     f"risk={scorecard.retention_risk} reason={scorecard.reason}"
                 )
 
-        except RuntimeError as e:
+        except (RuntimeError, LlmCircuitOpen) as e:
             if _is_llm_quota_error(str(e)) and _local_fallback_enabled():
                 llm_unavailable_reason = str(e)
                 scorecard = _local_source_scorecard(post, llm_unavailable_reason)
@@ -760,8 +1019,9 @@ def filter_viable_posts():
                         f"score={source_score} acceptance={acceptance_score} risk={scorecard.retention_risk} reason={scorecard.reason}"
                     )
             else:
-                if _is_llm_quota_error(str(e)):
+                if _is_llm_quota_error(str(e)) or isinstance(e, LlmCircuitOpen):
                     llm_unavailable_reason = str(e)
+                    open_llm_circuit(str(e), "source_filter")
                     post["source_quality_status"] = "skipped"
                     post["source_rejection_reason"] = llm_unavailable_reason
                     remaining = posts_to_evaluate[post_index + 1 :]
@@ -801,8 +1061,13 @@ def filter_viable_posts():
     summary = {
         "raw_posts": len(raw_posts),
         "local_precheck_rejected": source_precheck_rejected,
+        "local_feasibility_rejected": local_feasibility_rejected,
+        "local_feasibility_rejection_reasons": dict(sorted(local_feasibility_rejection_reasons.items(), key=lambda item: item[1], reverse=True)[:10]),
+        "local_feasibility_rejected_examples": local_feasibility_rejected_examples,
         "local_prerank_enabled": _truthy_env("SOURCE_LOCAL_PRERANK_ENABLED", "1"),
-        "source_llm_eval_limit": _int_env("SOURCE_LLM_EVAL_LIMIT", 8),
+        "source_llm_eval_limit": _source_llm_eval_limit(),
+        "target_accepted_scripts": _target_accepted_scripts(),
+        "source_filter_stopped_after_target": source_filter_stopped_after_target,
         "source_scorecard_calls": source_scorecard_calls,
         "source_scorecard_skipped_by_prerank": source_scorecard_skipped_by_prerank,
         "source_scorecard_skipped_after_quota": source_scorecard_skipped_after_quota,
@@ -818,6 +1083,7 @@ def filter_viable_posts():
         "accepted_source_archetypes": _accepted_source_archetypes(selected_posts),
         "accepted_examples": _accepted_examples(selected_posts),
         "accepted": len(selected_posts),
+        **llm_circuit_summary(),
     }
     with open(_source_filter_summary_path(), "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
