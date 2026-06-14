@@ -8,6 +8,7 @@ import random
 from pathlib import Path
 from typing import Any, Dict
 from generator.text.content_gate import ensure_content_gate, normalize_narration_fields
+from generator.text.candidate_scoring import score_candidate
 from generator.text.failure_policy import FailureAction, classify_failure, script_repair_min_chars
 from generator.text.generate_script import (
     DraftScript,
@@ -36,9 +37,11 @@ from generator.text.script_quality import (
     hard_quality_errors,
     quality_issues_to_regenerate_reason,
     script_text,
+    script_duration_metrics,
     source_reject_reason_for_marketability,
     validate_script_quality,
 )
+from generator.text.story_card import build_story_card, story_card_hard_errors
 from generator.text.youtube_metadata import apply_youtube_metadata_style
 from shared.state import ContentRepository
 from shared.llm.circuit_breaker import (
@@ -215,8 +218,20 @@ def _target_accepted_scripts() -> int:
     return max(1, _int_env("TARGET_ACCEPTED_SCRIPTS", 2))
 
 
+def _source_draft_limit() -> int:
+    return max(_target_accepted_scripts(), _int_env("SCRIPT_SOURCE_DRAFT_LIMIT", 10))
+
+
+def _near_miss_rewrite_limit() -> int:
+    return max(0, _int_env("SCRIPT_NEAR_MISS_REWRITE_LIMIT", 2))
+
+
 def _stop_after_accepted_target() -> bool:
-    return _truthy_env("SCRIPT_STOP_AFTER_ACCEPTED_TARGET", "1")
+    return _truthy_env("SCRIPT_STOP_AFTER_ACCEPTED_TARGET", "0")
+
+
+def _calibration_mode() -> bool:
+    return _truthy_env("SCRIPT_CALIBRATION_MODE", "0")
 
 
 def _allow_llm_rewrite_on_narrative_failure() -> bool:
@@ -328,13 +343,14 @@ def validate_and_parse_metadata(result: DraftScript | ReturnScript | dict[str, A
                 raise ValueError(f"❌ source_marketability_reject: {marketability_reject}")
 
         script_length = len(script_text(metadata))
-        if script_length < MIN_SCRIPT_CHARS:
-            raise ValueError(f"❌ script가 너무 짧음 (현재 {script_length}자)")
+        duration_metrics = script_duration_metrics(metadata)
+        metadata["script_char_count"] = script_length
+        metadata["word_count"] = duration_metrics["word_count"]
+        metadata["estimated_seconds"] = duration_metrics["estimated_seconds"]
         if script_length > MAX_SCRIPT_CHARS:
             raise ValueError(f"❌ script가 쇼츠 목표보다 너무 긺 (현재 {script_length}자)")
 
         metadata["visual_keywords"] = _clean_visual_keywords(metadata["visual_keywords"])
-        metadata["script_char_count"] = script_length
 
         if post and post.get("content"):
             quality_issues = validate_script_quality(metadata, post)
@@ -1008,7 +1024,9 @@ def _accept_metadata(
     previous_history: list[Dict[str, Any]],
 ) -> None:
     _gate_metadata(metadata, metadata_list, previous_history)
-    metadata_list.append(metadata)
+    metadata = score_candidate(metadata, {})
+    if metadata.get("candidate_bucket") == "accepted":
+        metadata_list.append(metadata)
 
 
 def _gate_metadata(
@@ -1048,7 +1066,8 @@ def _finalize_candidate(
         else:
             metadata["critic_policy"] = "skipped_strong_candidate"
             metadata["critic_skipped_reason"] = critic_reason
-    if append:
+    metadata = score_candidate(metadata, post)
+    if append and metadata.get("candidate_bucket") == "accepted":
         metadata_list.append(metadata)
     return metadata
 
@@ -1153,10 +1172,8 @@ def _run_after_local_gate_critic(metadata: Dict[str, Any], post: dict) -> Dict[s
         metadata["critic_problems"] = list(critic.problems or [])
         metadata["critic_rewrite_instructions"] = list(critic.rewrite_instructions or [])
         metadata["critic_passed"] = False
-        raise ValueError(
-            "native_viewer_critic_failed: "
-            f"{failure}; problems={critic.problems}; rewrite_instructions={critic.rewrite_instructions}"
-        )
+        metadata["critic_failure_reason"] = failure
+        return metadata
     return apply_critic_to_metadata(metadata, critic)
 
 
@@ -1190,8 +1207,9 @@ def _repair_only_retry(
         retry_metadata = _attach_source_metadata(retry_metadata, post)
         _validate_full_metadata_after_repair(retry_metadata)
         script_length = len(script_text(retry_metadata))
-        if script_length < MIN_SCRIPT_CHARS:
-            raise ValueError(f"❌ script가 너무 짧음 (현재 {script_length}자)")
+        duration_metrics = script_duration_metrics(retry_metadata)
+        retry_metadata["word_count"] = duration_metrics["word_count"]
+        retry_metadata["estimated_seconds"] = duration_metrics["estimated_seconds"]
         if script_length > MAX_SCRIPT_CHARS:
             raise ValueError(f"❌ script가 쇼츠 목표보다 너무 긺 (현재 {script_length}자)")
         retry_metadata["visual_keywords"] = _clean_visual_keywords(retry_metadata["visual_keywords"])
@@ -1376,13 +1394,18 @@ def generate_scripts_from_filtered():
         posts = json.load(f)
 
     metadata_list = []
+    candidate_pool: list[Dict[str, Any]] = []
     failed_items = []
     llm_unavailable_reason = None
     previous_history = _load_previous_accepted_metadata()
+    drafted_count = 0
 
     for idx, post in enumerate(posts):
-        if _stop_after_accepted_target() and len(metadata_list) >= _target_accepted_scripts():
-            print(f"✅ target accepted scripts reached ({len(metadata_list)}/{_target_accepted_scripts()}); stopping script generation")
+        if _stop_after_accepted_target() and _accepted_candidate_count(candidate_pool) >= _target_accepted_scripts():
+            print(f"✅ target accepted scripts reached ({_accepted_candidate_count(candidate_pool)}/{_target_accepted_scripts()}); stopping script generation")
+            break
+        if drafted_count >= _source_draft_limit():
+            print(f"✅ source draft limit reached ({drafted_count}/{_source_draft_limit()}); stopping script generation")
             break
         title = post.get("title", "")
         content = post.get("content", "")
@@ -1411,11 +1434,32 @@ def generate_scripts_from_filtered():
             failed_items.append(_failure_record(idx=idx, origin_id=origin_id, title=title, error=preflight_error, stage="source_preflight"))
             print(f"🚫 원문 품질 미달로 스킵 (post {idx}): {preflight_error}")
             continue
+        story_card = build_story_card(post)
+        post["story_card"] = story_card.model_dump()
+        story_card_errors = story_card_hard_errors(story_card)
+        if story_card_errors:
+            failed_items.append(
+                _failure_record(
+                    idx=idx,
+                    origin_id=origin_id,
+                    title=title,
+                    error="; ".join(story_card_errors),
+                    stage="story_card",
+                    failure_action=FailureAction.SKIP_SOURCE.value,
+                    metadata={"story_card": story_card.model_dump(), "final_gate_errors": story_card_errors},
+                )
+            )
+            print(f"🚫 StoryCard gate failed (post {idx}): {story_card_errors}")
+            continue
         if llm_unavailable_reason and _local_fallback_enabled():
             fallback_metadata = None
             try:
                 fallback_metadata = _build_local_fallback_metadata(post, llm_unavailable_reason)
-                _accept_metadata(fallback_metadata, metadata_list, previous_history)
+                fallback_metadata = _ensure_candidate_scored(
+                    _finalize_candidate(fallback_metadata, candidate_pool, previous_history, post, append=False),
+                    post,
+                )
+                candidate_pool.append(fallback_metadata)
                 print(f"🧩 로컬 fallback 대본 생성 완료 (post {idx}): {origin_id}")
             except Exception as fallback_error:
                 failed_items.append(_failure_record(idx=idx, origin_id=origin_id, title=title, error=str(fallback_error), stage="script_generation", metadata=fallback_metadata))
@@ -1427,6 +1471,7 @@ def generate_scripts_from_filtered():
             metadata = None
             generation_error_telemetry: dict[str, Any] = {}
             try:
+                drafted_count += 1
                 if try_count == 0:
                     result: DraftScript = call_gpt_generate_script(title, content, post=post)
                 else:
@@ -1454,6 +1499,9 @@ def generate_scripts_from_filtered():
                 if origin_id is not None:
                     metadata["id"] = origin_id
                     metadata["uploaded"] = False
+                metadata["source_post_index"] = idx
+                metadata["story_card"] = story_card.model_dump()
+                metadata["story_card_status"] = "accepted"
                 metadata["generation_attempt_count"] = try_count + 1
                 metadata["llm_draft_count"] = try_count + 1
                 metadata["failure_action"] = ""
@@ -1462,7 +1510,11 @@ def generate_scripts_from_filtered():
                     metadata["prior_critic_attempt_count"] = prior_critic_attempt_count
                     metadata["prior_critic_failed_count"] = prior_critic_failed_count
 
-                metadata = _finalize_candidate(metadata, metadata_list, previous_history, post)
+                metadata = _ensure_candidate_scored(
+                    _finalize_candidate(metadata, candidate_pool, previous_history, post, append=False),
+                    post,
+                )
+                candidate_pool.append(metadata)
                 break  # 성공 시 루프 종료
 
             except Exception as e:
@@ -1481,7 +1533,11 @@ def generate_scripts_from_filtered():
                     llm_unavailable_reason = msg
                     try:
                         metadata = _build_local_fallback_metadata(post, msg)
-                        _accept_metadata(metadata, metadata_list, previous_history)
+                        metadata = _ensure_candidate_scored(
+                            _finalize_candidate(metadata, candidate_pool, previous_history, post, append=False),
+                            post,
+                        )
+                        candidate_pool.append(metadata)
                         print(f"🧩 OpenAI quota 오류로 로컬 fallback 대본 생성 완료 (post {idx}): {origin_id}")
                         break
                     except Exception as fallback_error:
@@ -1509,8 +1565,13 @@ def generate_scripts_from_filtered():
                 if failure_action == FailureAction.LLM_REWRITE_ONCE and not _allow_llm_rewrite_on_narrative_failure():
                     failure_action = FailureAction.SKIP_SOURCE
                 if failure_action == FailureAction.REPAIR_ONLY and metadata is not None:
-                    retry_metadata, retry_error = _repair_only_retry(metadata, post, metadata_list, previous_history)
+                    retry_metadata, retry_error = _repair_only_retry(metadata, post, candidate_pool, previous_history, append=False)
                     if retry_metadata is not None:
+                        retry_metadata = _ensure_candidate_scored(retry_metadata, post)
+                        retry_metadata["source_post_index"] = idx
+                        retry_metadata["story_card"] = story_card.model_dump()
+                        retry_metadata["story_card_status"] = "accepted"
+                        candidate_pool.append(retry_metadata)
                         print(f"🛠️ repair-only retry accepted (post {idx}): {origin_id}")
                         break
                     msg = retry_error or msg
@@ -1559,10 +1620,15 @@ def generate_scripts_from_filtered():
                     )
                     print(f"🚫 최종 실패 (post {idx}): {msg}")
 
-    dry_run = _truthy_env("SCRIPT_DRY_RUN_SUMMARY_ONLY")
+    _rewrite_near_miss_candidates(candidate_pool, posts, previous_history)
+    metadata_list = _select_final_candidates(candidate_pool)
+
+    dry_run = _truthy_env("SCRIPT_DRY_RUN_SUMMARY_ONLY") or _calibration_mode()
     if dry_run:
         for item in metadata_list:
             item["dry_run"] = True
+    if _calibration_mode():
+        metadata_list = []
 
     with open(FINAL_METADATA_FILE, "w", encoding="utf-8") as f:
         json.dump(metadata_list, f, ensure_ascii=False, indent=2)
@@ -1572,9 +1638,12 @@ def generate_scripts_from_filtered():
             json.dump(failed_items, f, ensure_ascii=False, indent=2)
         print(f"⚠️ 실패한 포스트 {len(failed_items)}개 → {FAILED_POSTS_FILE}에 저장됨")
 
-    summary = _generation_summary(posts, metadata_list, failed_items)
+    _write_candidate_reports(candidate_pool, failed_items, posts)
+    summary = _generation_summary(posts, metadata_list, failed_items, candidate_pool=candidate_pool)
     if dry_run:
         summary["dry_run"] = True
+    if _calibration_mode():
+        summary["calibration_mode"] = True
     summary_path = FINAL_METADATA_FILE.with_name("generation_summary.json")
     with open(summary_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
@@ -1606,8 +1675,190 @@ def _print_dry_run_summary(summary: dict) -> None:
     )
 
 
-def _generation_summary(posts: list[dict], accepted: list[dict], failed: list[dict]) -> dict:
-    all_items = accepted + failed
+def _select_final_candidates(candidate_pool: list[dict]) -> list[dict]:
+    accepted = [item for item in candidate_pool if item.get("candidate_bucket") == "accepted" and not item.get("hard_blockers")]
+    accepted.sort(key=lambda item: int(item.get("candidate_score") or 0), reverse=True)
+    selected = accepted[: _target_accepted_scripts()]
+    for item in selected:
+        item["selected_for_final"] = True
+    return selected
+
+
+def _accepted_candidate_count(candidate_pool: list[dict]) -> int:
+    return sum(1 for item in candidate_pool if item.get("candidate_bucket") == "accepted" and not item.get("hard_blockers"))
+
+
+def _ensure_candidate_scored(metadata: Dict[str, Any], post: dict) -> Dict[str, Any]:
+    if not metadata.get("candidate_bucket") or "candidate_score" not in metadata:
+        return score_candidate(metadata, post)
+    return metadata
+
+
+def _rewrite_near_miss_candidates(
+    candidate_pool: list[Dict[str, Any]],
+    posts: list[dict],
+    previous_history: list[Dict[str, Any]],
+) -> None:
+    accepted_count = sum(1 for item in candidate_pool if item.get("candidate_bucket") == "accepted")
+    needed = max(0, _target_accepted_scripts() - accepted_count)
+    if needed <= 0 or _near_miss_rewrite_limit() <= 0 or llm_circuit_is_open():
+        return
+    near_misses = [item for item in candidate_pool if item.get("candidate_bucket") == "near_miss"]
+    near_misses.sort(key=lambda item: int(item.get("candidate_score") or 0), reverse=True)
+    post_by_id = {str(post.get("id")): post for post in posts}
+    rewrites = 0
+    for candidate in near_misses:
+        if rewrites >= _near_miss_rewrite_limit() or needed <= 0 or llm_circuit_is_open():
+            break
+        source_id = str(candidate.get("id") or "")
+        post = post_by_id.get(source_id)
+        if not post:
+            continue
+        try:
+            reason = _near_miss_rewrite_reason(candidate)
+            result = call_gpt_generate_script(post.get("title", ""), post.get("content", ""), post=post, regenerate_reason=reason)
+            metadata = validate_and_parse_metadata(result, f"near_miss={source_id}", post)
+            metadata["id"] = source_id
+            metadata["uploaded"] = False
+            metadata["near_miss_rewrite"] = True
+            metadata["near_miss_rewrite_reason"] = reason
+            metadata["llm_draft_count"] = int(candidate.get("llm_draft_count") or 1) + 1
+            metadata["generation_attempt_count"] = metadata["llm_draft_count"]
+            metadata["story_card"] = (post.get("story_card") or {})
+            comparison_pool = [item for item in candidate_pool if str(item.get("id") or "") != source_id]
+            metadata = _ensure_candidate_scored(
+                _finalize_candidate(metadata, comparison_pool, previous_history, post, append=False),
+                post,
+            )
+            candidate_pool.append(metadata)
+            rewrites += 1
+            if metadata.get("candidate_bucket") == "accepted":
+                needed -= 1
+        except Exception as exc:
+            rewrites += 1
+            print(f"🚫 near-miss rewrite failed id={source_id}: {exc}")
+
+
+def _near_miss_rewrite_reason(candidate: dict) -> str:
+    issues = candidate.get("soft_issues") or []
+    if any("hook" in str(issue) for issue in issues):
+        return "Rewrite the opening hook to be more concrete and immediate while keeping the same source facts."
+    if any("receipt" in str(issue) for issue in issues):
+        return "Bring the concrete receipt, proof, bill, text, or camera detail into the first half of the narration."
+    if any("duration" in str(issue) or "words" in str(issue) for issue in issues):
+        return "Tighten pacing but add one concrete source-grounded beat so the Short has enough spoken substance."
+    return "Improve the narration from near-miss to accepted by making the conflict more concrete, specific, and comment-worthy."
+
+
+def _write_candidate_reports(candidate_pool: list[dict], failed: list[dict], posts: list[dict]) -> None:
+    candidate_scores_path = FINAL_METADATA_FILE.with_name("candidate_scores.json")
+    near_miss_path = FINAL_METADATA_FILE.with_name("near_miss_candidates.json")
+    gate_distribution_path = FINAL_METADATA_FILE.with_name("gate_distribution.json")
+    funnel_path = FINAL_METADATA_FILE.with_name("source_to_acceptance_funnel.json")
+    candidates = [_candidate_report_item(item) for item in sorted(candidate_pool, key=lambda item: int(item.get("candidate_score") or 0), reverse=True)]
+    near_misses = [
+        _near_miss_report_item(item)
+        for item in candidate_pool
+        if item.get("candidate_bucket") == "near_miss"
+    ]
+    near_misses.sort(key=lambda item: int(item.get("candidate_score") or 0), reverse=True)
+    _write_json(candidate_scores_path, candidates)
+    _write_json(near_miss_path, near_misses)
+    _write_json(gate_distribution_path, _gate_distribution(candidate_pool, failed))
+    _write_json(funnel_path, _funnel_report(posts, candidate_pool, failed))
+
+
+def _candidate_report_item(item: dict) -> dict:
+    return {
+        "id": item.get("id"),
+        "title": item.get("public_title") or item.get("title"),
+        "candidate_score": item.get("candidate_score", 0),
+        "candidate_bucket": item.get("candidate_bucket", ""),
+        "soft_issues": item.get("soft_issues", []),
+        "hard_blockers": item.get("hard_blockers", []),
+        "script_char_count": item.get("script_char_count", 0),
+        "word_count": item.get("word_count", 0),
+        "estimated_seconds": item.get("estimated_seconds", 0),
+        "selected_for_final": bool(item.get("selected_for_final")),
+    }
+
+
+def _near_miss_report_item(item: dict) -> dict:
+    report = _candidate_report_item(item)
+    report["top_reason_not_accepted"] = _top_near_miss_reason(item)
+    report["recommended_action"] = _recommended_near_miss_action(item)
+    return report
+
+
+def _top_near_miss_reason(item: dict) -> str:
+    if item.get("hard_blockers"):
+        return "hard_blocker"
+    if int(item.get("candidate_score") or 0) < 78:
+        return "score_below_threshold"
+    return "not_in_top_k"
+
+
+def _recommended_near_miss_action(item: dict) -> str:
+    issues = [str(issue) for issue in item.get("soft_issues") or []]
+    if any("hook" in issue for issue in issues):
+        return "rewrite_hook"
+    if any("title" in issue for issue in issues):
+        return "repair_title"
+    if int(item.get("candidate_score") or 0) >= 74:
+        return "use_as_backup"
+    return "discard_source"
+
+
+def _gate_distribution(candidate_pool: list[dict], failed: list[dict]) -> dict:
+    candidate_buckets: dict[str, int] = {}
+    hard_blockers: dict[str, int] = {}
+    soft_issues: dict[str, int] = {}
+    failed_stages: dict[str, int] = {}
+    for item in candidate_pool:
+        bucket = str(item.get("candidate_bucket") or "unknown")
+        candidate_buckets[bucket] = candidate_buckets.get(bucket, 0) + 1
+        for blocker in item.get("hard_blockers") or []:
+            code = str(blocker).split(":", 1)[0]
+            hard_blockers[code] = hard_blockers.get(code, 0) + 1
+        for issue in item.get("soft_issues") or []:
+            code = str(issue).split(":", 1)[0]
+            soft_issues[code] = soft_issues.get(code, 0) + 1
+    for item in failed:
+        stage = str(item.get("stage") or "failed")
+        failed_stages[stage] = failed_stages.get(stage, 0) + 1
+    return {
+        "candidate_buckets": candidate_buckets,
+        "hard_blockers": hard_blockers,
+        "soft_issues": soft_issues,
+        "failed_stages": failed_stages,
+    }
+
+
+def _funnel_report(posts: list[dict], candidate_pool: list[dict], failed: list[dict]) -> dict:
+    story_card_rejected = sum(1 for item in failed if item.get("stage") == "story_card")
+    drafted = len(candidate_pool) + sum(1 for item in failed if item.get("stage") == "script_generation")
+    hard_pass = sum(1 for item in candidate_pool if not item.get("hard_blockers"))
+    return {
+        "raw": len(posts),
+        "local_precheck": len(posts) - sum(1 for item in failed if item.get("stage") == "source_preflight"),
+        "source_scorecard": len(posts),
+        "story_card": len(posts) - story_card_rejected,
+        "draft": drafted,
+        "hard_pass": hard_pass,
+        "scored": len(candidate_pool),
+        "accepted": sum(1 for item in candidate_pool if item.get("candidate_bucket") == "accepted"),
+    }
+
+
+def _write_json(path: Path, data: Any) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def _generation_summary(posts: list[dict], accepted: list[dict], failed: list[dict], *, candidate_pool: list[dict] | None = None) -> dict:
+    candidate_pool = candidate_pool or []
+    all_items = (candidate_pool or accepted) + failed
+    generated_items = candidate_pool or accepted
     generation_telemetry = _sum_generation_telemetry(all_items)
     source_filter_summary = _load_source_filter_summary()
     critic_attempted = sum(
@@ -1629,9 +1880,9 @@ def _generation_summary(posts: list[dict], accepted: list[dict], failed: list[di
         "sources_skipped_preflight": sum(1 for item in failed if item.get("stage") == "source_preflight"),
         "target_accepted_scripts": _target_accepted_scripts(),
         "stopped_after_target": _stop_after_accepted_target() and len(accepted) >= _target_accepted_scripts(),
-        "llm_drafts": sum(int(item.get("llm_draft_count") or item.get("generation_attempt_count") or 0) for item in accepted)
+        "llm_drafts": sum(int(item.get("llm_draft_count") or item.get("generation_attempt_count") or 0) for item in generated_items)
         + sum(int(item.get("generation_attempt_count") or 0) for item in failed),
-        "llm_rewrites": sum(max(0, int(item.get("generation_attempt_count") or 0) - 1) for item in accepted)
+        "llm_rewrites": sum(max(0, int(item.get("generation_attempt_count") or 0) - 1) for item in generated_items)
         + sum(max(0, int(item.get("generation_attempt_count") or 0) - 1) for item in failed),
         "critic_calls": critic_attempted,
         "critic_calls_attempted": critic_attempted,
@@ -1639,7 +1890,7 @@ def _generation_summary(posts: list[dict], accepted: list[dict], failed: list[di
         "critic_failed": sum(1 for item in all_items if item.get("critic_passed") is False)
         + sum(int(item.get("prior_critic_failed_count") or 0) for item in all_items),
         "critic_skipped": sum(1 for item in all_items if item.get("critic_policy") == "skipped_strong_candidate"),
-        "repair_successes": sum(1 for item in accepted if item.get("repair_actions")),
+        "repair_successes": sum(1 for item in generated_items if item.get("repair_actions")),
         "repair_only_retries": sum(1 for item in all_items if item.get("repair_only_retry_attempted")),
         "repair_only_retry_successes": sum(1 for item in all_items if item.get("repair_only_retry_passed")),
         "structured_attempts": generation_telemetry["structured_attempts"],
@@ -1665,6 +1916,10 @@ def _generation_summary(posts: list[dict], accepted: list[dict], failed: list[di
         ),
         "final_accepted": len(accepted),
         "final_rejected": len(failed),
+        "candidate_pool_count": len(candidate_pool),
+        "near_miss_count": sum(1 for item in candidate_pool if item.get("candidate_bucket") == "near_miss"),
+        "best_near_miss_score": max([int(item.get("candidate_score") or 0) for item in candidate_pool if item.get("candidate_bucket") == "near_miss"] or [0]),
+        "best_near_miss_reasons": _best_near_miss_reasons(candidate_pool),
         "top_failure_codes": failure_codes[:10],
         "failure_category_counts": _failure_category_counts(failed),
         "top_gate_errors": _top_gate_errors(failed),
@@ -1673,6 +1928,14 @@ def _generation_summary(posts: list[dict], accepted: list[dict], failed: list[di
     summary["cost_waste_warning"] = bool(summary["final_accepted"] == 0 and summary["llm_call_estimate_total"] > 0)
     summary["operator_recommendation"] = _operator_recommendation(summary)
     return summary
+
+
+def _best_near_miss_reasons(candidate_pool: list[dict]) -> list[str]:
+    near_misses = [item for item in candidate_pool if item.get("candidate_bucket") == "near_miss"]
+    near_misses.sort(key=lambda item: int(item.get("candidate_score") or 0), reverse=True)
+    if not near_misses:
+        return []
+    return list(near_misses[0].get("soft_issues") or [])[:5]
 
 
 def _operator_recommendation(summary: dict) -> str:
@@ -1847,7 +2110,17 @@ def regenerate_post_by_id(post_id, regenerate_reason=None, max_retries=2):
             metadata["failure_action"] = ""
             metadata["final_failure_codes"] = []
 
-            return _finalize_candidate(metadata, scratch_metadata, previous_history, target_post, append=False)
+            finalized = _ensure_candidate_scored(
+                _finalize_candidate(metadata, scratch_metadata, previous_history, target_post, append=False),
+                target_post,
+            )
+            if finalized.get("candidate_bucket") != "accepted":
+                print(
+                    f"🚫 재생성 결과가 최종 후보 기준 미달 (postId={post_id}): "
+                    f"bucket={finalized.get('candidate_bucket')} score={finalized.get('candidate_score')}"
+                )
+                return None
+            return finalized
 
         except Exception as e:
             print(f"⚠️ 오류 (postId={post_id}, 시도 {try_count+1}): {e}")
@@ -1863,7 +2136,11 @@ def regenerate_post_by_id(post_id, regenerate_reason=None, max_retries=2):
                 try:
                     metadata = _build_local_fallback_metadata(target_post, msg)
                     print(f"🧩 OpenAI quota 오류로 로컬 fallback 재생성 완료 (postId={post_id})")
-                    return metadata
+                    finalized = _ensure_candidate_scored(
+                        _finalize_candidate(metadata, scratch_metadata, previous_history, target_post, append=False),
+                        target_post,
+                    )
+                    return finalized if finalized.get("candidate_bucket") == "accepted" else None
                 except Exception as fallback_error:
                     print(f"🚫 로컬 fallback 재생성 실패 (postId={post_id}): {fallback_error}")
                     return None
@@ -1877,7 +2154,14 @@ def regenerate_post_by_id(post_id, regenerate_reason=None, max_retries=2):
                 retry_metadata, retry_error = _repair_only_retry(metadata, target_post, scratch_metadata, previous_history, append=False)
                 if retry_metadata is not None:
                     print(f"🛠️ repair-only retry 재생성 성공 (postId={post_id})")
-                    return retry_metadata
+                    retry_metadata = _ensure_candidate_scored(retry_metadata, target_post)
+                    if retry_metadata.get("candidate_bucket") == "accepted":
+                        return retry_metadata
+                    print(
+                        f"🚫 repair-only retry 결과가 최종 후보 기준 미달 (postId={post_id}): "
+                        f"bucket={retry_metadata.get('candidate_bucket')} score={retry_metadata.get('candidate_score')}"
+                    )
+                    return None
                 print(f"🚫 repair-only retry 재생성 실패 (postId={post_id}): {retry_error}")
                 return None
             if failure_action == FailureAction.SKIP_SOURCE:

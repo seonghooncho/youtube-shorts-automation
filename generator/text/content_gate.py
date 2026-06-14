@@ -7,6 +7,7 @@ from typing import Any
 from generator.text.script_quality import (
     hard_quality_errors,
     quality_issues_to_regenerate_reason,
+    script_duration_metrics,
     validate_script_quality,
 )
 from generator.text.youtube_metadata import title_quality_reason
@@ -244,6 +245,7 @@ _DRY_RUN_BLOCKED_STAGES = {"tts", "render", "finalize", "publish_ready", "upload
 
 def evaluate_content_gate(item: dict[str, Any], *, stage: str = "") -> dict[str, Any]:
     hard_errors: list[str] = []
+    soft_issues: list[str] = []
     warnings: list[str] = []
 
     normalized_stage = str(stage or "").strip().lower()
@@ -270,6 +272,13 @@ def evaluate_content_gate(item: dict[str, Any], *, stage: str = "") -> dict[str,
         hard_errors.append("missing_source_context")
     if not script:
         hard_errors.append("missing_script")
+    else:
+        duration_errors, duration_soft = _duration_gate_issues(item)
+        hard_errors.extend(duration_errors)
+        soft_issues.extend(duration_soft)
+        metrics = script_duration_metrics(item)
+        item["word_count"] = metrics["word_count"]
+        item["estimated_seconds"] = metrics["estimated_seconds"]
     if _starts_with_aita(public_title or title):
         hard_errors.append("aita_title")
     if "#viral" in title.lower() or "#viral" in public_title.lower():
@@ -279,19 +288,19 @@ def evaluate_content_gate(item: dict[str, Any], *, stage: str = "") -> dict[str,
     else:
         title_reason = title_quality_reason(public_title)
         if title_reason:
-            hard_errors.append(f"title_quality:{title_reason}")
+            soft_issues.append(f"title_quality:{title_reason}")
     if not str(item.get("style_variant") or "").strip():
-        hard_errors.append("missing_style_variant")
+        soft_issues.append("missing_style_variant")
     if not str(item.get("script_fingerprint") or "").strip():
-        hard_errors.append("missing_script_fingerprint")
-    hard_errors.extend(_opening_visual_errors(item))
+        soft_issues.append("missing_script_fingerprint")
+    soft_issues.extend(_opening_visual_errors(item))
 
-    hard_errors.extend(_caption_errors(item))
+    soft_issues.extend(_caption_errors(item))
     captions_align, caption_alignment_reason = caption_chunks_align_with_tts_text(item)
     if not captions_align:
         hard_errors.append(f"caption_chunks_not_in_tts_text:{caption_alignment_reason}")
-    hard_errors.extend(_critic_score_errors(item.get("critic_scores") or {}))
-    hard_errors.extend(_predicted_score_errors(item))
+    soft_issues.extend(_critic_score_errors(item.get("critic_scores") or {}))
+    soft_issues.extend(_predicted_score_errors(item))
 
     source_text = _source_text(item)
     if source_text:
@@ -309,14 +318,15 @@ def evaluate_content_gate(item: dict[str, Any], *, stage: str = "") -> dict[str,
         hard = hard_quality_errors(issues)
         if hard:
             hard_errors.append("script_quality:" + quality_issues_to_regenerate_reason(hard))
-        warnings.extend(f"{issue.code}:{issue.message}" for issue in issues if not issue.hard)
+        soft_issues.extend(f"script_quality:{issue.code}" for issue in issues if issue not in hard)
+        warnings.extend(f"{issue.code}:{issue.message}" for issue in issues if issue not in hard)
     else:
         warnings.append("missing_source_content_context")
 
     if _source_contains_receipt(source_text) and not _script_contains_receipt(item):
-        hard_errors.append("missing_concrete_receipt_detail")
+        soft_issues.append("missing_concrete_receipt_detail")
 
-    return {"ok": not hard_errors, "hard_errors": hard_errors, "warnings": warnings}
+    return {"ok": not hard_errors, "hard_errors": hard_errors, "soft_issues": _dedupe(soft_issues), "warnings": warnings}
 
 
 def ensure_content_gate(item: dict[str, Any], *, stage: str = "") -> None:
@@ -342,6 +352,7 @@ def filter_content_gate_items(items: list[dict[str, Any]], *, stage: str = "") -
                 "title": item.get("title") or item.get("public_title"),
                 "stage": stage,
                 "hard_errors": result["hard_errors"],
+                "soft_issues": result.get("soft_issues", []),
                 "warnings": result["warnings"],
             }
         )
@@ -615,6 +626,37 @@ def _predicted_score_errors(item: dict[str, Any]) -> list[str]:
     return errors
 
 
+def _duration_gate_issues(item: dict[str, Any]) -> tuple[list[str], list[str]]:
+    metrics = script_duration_metrics(item)
+    word_count = int(metrics["word_count"])
+    seconds = float(metrics["estimated_seconds"])
+    chars = int(metrics["char_count"])
+    hard: list[str] = []
+    soft: list[str] = []
+    if word_count < _int_env("SCRIPT_MIN_WORDS_HARD", 75):
+        hard.append(f"script_too_short_words:{word_count}")
+    if seconds < _float_env("SCRIPT_MIN_ESTIMATED_SECONDS", 28.0):
+        hard.append(f"script_too_short_duration:{seconds:.1f}")
+    if seconds > _float_env("SCRIPT_MAX_ESTIMATED_SECONDS", 75.0):
+        hard.append(f"script_too_long_duration:{seconds:.1f}")
+    target_words_min = _int_env("SCRIPT_TARGET_WORDS_MIN", 100)
+    target_words_max = _int_env("SCRIPT_TARGET_WORDS_MAX", 170)
+    target_seconds_min = _float_env("SCRIPT_TARGET_ESTIMATED_SECONDS_MIN", 35.0)
+    target_seconds_max = _float_env("SCRIPT_TARGET_ESTIMATED_SECONDS_MAX", 65.0)
+    if not hard:
+        if word_count < target_words_min:
+            soft.append(f"below_target_words:{word_count}")
+        elif word_count > target_words_max:
+            soft.append(f"above_target_words:{word_count}")
+        if seconds < target_seconds_min:
+            soft.append(f"below_target_duration:{seconds:.1f}")
+        elif seconds > target_seconds_max:
+            soft.append(f"above_target_duration:{seconds:.1f}")
+        if 580 <= chars < 650:
+            soft.append(f"below_legacy_char_target:{chars}")
+    return hard, soft
+
+
 def _source_text(item: dict[str, Any]) -> str:
     raw = _raw_source_text(item)
     if raw:
@@ -646,6 +688,28 @@ def _num(value: Any) -> float:
         return float(value)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _int_env(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
+def _float_env(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
+def _dedupe(items: list[str]) -> list[str]:
+    deduped: list[str] = []
+    for item in items:
+        if item and item not in deduped:
+            deduped.append(item)
+    return deduped
 
 
 def _allow_synthetic_source() -> bool:

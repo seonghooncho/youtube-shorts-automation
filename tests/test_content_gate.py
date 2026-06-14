@@ -118,10 +118,10 @@ def test_content_gate_rejects_low_critic_and_predicted_scores():
 
     result = evaluate_content_gate(item)
 
-    assert result["ok"] is False
-    assert "critic_ai_smell_score" in result["hard_errors"]
-    assert "predicted_retention_score" in result["hard_errors"]
-    assert "predicted_comment_score" in result["hard_errors"]
+    assert result["ok"] is True
+    assert "critic_ai_smell_score" in result["soft_issues"]
+    assert "predicted_retention_score" in result["soft_issues"]
+    assert "predicted_comment_score" in result["soft_issues"]
 
 
 def test_content_gate_rejects_bad_public_title_markers():
@@ -222,9 +222,11 @@ def test_caption_retention_policy_rejects_generic_and_long_chunks():
         )
     )
 
-    assert any(error.startswith("first_caption_hook") for error in result["hard_errors"])
-    assert any(error.startswith("caption_chunk_too_long") for error in result["hard_errors"])
-    assert any(error.startswith("generic_caption_chunk") for error in result["hard_errors"])
+    assert result["ok"] is False
+    assert any(error.startswith("caption_chunks_not_in_tts_text") for error in result["hard_errors"])
+    assert any(error.startswith("first_caption_hook") for error in result["soft_issues"])
+    assert any(error.startswith("caption_chunk_too_long") for error in result["soft_issues"])
+    assert any(error.startswith("generic_caption_chunk") for error in result["soft_issues"])
 
 
 def test_caption_chunks_must_align_with_tts_text():
@@ -273,6 +275,9 @@ def test_opening_visual_and_first_frame_are_required():
         "The receipt showed every extra entree under my name.",
         "She told the group chat I was being cheap for asking her to fix it.",
         "I posted the receipt and asked her to pay me back before dessert.",
+        "Then she said I was ruining the table because I would not cover food I never ordered.",
+        "My cousin pointed out the card charge matched her extra drinks and desserts.",
+        "I only disputed the added meals and stopped letting relatives use my card.",
         "Was I wrong to dispute the dinner bill?",
     ]
     strong_frame = evaluate_content_gate(
@@ -288,8 +293,10 @@ def test_opening_visual_and_first_frame_are_required():
         )
     )
 
-    assert "generic_opening_visual_query" in generic_query["hard_errors"]
-    assert "first_frame_text_too_long" in long_frame["hard_errors"]
+    assert generic_query["ok"] is True
+    assert "generic_opening_visual_query" in generic_query["soft_issues"]
+    assert long_frame["ok"] is True
+    assert "first_frame_text_too_long" in long_frame["soft_issues"]
     assert strong_frame["ok"] is True
 
 
@@ -298,7 +305,9 @@ def test_opening_visual_query_must_match_hook():
     mismatched = _safe_item(opening_visual_query="phone texting")
 
     assert opening_visual_query_relevance_reason(relevant) == ""
-    assert "opening_visual_query_mismatch" in evaluate_content_gate(mismatched)["hard_errors"]
+    result = evaluate_content_gate(mismatched)
+    assert result["ok"] is True
+    assert "opening_visual_query_mismatch" in result["soft_issues"]
 
 
 def test_opening_visual_query_cannot_self_validate_against_wrong_repaired_title():

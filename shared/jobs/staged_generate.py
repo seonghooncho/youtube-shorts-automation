@@ -123,6 +123,15 @@ def script_stage() -> None:
     if generation_summary.exists():
         store.upload_file(generation_summary, "scripts/generation_summary.json")
         _notify_llm_circuit_if_open(generation_summary, "script")
+    for report_name in (
+        "candidate_scores.json",
+        "near_miss_candidates.json",
+        "gate_distribution.json",
+        "source_to_acceptance_funnel.json",
+    ):
+        report_path = FINAL_METADATA_FILE.with_name(report_name)
+        if report_path.exists():
+            store.upload_file(report_path, f"scripts/{report_name}")
     content_repo.upsert_items(metadata, "SCRIPTED")
 
 

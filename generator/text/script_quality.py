@@ -478,6 +478,36 @@ def script_text(metadata: Dict[str, Any]) -> str:
     return " ".join(str(line or "").strip() for line in lines).strip()
 
 
+def count_script_words(text: str) -> int:
+    return len(_WORD_RE.findall(str(text or "")))
+
+
+def estimated_spoken_seconds(text: str, words_per_second: float | None = None) -> float:
+    if words_per_second is None:
+        words_per_second = _float_env("SCRIPT_ESTIMATED_WORDS_PER_SECOND", 2.6)
+    words_per_second = max(1.0, float(words_per_second or 2.6))
+    return round(count_script_words(text) / words_per_second, 2)
+
+
+def script_duration_metrics(metadata: Dict[str, Any]) -> dict[str, Any]:
+    text = str(metadata.get("tts_text") or script_text(metadata) or "")
+    word_count = count_script_words(text)
+    estimated_seconds = estimated_spoken_seconds(text)
+    return {
+        "word_count": word_count,
+        "estimated_seconds": estimated_seconds,
+        "char_count": len(text),
+    }
+
+
+def _script_min_words_hard() -> int:
+    return _int_env("SCRIPT_MIN_WORDS_HARD", 75)
+
+
+def _script_min_estimated_seconds() -> float:
+    return _float_env("SCRIPT_MIN_ESTIMATED_SECONDS", 28.0)
+
+
 def validate_script_quality(metadata: Dict[str, Any], post: Dict[str, Any]) -> List[ScriptQualityIssue]:
     issues: List[ScriptQualityIssue] = []
     source = build_source_profile(post)
@@ -485,6 +515,9 @@ def validate_script_quality(metadata: Dict[str, Any], post: Dict[str, Any]) -> L
     text = script_text(metadata)
     lower_text = text.lower()
     char_count = len(text)
+    duration = script_duration_metrics(metadata)
+    word_count = int(duration["word_count"])
+    estimated_seconds = float(duration["estimated_seconds"])
     source_reject_reason = source_reject_reason_for_marketability(post)
     if source_reject_reason:
         issues.append(ScriptQualityIssue("source_marketability_reject", source_reject_reason))
@@ -504,8 +537,21 @@ def validate_script_quality(metadata: Dict[str, Any], post: Dict[str, Any]) -> L
             )
         )
 
-    if char_count < MIN_SCRIPT_CHARS:
-        issues.append(ScriptQualityIssue("script_too_short", f"script is too short ({char_count} chars)"))
+    if word_count < _script_min_words_hard() or estimated_seconds < _script_min_estimated_seconds():
+        issues.append(
+            ScriptQualityIssue(
+                "script_too_short",
+                f"script is too short ({word_count} words, {estimated_seconds:.1f}s estimate, {char_count} chars)",
+            )
+        )
+    elif char_count < MIN_SCRIPT_CHARS:
+        issues.append(
+            ScriptQualityIssue(
+                "below_legacy_char_target",
+                f"script is below the old {MIN_SCRIPT_CHARS} char target but has acceptable spoken duration ({word_count} words, {estimated_seconds:.1f}s)",
+                hard=False,
+            )
+        )
     if char_count > MAX_SCRIPT_CHARS:
         issues.append(ScriptQualityIssue("script_too_long", f"script is too long ({char_count} chars)"))
     if len(lines) < 7:
@@ -727,7 +773,23 @@ def validate_script_quality(metadata: Dict[str, Any], post: Dict[str, Any]) -> L
 
 
 def hard_quality_errors(issues: Iterable[ScriptQualityIssue]) -> List[ScriptQualityIssue]:
-    return [issue for issue in issues if issue.hard]
+    hard_codes = {
+        "ai_template_phrase",
+        "meta_language",
+        "low_source_overlap",
+        "missing_engagement_question",
+        "question_not_separate",
+        "script_too_long",
+        "script_too_short",
+        "source_marketability_reject",
+        "source_too_thin",
+        "source_truncated",
+        "template_storytelling",
+        "unsafe_visual_keywords",
+        "unsupported_high_stakes_fact",
+        "weak_adaptation_strategy",
+    }
+    return [issue for issue in issues if issue.hard and issue.code in hard_codes]
 
 
 def source_reject_reason_for_marketability(post: Dict[str, Any]) -> str:
@@ -848,6 +910,13 @@ def _safe_int(value, default: int) -> int:
 def _int_env(name: str, default: int) -> int:
     try:
         return int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
+def _float_env(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
     except ValueError:
         return default
 
