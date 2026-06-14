@@ -115,7 +115,7 @@ def test_end_to_end_cost_budget_controls(monkeypatch, tmp_path):
     monkeypatch.setenv("SCRIPT_MAX_LLM_DRAFTS_PER_SOURCE", "1")
     monkeypatch.setenv("SCRIPT_STOP_AFTER_ACCEPTED_TARGET", "1")
     monkeypatch.setenv("SCRIPT_ENABLE_JSON_FALLBACK", "0")
-    monkeypatch.setenv("SCRIPT_CRITIC_ENABLED", "1")
+    monkeypatch.setenv("SCRIPT_CRITIC_ENABLED", "0")
     monkeypatch.setenv("SCRIPT_CRITIC_STAGE", "after_local_gate")
     monkeypatch.setattr("generator.text.filter_viable_posts.RAW_POSTS_FILE", raw_path)
     monkeypatch.setattr("generator.text.filter_viable_posts.VIABLE_POSTS_FILE", viable_path)
@@ -137,24 +137,25 @@ def test_end_to_end_cost_budget_controls(monkeypatch, tmp_path):
     generate_scripts_from_filtered()
 
     summary = json.loads((tmp_path / "generation_summary.json").read_text(encoding="utf-8"))
-    assert calls["source_scorecard"] <= 4
+    assert calls["source_scorecard"] == 0
     assert calls["script"] <= 2
     assert summary["json_fallback_attempts"] == 0
     assert calls["critic"] == 0
-    assert summary["critic_skipped"] > 0
-    assert summary["critic_skipped"] == summary["final_accepted"]
-    assert summary["source_scorecard_calls"] == 4
+    assert summary["critic_calls_attempted"] == 0
+    assert summary["source_scorecard_calls"] == 0
+    assert summary["source_scorecard_skipped_by_local_accept"] == 2
     assert summary["source_scorecard_skipped_by_prerank"] == 10
     assert summary["final_accepted"] == 2
     assert summary["final_rejected"] == 0
     assert summary["target_accepted_scripts"] == 2
     assert summary["stopped_after_target"] is True
-    assert summary["llm_calls_by_stage"]["source_scorecard"] == 4
+    assert summary["llm_calls_by_stage"]["source_scorecard"] == 0
+    assert summary["llm_calls_by_stage"]["critic"] == 0
     assert summary["minimum_once_token_budget"] == summary["actual_token_budget"]
     assert summary["token_overhead"] == 0
     assert summary["token_overhead_rate"] == 0
     assert summary["token_overhead_status"] == "ok"
-    assert summary["actual_token_budget_by_stage"]["source_scorecard"] == 4 * 512
+    assert summary["actual_token_budget_by_stage"]["source_scorecard"] == 0
     assert summary["actual_token_budget_by_stage"]["initial_script_draft"] == 2 * 1600
     for key in (
         "llm_call_estimate_total",

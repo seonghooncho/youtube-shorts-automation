@@ -1901,6 +1901,10 @@ def _generation_summary(posts: list[dict], accepted: list[dict], failed: list[di
     )
     source_scorecard_calls = int(source_filter_summary.get("source_scorecard_calls") or 0)
     source_scorecard_skipped = int(source_filter_summary.get("source_scorecard_skipped_by_prerank") or 0)
+    source_scorecard_skipped_by_local_accept = int(
+        source_filter_summary.get("source_scorecard_skipped_by_local_accept") or 0
+    )
+    local_high_confidence_accepted = int(source_filter_summary.get("local_high_confidence_accepted") or 0)
     critic_budget = _int_env("SCRIPT_CRITIC_MAX_OUTPUT_TOKENS", 1400)
     failure_codes = _failure_code_counts([str(item.get("error") or "") for item in failed])
     llm_calls_by_stage = {
@@ -1940,6 +1944,8 @@ def _generation_summary(posts: list[dict], accepted: list[dict], failed: list[di
         "json_fallback_failures": generation_telemetry["json_fallback_failures"],
         "source_scorecard_calls": source_scorecard_calls,
         "source_scorecard_skipped_by_prerank": source_scorecard_skipped,
+        "source_scorecard_skipped_by_local_accept": source_scorecard_skipped_by_local_accept,
+        "local_high_confidence_accepted": local_high_confidence_accepted,
         "source_scorecard_skipped_after_quota": int(source_filter_summary.get("source_scorecard_skipped_after_quota") or 0),
         "local_feasibility_rejected": int(source_filter_summary.get("local_feasibility_rejected") or 0),
         "source_filter_stopped_after_target": bool(source_filter_summary.get("source_filter_stopped_after_target")),
