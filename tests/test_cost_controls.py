@@ -2,6 +2,7 @@ import json
 
 from generator.text.generate_script import DraftScript
 from generator.text.filter_viable_posts import SourceScorecard, filter_viable_posts
+from generator.text import generate_scripts_from_filtered as generation_module
 from generator.text.generate_scripts_from_filtered import generate_scripts_from_filtered
 
 
@@ -149,9 +150,19 @@ def test_end_to_end_cost_budget_controls(monkeypatch, tmp_path):
     assert summary["target_accepted_scripts"] == 2
     assert summary["stopped_after_target"] is True
     assert summary["llm_calls_by_stage"]["source_scorecard"] == 4
+    assert summary["minimum_once_token_budget"] == summary["actual_token_budget"]
+    assert summary["token_overhead"] == 0
+    assert summary["token_overhead_rate"] == 0
+    assert summary["token_overhead_status"] == "ok"
+    assert summary["actual_token_budget_by_stage"]["source_scorecard"] == 4 * 512
+    assert summary["actual_token_budget_by_stage"]["initial_script_draft"] == 2 * 1600
     for key in (
         "llm_call_estimate_total",
         "estimated_output_token_budget_total",
+        "minimum_once_token_budget",
+        "actual_token_budget",
+        "token_overhead_rate",
+        "token_overhead_by_stage",
         "source_scorecard_calls",
         "source_scorecard_skipped_by_prerank",
         "critic_skipped",
@@ -160,3 +171,83 @@ def test_end_to_end_cost_budget_controls(monkeypatch, tmp_path):
     ):
         assert key in summary
     assert summary["operator_recommendation"].startswith("OK")
+
+
+def _token_item(**overrides) -> dict:
+    item = {
+        "id": "token-item",
+        "candidate_bucket": "accepted",
+        "generation_attempt_count": 1,
+        "llm_draft_count": 1,
+        "generation_telemetry": {
+            "structured_attempts": 1,
+            "json_fallback_attempts": 0,
+            "structured_failures": 0,
+            "json_fallback_failures": 0,
+            "estimated_output_token_budget_total": 1600,
+        },
+    }
+    item.update(overrides)
+    return item
+
+
+def test_token_overhead_counts_near_miss_rewrite(monkeypatch):
+    monkeypatch.setattr(generation_module, "_load_source_filter_summary", lambda: {})
+    initial = _token_item(id="source-1", candidate_bucket="near_miss")
+    rewrite = _token_item(id="source-1", near_miss_rewrite=True, llm_draft_count=2, generation_attempt_count=2)
+
+    summary = generation_module._generation_summary([{"id": "source-1"}], [rewrite], [], candidate_pool=[initial, rewrite])
+
+    assert summary["minimum_once_token_budget"] == 1600
+    assert summary["actual_token_budget"] == 3200
+    assert summary["token_overhead"] == 1600
+    assert summary["token_overhead_rate"] == 1
+    assert summary["token_overhead_status"] == "failed"
+    assert summary["token_overhead_by_stage"]["near_miss_rewrite"] == 1600
+    assert summary["operator_recommendation"].startswith("CHECK_TOKEN_OVERHEAD")
+
+
+def test_token_overhead_counts_json_fallback(monkeypatch):
+    monkeypatch.setattr(generation_module, "_load_source_filter_summary", lambda: {})
+    item = _token_item(
+        generation_telemetry={
+            "structured_attempts": 1,
+            "json_fallback_attempts": 1,
+            "structured_failures": 1,
+            "json_fallback_failures": 0,
+            "estimated_output_token_budget_total": 3200,
+        }
+    )
+
+    summary = generation_module._generation_summary([{"id": "source-1"}], [item], [], candidate_pool=[item])
+
+    assert summary["minimum_once_token_budget"] == 1600
+    assert summary["actual_token_budget"] == 3200
+    assert summary["token_overhead_by_stage"]["json_fallback"] == 1600
+    assert summary["token_overhead_status"] == "failed"
+
+
+def test_token_overhead_counts_same_source_retry_when_telemetry_only_has_last_call(monkeypatch):
+    monkeypatch.setattr(generation_module, "_load_source_filter_summary", lambda: {})
+    item = _token_item(generation_attempt_count=3, llm_draft_count=3)
+
+    summary = generation_module._generation_summary([{"id": "source-1"}], [item], [], candidate_pool=[item])
+
+    assert summary["minimum_once_token_budget"] == 1600
+    assert summary["actual_token_budget"] == 4800
+    assert summary["token_overhead_by_stage"]["same_source_retry"] == 3200
+    assert summary["token_overhead_rate"] == 2
+    assert summary["token_overhead_status"] == "failed"
+
+
+def test_token_overhead_counts_tts_regenerate_marker(monkeypatch):
+    monkeypatch.setattr(generation_module, "_load_source_filter_summary", lambda: {})
+    initial = _token_item(id="source-1")
+    tts_regenerate = _token_item(id="source-1", tts_regenerate=True)
+
+    summary = generation_module._generation_summary([{"id": "source-1"}], [initial], [], candidate_pool=[initial, tts_regenerate])
+
+    assert summary["minimum_once_token_budget"] == 1600
+    assert summary["actual_token_budget"] == 3200
+    assert summary["token_overhead_by_stage"]["tts_regenerate"] == 1600
+    assert summary["token_overhead_status"] == "failed"
