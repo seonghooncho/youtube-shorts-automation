@@ -223,7 +223,7 @@ def _source_draft_limit() -> int:
 
 
 def _near_miss_rewrite_limit() -> int:
-    return max(0, _int_env("SCRIPT_NEAR_MISS_REWRITE_LIMIT", 2))
+    return max(0, _int_env("SCRIPT_NEAR_MISS_REWRITE_LIMIT", 1))
 
 
 def _stop_after_accepted_target() -> bool:
@@ -1710,6 +1710,13 @@ def _rewrite_near_miss_candidates(
     for candidate in near_misses:
         if rewrites >= _near_miss_rewrite_limit() or needed <= 0 or llm_circuit_is_open():
             break
+        if not _can_spend_retry_tokens(candidate_pool, estimated_tokens=_first_script_token_budget()):
+            candidate["near_miss_rewrite_skipped_reason"] = "token_overhead_budget_exhausted"
+            print(
+                "🚫 near-miss rewrite skipped by token budget "
+                f"id={candidate.get('id')} score={candidate.get('candidate_score')}"
+            )
+            break
         source_id = str(candidate.get("id") or "")
         post = post_by_id.get(source_id)
         if not post:
@@ -1737,6 +1744,24 @@ def _rewrite_near_miss_candidates(
         except Exception as exc:
             rewrites += 1
             print(f"🚫 near-miss rewrite failed id={source_id}: {exc}")
+
+
+def _can_spend_retry_tokens(candidate_pool: list[Dict[str, Any]], *, estimated_tokens: int) -> bool:
+    if estimated_tokens <= 0:
+        return True
+    budget = _token_budget_summary(
+        candidate_pool,
+        candidate_pool,
+        source_scorecard_calls=int(_load_source_filter_summary().get("source_scorecard_calls") or 0),
+        critic_attempted=sum(
+            int(item.get("critic_attempt_count") or 0) + int(item.get("prior_critic_attempt_count") or 0)
+            for item in candidate_pool
+        ),
+        critic_budget=_int_env("SCRIPT_CRITIC_MAX_OUTPUT_TOKENS", 1400),
+    )
+    allowed_overhead = budget["minimum_once_token_budget"] * _token_overhead_max_rate()
+    projected_overhead = budget["token_overhead"] + estimated_tokens
+    return projected_overhead <= allowed_overhead
 
 
 def _near_miss_rewrite_reason(candidate: dict) -> str:
@@ -2060,11 +2085,16 @@ def _is_tts_regenerate_token_item(item: dict) -> bool:
 
 
 def _token_overhead_status(rate: float) -> str:
-    if rate > 0.10:
+    limit = _token_overhead_max_rate()
+    if rate > limit:
         return "failed"
-    if rate > 0.05:
+    if rate > limit / 2:
         return "warning"
     return "ok"
+
+
+def _token_overhead_max_rate() -> float:
+    return max(0.0, _float_env("TOKEN_OVERHEAD_MAX_RATE", 0.10))
 
 
 def _source_scorecard_token_budget() -> int:

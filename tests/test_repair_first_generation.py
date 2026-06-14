@@ -363,7 +363,7 @@ def test_critic_always_forces_policy(monkeypatch):
     assert should_run_critic(metadata, post) == (True, "SCRIPT_CRITIC_ALWAYS=1")
 
 
-def test_critic_failure_causes_at_most_one_rewrite(monkeypatch, tmp_path):
+def test_critic_failure_rewrite_is_blocked_when_token_budget_would_exceed_limit(monkeypatch, tmp_path):
     monkeypatch.setenv("SCRIPT_CRITIC_ENABLED", "1")
     monkeypatch.setenv("SCRIPT_CRITIC_STAGE", "after_local_gate")
     monkeypatch.setenv("SCRIPT_MAX_LLM_DRAFTS_PER_SOURCE", "2")
@@ -373,11 +373,16 @@ def test_critic_failure_causes_at_most_one_rewrite(monkeypatch, tmp_path):
         return _failing_critic() if call_count == 1 else _passing_critic()
 
     calls, accepted, rejected = _run_generation(monkeypatch, tmp_path, [_draft(), _draft()], critic=critic)
+    summary = json.loads((tmp_path / "generation_summary.json").read_text(encoding="utf-8"))
+    near_misses = json.loads((tmp_path / "near_miss_candidates.json").read_text(encoding="utf-8"))
 
-    assert calls["llm"] == 2
-    assert calls["critic"] == 2
-    assert len(accepted) == 1
+    assert calls["llm"] == 1
+    assert calls["critic"] == 1
+    assert accepted == []
     assert rejected == []
+    assert summary["near_miss_count"] == 1
+    assert summary["token_overhead_rate"] == 0
+    assert near_misses[0]["candidate_score"] > 0
 
 
 def test_failed_generation_telemetry_is_counted_without_result(monkeypatch, tmp_path):

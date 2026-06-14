@@ -251,3 +251,23 @@ def test_token_overhead_counts_tts_regenerate_marker(monkeypatch):
     assert summary["actual_token_budget"] == 3200
     assert summary["token_overhead_by_stage"]["tts_regenerate"] == 1600
     assert summary["token_overhead_status"] == "failed"
+
+
+def test_near_miss_rewrite_budget_allows_only_within_ten_percent(monkeypatch):
+    monkeypatch.setattr(generation_module, "_load_source_filter_summary", lambda: {})
+    monkeypatch.delenv("TOKEN_OVERHEAD_MAX_RATE", raising=False)
+    ten_initial_drafts = [_token_item(id=f"source-{idx}", candidate_bucket="near_miss") for idx in range(10)]
+
+    assert generation_module._can_spend_retry_tokens(ten_initial_drafts, estimated_tokens=1600) is True
+
+    ten_initial_drafts.append(_token_item(id="source-rewrite", near_miss_rewrite=True))
+
+    assert generation_module._can_spend_retry_tokens(ten_initial_drafts, estimated_tokens=1600) is False
+
+
+def test_near_miss_rewrite_budget_blocks_small_batches(monkeypatch):
+    monkeypatch.setattr(generation_module, "_load_source_filter_summary", lambda: {})
+    monkeypatch.delenv("TOKEN_OVERHEAD_MAX_RATE", raising=False)
+    two_initial_drafts = [_token_item(id=f"source-{idx}", candidate_bucket="near_miss") for idx in range(2)]
+
+    assert generation_module._can_spend_retry_tokens(two_initial_drafts, estimated_tokens=1600) is False

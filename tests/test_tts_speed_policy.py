@@ -164,3 +164,55 @@ def test_tts_batch_keeps_successful_item_with_artifacts(monkeypatch, tmp_path):
     assert items[0]["tts_wpm"] > 0
     assert (audio_dir / "ok.mp3").exists()
     assert (marks_dir / "ok_marks.json").exists()
+
+
+class _TooLongAudioClip:
+    duration = 120.0
+
+    def __init__(self, path):
+        self.path = path
+
+    def close(self):
+        return None
+
+
+def test_tts_pacing_failure_does_not_llm_regenerate_by_default(monkeypatch, tmp_path):
+    from generator.tts import generate_tts as tts_module
+
+    metadata_path = tmp_path / "final_metadata.json"
+    failed_path = tmp_path / "failed_posts.json"
+    audio_dir = tmp_path / "audio"
+    marks_dir = tmp_path / "marks"
+    metadata_path.write_text(json.dumps([_tts_safe_item("too-long")]), encoding="utf-8")
+    calls = {"regenerate": 0}
+
+    def fake_generate(text, filename, voice_id):
+        audio_dir.mkdir(parents=True, exist_ok=True)
+        marks_dir.mkdir(parents=True, exist_ok=True)
+        audio_path = audio_dir / f"{filename}.tmp.mp3"
+        marks_path = marks_dir / f"{filename}.tmp.json"
+        audio_path.write_bytes(b"mp3")
+        marks_path.write_text(json.dumps([{"time": 0, "type": "word", "value": "He"}]), encoding="utf-8")
+        return str(audio_path), str(marks_path)
+
+    def fake_regenerate(*_args, **_kwargs):
+        calls["regenerate"] += 1
+        raise AssertionError("TTS should not call LLM regenerate by default")
+
+    monkeypatch.delenv("TTS_ALLOW_LLM_REGENERATE", raising=False)
+    monkeypatch.setattr(tts_module, "FINAL_METADATA_FILE", metadata_path)
+    monkeypatch.setattr(tts_module, "FAILED_POSTS_FILE", failed_path)
+    monkeypatch.setattr(tts_module, "AUDIO_DIR", audio_dir)
+    monkeypatch.setattr(tts_module, "MARKS_DIR", marks_dir)
+    monkeypatch.setattr(tts_module, "AudioFileClip", _TooLongAudioClip)
+    monkeypatch.setattr(tts_module, "generate_tts_with_timestamps", fake_generate)
+    monkeypatch.setattr(tts_module, "pick_voice_id", lambda voice_type: "Matthew")
+    monkeypatch.setattr(tts_module, "regenerate_post_by_id", fake_regenerate)
+
+    tts_module.run_batch_tts()
+
+    assert calls["regenerate"] == 0
+    assert json.loads(metadata_path.read_text(encoding="utf-8")) == []
+    failed = json.loads(failed_path.read_text(encoding="utf-8"))
+    assert failed[0]["stage"] == "tts"
+    assert "tts_pacing_failed_llm_regenerate_disabled" in failed[0]["error"]

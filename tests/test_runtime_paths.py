@@ -35,7 +35,7 @@ def test_terraform_runtime_config_enforces_production_and_cost_controls():
         'SOURCE_LLM_EVAL_LIMIT                         = "10"',
         'SOURCE_LLM_EVAL_LIMIT_MAX                     = "12"',
         'SCRIPT_SOURCE_DRAFT_LIMIT                     = "10"',
-        'SCRIPT_NEAR_MISS_REWRITE_LIMIT                = "2"',
+        'SCRIPT_NEAR_MISS_REWRITE_LIMIT                = "1"',
         'SCRIPT_STOP_AFTER_ACCEPTED_TARGET             = "0"',
         'SCRIPT_MAX_LLM_DRAFTS_PER_SOURCE              = "1"',
         'SCRIPT_ALLOW_LLM_REWRITE_ON_NARRATIVE_FAILURE = "0"',
@@ -43,6 +43,8 @@ def test_terraform_runtime_config_enforces_production_and_cost_controls():
         'SCRIPT_MAX_STRUCTURED_ATTEMPTS                = "1"',
         'FILTER_LOCAL_FALLBACK_ENABLED                 = "0"',
         'SCRIPT_LOCAL_FALLBACK_ENABLED                 = "0"',
+        'TOKEN_OVERHEAD_MAX_RATE                       = "0.10"',
+        'TTS_ALLOW_LLM_REGENERATE                      = "0"',
         'CAPTION_RENDER_MODE                           = "chunk"',
         'OPENING_SILENCE_SECONDS                       = "0.25"',
     ):
