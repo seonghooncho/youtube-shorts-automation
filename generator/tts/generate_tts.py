@@ -128,6 +128,29 @@ def run_batch_tts():
                 ready_items.append(metadata)
                 success = True
                 break
+            if _accept_tts_pacing_near_miss(final_duration, wpm):
+                final_audio_path = AUDIO_DIR / f"{original_filename}.mp3"
+                final_marks_path = MARKS_DIR / f"{original_filename}_marks.json"
+                os.replace(audio_path, final_audio_path)
+                os.replace(marks_path, final_marks_path)
+                if not _valid_tts_artifacts(original_filename):
+                    failed_items.append(_tts_failure(metadata, "tts_artifact_missing_after_pacing_near_miss"))
+                    break
+                metadata["tts_status"] = "READY_WITH_PACING_WARNING"
+                metadata["tts_voice_id"] = voice_id
+                metadata["tts_wpm"] = round(wpm, 2)
+                metadata["tts_original_duration"] = round(duration, 3)
+                metadata["tts_final_duration_estimate"] = round(final_duration, 3)
+                metadata["tts_pacing_warning"] = (
+                    f"target_range_miss_but_hard_safe:final={final_duration:.2f}s wpm={wpm:.1f}"
+                )
+                ready_items.append(metadata)
+                success = True
+                print(
+                    f"⚠️ [id={original_filename}] TTS pacing near-miss kept: "
+                    f"final={final_duration:.2f}s wpm={wpm:.1f}"
+                )
+                break
             else:
                 # 실패 → 삭제 및 regenerate 시도
                 print(
@@ -204,6 +227,17 @@ def _allow_tts_llm_regenerate() -> bool:
     return os.getenv("TTS_ALLOW_LLM_REGENERATE", "0").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _accept_tts_pacing_near_miss(final_duration_seconds: float, wpm: float) -> bool:
+    if os.getenv("TTS_ACCEPT_NEAR_MISS_PACING", "1").strip().lower() in {"0", "false", "no", "off"}:
+        return False
+    return (
+        _float_env("TTS_HARD_MIN_FINAL_SECONDS", 28.0)
+        <= final_duration_seconds
+        <= _float_env("TTS_HARD_MAX_FINAL_SECONDS", 80.0)
+        and wpm <= _float_env("TTS_HARD_MAX_WPM", 245.0)
+    )
+
+
 def _valid_tts_artifacts(content_id: str) -> bool:
     audio_path = AUDIO_DIR / f"{content_id}.mp3"
     marks_path = MARKS_DIR / f"{content_id}_marks.json"
@@ -226,6 +260,13 @@ def _tts_failure(item: dict, reason: str) -> dict:
         "stage": "tts",
         "error": reason,
     }
+
+
+def _float_env(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except ValueError:
+        return default
 
 
 def _append_failed_posts(items: list[dict]) -> None:

@@ -363,11 +363,13 @@ def test_critic_always_forces_policy(monkeypatch):
     assert should_run_critic(metadata, post) == (True, "SCRIPT_CRITIC_ALWAYS=1")
 
 
-def test_critic_failure_rewrite_is_blocked_when_token_budget_would_exceed_limit(monkeypatch, tmp_path):
+def test_critic_failure_can_select_near_miss_backup_without_rewrite(monkeypatch, tmp_path):
     monkeypatch.setenv("SCRIPT_CRITIC_ENABLED", "1")
     monkeypatch.setenv("SCRIPT_CRITIC_STAGE", "after_local_gate")
     monkeypatch.setenv("SCRIPT_MAX_LLM_DRAFTS_PER_SOURCE", "2")
     monkeypatch.setenv("SCRIPT_ALLOW_LLM_REWRITE_ON_NARRATIVE_FAILURE", "1")
+    monkeypatch.setenv("TARGET_ACCEPTED_SCRIPTS", "1")
+    monkeypatch.setenv("CANDIDATE_BACKUP_ACCEPT_SCORE", "70")
 
     def critic(call_count):
         return _failing_critic() if call_count == 1 else _passing_critic()
@@ -378,7 +380,8 @@ def test_critic_failure_rewrite_is_blocked_when_token_budget_would_exceed_limit(
 
     assert calls["llm"] == 1
     assert calls["critic"] == 1
-    assert accepted == []
+    assert [item["id"] for item in accepted] == ["cat-bite"]
+    assert accepted[0]["selected_as_backup_candidate"] is True
     assert rejected == []
     assert summary["near_miss_count"] == 1
     assert summary["token_overhead_rate"] == 0
