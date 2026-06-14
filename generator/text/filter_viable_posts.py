@@ -288,6 +288,13 @@ def _int_env(name: str, default: int) -> int:
         return default
 
 
+def _float_env(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
 def local_source_priority(post: dict) -> float:
     source = build_source_profile(post)
     title = str(post.get("title") or "")
@@ -519,6 +526,41 @@ def _target_accepted_scripts() -> int:
 
 def _source_accepted_pool_target() -> int:
     return max(_target_accepted_scripts(), _int_env("SCRIPT_SOURCE_DRAFT_LIMIT", 10))
+
+
+def _local_high_confidence_accept_enabled() -> bool:
+    return _truthy_env("SOURCE_LOCAL_HIGH_CONFIDENCE_ACCEPT_ENABLED", "1")
+
+
+def _local_high_confidence_accept_limit() -> int:
+    default = _target_accepted_scripts()
+    return max(0, _int_env("SOURCE_LOCAL_HIGH_CONFIDENCE_ACCEPT_LIMIT", default))
+
+
+def _local_high_confidence_min_priority() -> float:
+    return _float_env("SOURCE_LOCAL_HIGH_CONFIDENCE_MIN_PRIORITY", 3.0)
+
+
+def _stop_after_local_high_confidence_target() -> bool:
+    return _truthy_env("SOURCE_STOP_AFTER_LOCAL_HIGH_CONFIDENCE_TARGET", "1")
+
+
+def _is_local_high_confidence_source(post: dict) -> bool:
+    provider = str(post.get("source_authenticity") or post.get("source_provider") or "").strip().lower()
+    if provider in {"synthetic", "local_template"}:
+        return False
+    feasibility = post.get("local_feasibility") or {}
+    if not feasibility.get("likely_script_gate_fit"):
+        return False
+    if float(post.get("local_source_priority") or 0) < _local_high_confidence_min_priority():
+        return False
+    scorecard = _local_source_scorecard(post, "local_high_confidence")
+    return (
+        scorecard.decision == "YES"
+        and scorecard.retention_risk != "high"
+        and source_acceptance_score(scorecard) >= float(os.getenv("SOURCE_ACCEPTANCE_MIN_SCORE", os.getenv("SOURCE_SCORE_MIN_AVG", "4.0")))
+        and _gate_fit_passes(scorecard)
+    )
 
 
 def _preflight_only() -> bool:
@@ -822,6 +864,8 @@ def filter_viable_posts():
     filter_prompt_total_chars_before = 0
     filter_prompt_total_chars_after = 0
     source_scorecard_skipped_after_quota = 0
+    source_scorecard_skipped_by_local_accept = 0
+    local_high_confidence_accepted = 0
     local_feasibility_rejected = 0
     local_feasibility_rejection_reasons: dict[str, int] = {}
     local_feasibility_rejected_examples: list[dict] = []
@@ -915,6 +959,56 @@ def filter_viable_posts():
         skipped_by_prerank = []
 
     for post_index, post in enumerate(posts_to_evaluate):
+        if (
+            _local_high_confidence_accept_enabled()
+            and local_high_confidence_accepted < _local_high_confidence_accept_limit()
+            and _is_local_high_confidence_source(post)
+        ):
+            scorecard = _local_source_scorecard(post, "local_high_confidence")
+            source_score = _scorecard_average(scorecard)
+            acceptance_score = source_acceptance_score(scorecard)
+            post["source_scorecard"] = scorecard.model_dump()
+            post["source_score"] = source_score
+            post["source_acceptance_score"] = acceptance_score
+            post["source_priority_score"] = _source_priority_score(scorecard)
+            post["source_archetype"] = scorecard.archetype.strip().lower()[:80]
+            post["source_quality_status"] = "accepted"
+            post["source_rejection_reason"] = ""
+            post["source_scorecard_path"] = "local_high_confidence"
+            selected_posts.append(post)
+            local_high_confidence_accepted += 1
+            source_scorecard_skipped_by_local_accept += 1
+            print(
+                "✅ local high-confidence source accepted without LLM scorecard: "
+                f"id={post.get('id', 'unknown')} priority={float(post.get('local_source_priority') or 0):.2f}"
+            )
+            if (
+                _stop_after_local_high_confidence_target()
+                and len(selected_posts) >= _local_high_confidence_accept_limit()
+            ):
+                source_filter_stopped_after_target = True
+                remaining = posts_to_evaluate[post_index + 1 :]
+                for remaining_post in remaining:
+                    remaining_post["source_quality_status"] = "skipped"
+                    remaining_post["source_rejection_reason"] = "source_filter_stopped_after_local_high_confidence_target"
+                print(
+                    "✅ local high-confidence target reached; "
+                    f"stopping source filter after {len(selected_posts)} accepted"
+                )
+                break
+            if len(selected_posts) >= _source_accepted_pool_target():
+                source_filter_stopped_after_target = True
+                remaining = posts_to_evaluate[post_index + 1 :]
+                for remaining_post in remaining:
+                    remaining_post["source_quality_status"] = "skipped"
+                    remaining_post["source_rejection_reason"] = "source_filter_stopped_after_target"
+                print(
+                    "✅ target accepted sources reached; "
+                    f"stopping source filter after {len(selected_posts)} accepted"
+                )
+                break
+            continue
+
         title = post.get("title", "")
         original_content = str(post.get("content") or "")
         compacted_content = compact_source_for_filter(post, _filter_source_max_chars(original_content))
@@ -1074,6 +1168,8 @@ def filter_viable_posts():
         "source_accepted_pool_target": _source_accepted_pool_target(),
         "source_filter_stopped_after_target": source_filter_stopped_after_target,
         "source_scorecard_calls": source_scorecard_calls,
+        "source_scorecard_skipped_by_local_accept": source_scorecard_skipped_by_local_accept,
+        "local_high_confidence_accepted": local_high_confidence_accepted,
         "source_scorecard_skipped_by_prerank": source_scorecard_skipped_by_prerank,
         "source_scorecard_skipped_after_quota": source_scorecard_skipped_after_quota,
         "llm_unavailable_reason": llm_unavailable_reason[:240],

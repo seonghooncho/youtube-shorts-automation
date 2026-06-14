@@ -205,6 +205,7 @@ def test_filter_prerank_caps_llm_source_scorecard_calls(monkeypatch, tmp_path):
     monkeypatch.setenv("SOURCE_LLM_EVAL_LIMIT", "8")
     monkeypatch.setenv("TARGET_ACCEPTED_SCRIPTS", "20")
     monkeypatch.setenv("SOURCE_LOCAL_PRERANK_ENABLED", "1")
+    monkeypatch.setenv("SOURCE_LOCAL_HIGH_CONFIDENCE_ACCEPT_ENABLED", "0")
     monkeypatch.setattr("generator.text.filter_viable_posts.RAW_POSTS_FILE", raw_path)
     monkeypatch.setattr("generator.text.filter_viable_posts.VIABLE_POSTS_FILE", viable_path)
     monkeypatch.setattr("generator.text.filter_viable_posts._get_client", lambda: object())
@@ -243,6 +244,7 @@ def test_filter_stops_scorecard_calls_after_quota(monkeypatch, tmp_path):
     monkeypatch.setenv("SOURCE_LLM_EVAL_LIMIT", "6")
     monkeypatch.setenv("TARGET_ACCEPTED_SCRIPTS", "20")
     monkeypatch.setenv("SOURCE_LOCAL_PRERANK_ENABLED", "1")
+    monkeypatch.setenv("SOURCE_LOCAL_HIGH_CONFIDENCE_ACCEPT_ENABLED", "0")
     monkeypatch.delenv("FILTER_LOCAL_FALLBACK_ENABLED", raising=False)
     monkeypatch.setattr("generator.text.filter_viable_posts.RAW_POSTS_FILE", raw_path)
     monkeypatch.setattr("generator.text.filter_viable_posts.VIABLE_POSTS_FILE", viable_path)
@@ -276,6 +278,7 @@ def test_filter_target_two_builds_wider_source_pool(monkeypatch, tmp_path):
     monkeypatch.setenv("SOURCE_LLM_EVAL_LIMIT_MAX", "6")
     monkeypatch.setenv("TARGET_ACCEPTED_SCRIPTS", "2")
     monkeypatch.setenv("SOURCE_LOCAL_PRERANK_ENABLED", "1")
+    monkeypatch.setenv("SOURCE_LOCAL_HIGH_CONFIDENCE_ACCEPT_ENABLED", "0")
     monkeypatch.setattr("generator.text.filter_viable_posts.RAW_POSTS_FILE", raw_path)
     monkeypatch.setattr("generator.text.filter_viable_posts.VIABLE_POSTS_FILE", viable_path)
     monkeypatch.setattr("generator.text.filter_viable_posts._get_client", lambda: object())
@@ -290,6 +293,37 @@ def test_filter_target_two_builds_wider_source_pool(monkeypatch, tmp_path):
     assert summary["source_llm_eval_limit"] == 4
     assert summary["source_accepted_pool_target"] == 10
     assert summary["source_filter_stopped_after_target"] is False
+
+
+def test_high_confidence_sources_skip_llm_scorecard_by_default(monkeypatch, tmp_path):
+    raw_path = tmp_path / "raw_posts.json"
+    viable_path = tmp_path / "viable_posts.json"
+    raw_path.write_text(json.dumps([_raw_post(i, strong=True) for i in range(4)]), encoding="utf-8")
+    calls = {"scorecard": 0}
+
+    def fake_scorecard(*_args, **_kwargs):
+        calls["scorecard"] += 1
+        raise AssertionError("high-confidence local sources should not call scorecard first")
+
+    monkeypatch.setenv("SOURCE_LLM_EVAL_LIMIT", "4")
+    monkeypatch.setenv("TARGET_ACCEPTED_SCRIPTS", "2")
+    monkeypatch.setenv("SOURCE_LOCAL_HIGH_CONFIDENCE_ACCEPT_LIMIT", "2")
+    monkeypatch.setenv("SOURCE_LOCAL_HIGH_CONFIDENCE_MIN_PRIORITY", "3.0")
+    monkeypatch.setattr("generator.text.filter_viable_posts.RAW_POSTS_FILE", raw_path)
+    monkeypatch.setattr("generator.text.filter_viable_posts.VIABLE_POSTS_FILE", viable_path)
+    monkeypatch.setattr("generator.text.filter_viable_posts._get_client", lambda: object())
+    monkeypatch.setattr("generator.text.filter_viable_posts._ask_source_scorecard", fake_scorecard)
+
+    filter_viable_posts()
+
+    viable = json.loads(viable_path.read_text(encoding="utf-8"))
+    summary = json.loads((tmp_path / "source_filter_summary.json").read_text(encoding="utf-8"))
+    assert calls["scorecard"] == 0
+    assert len(viable) == 2
+    assert all(post["source_scorecard_path"] == "local_high_confidence" for post in viable)
+    assert summary["local_high_confidence_accepted"] == 2
+    assert summary["source_scorecard_skipped_by_local_accept"] == 2
+    assert summary["source_scorecard_calls"] == 0
 
 
 def test_local_feasibility_rejects_sources_before_llm(monkeypatch, tmp_path):
@@ -308,6 +342,7 @@ def test_local_feasibility_rejects_sources_before_llm(monkeypatch, tmp_path):
 
     monkeypatch.setenv("TARGET_ACCEPTED_SCRIPTS", "20")
     monkeypatch.setenv("SOURCE_LLM_EVAL_LIMIT", "8")
+    monkeypatch.setenv("SOURCE_LOCAL_HIGH_CONFIDENCE_ACCEPT_ENABLED", "0")
     monkeypatch.setattr("generator.text.filter_viable_posts.RAW_POSTS_FILE", raw_path)
     monkeypatch.setattr("generator.text.filter_viable_posts.VIABLE_POSTS_FILE", viable_path)
     monkeypatch.setattr("generator.text.filter_viable_posts._get_client", lambda: object())
@@ -391,6 +426,7 @@ def test_filter_summary_records_compaction_counts(monkeypatch, tmp_path):
     monkeypatch.setenv("FILTER_SOURCE_LONG_POST_MAX_CHARS", "800")
     monkeypatch.setenv("SOURCE_LLM_EVAL_LIMIT", "8")
     monkeypatch.setenv("TARGET_ACCEPTED_SCRIPTS", "20")
+    monkeypatch.setenv("SOURCE_LOCAL_HIGH_CONFIDENCE_ACCEPT_ENABLED", "0")
     monkeypatch.setattr("generator.text.filter_viable_posts.RAW_POSTS_FILE", raw_path)
     monkeypatch.setattr("generator.text.filter_viable_posts.VIABLE_POSTS_FILE", viable_path)
     monkeypatch.setattr("generator.text.filter_viable_posts._get_client", lambda: object())
@@ -418,6 +454,7 @@ def test_local_priority_sorts_strong_sources_first(monkeypatch, tmp_path):
     monkeypatch.setenv("SOURCE_LLM_EVAL_LIMIT", "2")
     monkeypatch.setenv("TARGET_ACCEPTED_SCRIPTS", "20")
     monkeypatch.setenv("SOURCE_LOCAL_PRERANK_ENABLED", "1")
+    monkeypatch.setenv("SOURCE_LOCAL_HIGH_CONFIDENCE_ACCEPT_ENABLED", "0")
     monkeypatch.setattr("generator.text.filter_viable_posts.RAW_POSTS_FILE", raw_path)
     monkeypatch.setattr("generator.text.filter_viable_posts.VIABLE_POSTS_FILE", viable_path)
     monkeypatch.setattr("generator.text.filter_viable_posts._get_client", lambda: object())
@@ -443,6 +480,7 @@ def test_thin_post_rejected_before_source_scorecard(monkeypatch, tmp_path):
 
     monkeypatch.setenv("SOURCE_LLM_EVAL_LIMIT", "8")
     monkeypatch.setenv("TARGET_ACCEPTED_SCRIPTS", "20")
+    monkeypatch.setenv("SOURCE_LOCAL_HIGH_CONFIDENCE_ACCEPT_ENABLED", "0")
     monkeypatch.setattr("generator.text.filter_viable_posts.RAW_POSTS_FILE", raw_path)
     monkeypatch.setattr("generator.text.filter_viable_posts.VIABLE_POSTS_FILE", viable_path)
     monkeypatch.setattr("generator.text.filter_viable_posts._get_client", lambda: object())
@@ -545,6 +583,7 @@ def test_llm_quota_failure_in_production_does_not_locally_approve(monkeypatch, t
         encoding="utf-8",
     )
     monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("SOURCE_LOCAL_HIGH_CONFIDENCE_ACCEPT_ENABLED", "0")
     monkeypatch.delenv("FILTER_LOCAL_FALLBACK_ENABLED", raising=False)
     monkeypatch.setattr("generator.text.filter_viable_posts.RAW_POSTS_FILE", raw_path)
     monkeypatch.setattr("generator.text.filter_viable_posts.VIABLE_POSTS_FILE", viable_path)
