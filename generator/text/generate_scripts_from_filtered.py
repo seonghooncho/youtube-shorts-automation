@@ -1875,6 +1875,13 @@ def _generation_summary(posts: list[dict], accepted: list[dict], failed: list[di
         "json_fallback": generation_telemetry["json_fallback_attempts"],
         "critic": critic_attempted,
     }
+    token_budget = _token_budget_summary(
+        all_items,
+        generated_items,
+        source_scorecard_calls=source_scorecard_calls,
+        critic_attempted=critic_attempted,
+        critic_budget=critic_budget,
+    )
     summary = {
         "sources_considered": len(posts),
         "sources_skipped_preflight": sum(1 for item in failed if item.get("stage") == "source_preflight"),
@@ -1909,11 +1916,8 @@ def _generation_summary(posts: list[dict], accepted: list[dict], failed: list[di
             + source_scorecard_calls
             + critic_attempted
         ),
-        "estimated_output_token_budget_total": (
-            generation_telemetry["estimated_output_token_budget_total"]
-            + source_scorecard_calls * 512
-            + critic_attempted * critic_budget
-        ),
+        "estimated_output_token_budget_total": token_budget["actual_token_budget"],
+        **token_budget,
         "final_accepted": len(accepted),
         "final_rejected": len(failed),
         "candidate_pool_count": len(candidate_pool),
@@ -1928,6 +1932,155 @@ def _generation_summary(posts: list[dict], accepted: list[dict], failed: list[di
     summary["cost_waste_warning"] = bool(summary["final_accepted"] == 0 and summary["llm_call_estimate_total"] > 0)
     summary["operator_recommendation"] = _operator_recommendation(summary)
     return summary
+
+
+def _token_budget_summary(
+    all_items: list[dict],
+    generated_items: list[dict],
+    *,
+    source_scorecard_calls: int,
+    critic_attempted: int,
+    critic_budget: int,
+) -> dict[str, Any]:
+    source_scorecard_tokens = source_scorecard_calls * _source_scorecard_token_budget()
+    critic_tokens = critic_attempted * max(0, critic_budget)
+    actual_by_stage = {
+        "source_scorecard": source_scorecard_tokens,
+        "initial_script_draft": 0,
+        "same_source_retry": 0,
+        "structured_retry": 0,
+        "json_fallback": 0,
+        "near_miss_rewrite": 0,
+        "tts_regenerate": 0,
+        "critic": critic_tokens,
+    }
+    overhead_by_stage = {
+        "source_scorecard": 0,
+        "initial_script_draft": 0,
+        "same_source_retry": 0,
+        "structured_retry": 0,
+        "json_fallback": 0,
+        "near_miss_rewrite": 0,
+        "tts_regenerate": 0,
+        "critic": 0,
+    }
+    minimum_once = source_scorecard_tokens + critic_tokens
+    generated_ids = {id(item) for item in generated_items}
+    seen_item_ids: set[int] = set()
+    for item in all_items:
+        if not isinstance(item, dict):
+            continue
+        # Count failed records and generated candidates once. When generated_items
+        # comes from candidate_pool, all_items already points at the same objects.
+        item_identity = id(item)
+        if item_identity in seen_item_ids:
+            continue
+        seen_item_ids.add(item_identity)
+        split = _script_token_budget_split(item)
+        if not split["actual"]:
+            continue
+        if _is_near_miss_rewrite_token_item(item):
+            actual_by_stage["near_miss_rewrite"] += split["actual"]
+            overhead_by_stage["near_miss_rewrite"] += split["actual"]
+            continue
+        if _is_tts_regenerate_token_item(item):
+            actual_by_stage["tts_regenerate"] += split["actual"]
+            overhead_by_stage["tts_regenerate"] += split["actual"]
+            continue
+
+        actual_by_stage["initial_script_draft"] += split["initial_script_draft"]
+        actual_by_stage["same_source_retry"] += split["same_source_retry"]
+        actual_by_stage["structured_retry"] += split["structured_retry"]
+        actual_by_stage["json_fallback"] += split["json_fallback"]
+        overhead_by_stage["same_source_retry"] += split["same_source_retry"]
+        overhead_by_stage["structured_retry"] += split["structured_retry"]
+        overhead_by_stage["json_fallback"] += split["json_fallback"]
+        if item_identity in generated_ids or int(item.get("generation_attempt_count") or item.get("llm_draft_count") or 0) > 0:
+            minimum_once += split["initial_script_draft"]
+
+    actual_total = sum(actual_by_stage.values())
+    overhead = max(0, actual_total - minimum_once)
+    overhead_rate = round(overhead / minimum_once, 4) if minimum_once > 0 else (0.0 if actual_total == 0 else 1.0)
+    return {
+        "minimum_once_token_budget": int(round(minimum_once)),
+        "actual_token_budget": int(round(actual_total)),
+        "token_overhead": int(round(overhead)),
+        "token_overhead_rate": overhead_rate,
+        "token_overhead_status": _token_overhead_status(overhead_rate),
+        "actual_token_budget_by_stage": {key: int(round(value)) for key, value in actual_by_stage.items()},
+        "token_overhead_by_stage": {key: int(round(value)) for key, value in overhead_by_stage.items()},
+    }
+
+
+def _script_token_budget_split(item: dict) -> dict[str, float]:
+    telemetry = item.get("generation_telemetry") or {}
+    structured_attempts = int(item.get("llm_structured_attempts") or telemetry.get("structured_attempts") or 0)
+    json_fallback_attempts = int(item.get("llm_json_fallback_attempts") or telemetry.get("json_fallback_attempts") or 0)
+    generation_attempts = int(item.get("llm_draft_count") or item.get("generation_attempt_count") or 0)
+    observed_attempts = structured_attempts + json_fallback_attempts
+    token_total = float(item.get("llm_estimated_output_token_budget_total") or telemetry.get("estimated_output_token_budget_total") or 0)
+    default_budget = float(_first_script_token_budget())
+    if token_total <= 0 and (observed_attempts > 0 or generation_attempts > 0):
+        token_total = max(1, observed_attempts or 1) * default_budget
+    if observed_attempts <= 0 and token_total > 0:
+        observed_attempts = 1
+        structured_attempts = 1
+    if token_total <= 0:
+        return {
+            "actual": 0.0,
+            "initial_script_draft": 0.0,
+            "same_source_retry": 0.0,
+            "structured_retry": 0.0,
+            "json_fallback": 0.0,
+        }
+    token_per_attempt = token_total / max(1, observed_attempts)
+    initial = token_per_attempt
+    structured_retry = max(0, structured_attempts - 1) * token_per_attempt
+    json_fallback = max(0, json_fallback_attempts) * token_per_attempt
+    if _is_near_miss_rewrite_token_item(item) or _is_tts_regenerate_token_item(item):
+        same_source_retry = 0.0
+    else:
+        same_source_retry = max(0, generation_attempts - 1) * default_budget
+    actual = initial + structured_retry + json_fallback + same_source_retry
+    return {
+        "actual": actual,
+        "initial_script_draft": initial,
+        "same_source_retry": same_source_retry,
+        "structured_retry": structured_retry,
+        "json_fallback": json_fallback,
+    }
+
+
+def _is_near_miss_rewrite_token_item(item: dict) -> bool:
+    return bool(item.get("near_miss_rewrite") or item.get("llm_call_stage") == "near_miss_rewrite")
+
+
+def _is_tts_regenerate_token_item(item: dict) -> bool:
+    return bool(item.get("tts_regenerate") or item.get("llm_call_stage") == "tts_regenerate" or item.get("stage") == "tts_regenerate")
+
+
+def _token_overhead_status(rate: float) -> str:
+    if rate > 0.10:
+        return "failed"
+    if rate > 0.05:
+        return "warning"
+    return "ok"
+
+
+def _source_scorecard_token_budget() -> int:
+    return max(0, _int_env("SOURCE_SCORECARD_OUTPUT_TOKEN_BUDGET", 512))
+
+
+def _first_script_token_budget() -> int:
+    raw = os.getenv("SCRIPT_OUTPUT_TOKEN_BUDGETS", "1600,2200,3000")
+    for part in raw.split(","):
+        try:
+            value = int(part.strip())
+        except ValueError:
+            continue
+        if value > 0:
+            return value
+    return 1600
 
 
 def _best_near_miss_reasons(candidate_pool: list[dict]) -> list[str]:
@@ -1954,11 +2107,15 @@ def _operator_recommendation(summary: dict) -> str:
     critic_failed = int(summary.get("critic_failed") or 0)
     critic_passed = int(summary.get("critic_passed") or 0)
     critic_skipped = int(summary.get("critic_skipped") or 0)
+    token_overhead_status = str(summary.get("token_overhead_status") or "")
+    token_overhead_rate = float(summary.get("token_overhead_rate") or 0)
 
     if final_accepted == 0 and source_scorecard_calls > 0:
         if sources_considered == 0:
             return "CHECK_SOURCE_FILTER: 0 accepted after source scorecard calls."
         return "CHECK_GATE: source filter accepted items but script gate rejected all."
+    if token_overhead_status == "failed":
+        return f"CHECK_TOKEN_OVERHEAD: token overhead is {token_overhead_rate:.1%}; review retries and fallbacks."
     if json_fallback_attempts > 0:
         return "CHECK_COST: json_fallback_attempts are non-zero; review structured output reliability."
     if structured_attempts > 0 and structured_failures > structured_attempts / 2:
