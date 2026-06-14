@@ -139,6 +139,16 @@ def run_batch_tts():
                 os.remove(marks_path)
                 try_count += 1
 
+                if not _allow_tts_llm_regenerate():
+                    reason = (
+                        "tts_pacing_failed_llm_regenerate_disabled:"
+                        f"original={duration:.2f}s final={final_duration:.2f}s wpm={wpm:.1f}"
+                    )
+                    metadata["tts_regenerate_blocked"] = True
+                    metadata["tts_regenerate_blocked_reason"] = reason
+                    failed_items.append(_tts_failure(metadata, reason))
+                    break
+
                 # regenerate 시도
                 new_metadata = regenerate_post_by_id(
                     original_filename,
@@ -188,6 +198,10 @@ def _max_tts_wpm() -> float:
         return float(os.getenv("TTS_MAX_WPM", "225"))
     except ValueError:
         return 225.0
+
+
+def _allow_tts_llm_regenerate() -> bool:
+    return os.getenv("TTS_ALLOW_LLM_REGENERATE", "0").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _valid_tts_artifacts(content_id: str) -> bool:
