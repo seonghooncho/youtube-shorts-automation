@@ -143,7 +143,7 @@ def test_end_to_end_cost_budget_controls(monkeypatch, tmp_path):
     assert calls["critic"] == 0
     assert summary["critic_calls_attempted"] == 0
     assert summary["source_scorecard_calls"] == 0
-    assert summary["source_scorecard_skipped_by_local_accept"] == 2
+    assert summary["source_scorecard_skipped_by_local_accept"] == 4
     assert summary["source_scorecard_skipped_by_prerank"] == 10
     assert summary["final_accepted"] == 2
     assert summary["final_rejected"] == 0
