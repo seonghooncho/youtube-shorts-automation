@@ -525,3 +525,25 @@ def test_dry_run_summary_prints_key_metrics(monkeypatch, tmp_path, capsys):
     assert "estimated_output_token_budget=" in output
     assert summary["dry_run"] is True
     assert final_metadata[0]["dry_run"] is True
+
+
+def test_calibration_mode_writes_candidate_funnel_without_final_output(monkeypatch, tmp_path):
+    monkeypatch.setenv("SCRIPT_CALIBRATION_MODE", "1")
+    monkeypatch.setenv("SCRIPT_CRITIC_ENABLED", "0")
+
+    _run_generation(monkeypatch, tmp_path, [_draft()])
+
+    summary = json.loads((tmp_path / "generation_summary.json").read_text(encoding="utf-8"))
+    final_metadata = json.loads((tmp_path / "final_metadata.json").read_text(encoding="utf-8"))
+    candidate_scores = json.loads((tmp_path / "candidate_scores.json").read_text(encoding="utf-8"))
+    gate_distribution = json.loads((tmp_path / "gate_distribution.json").read_text(encoding="utf-8"))
+    funnel = json.loads((tmp_path / "source_to_acceptance_funnel.json").read_text(encoding="utf-8"))
+
+    assert final_metadata == []
+    assert summary["dry_run"] is True
+    assert summary["calibration_mode"] is True
+    assert summary["candidate_pool_count"] == 1
+    assert candidate_scores[0]["candidate_score"] > 0
+    assert "candidate_buckets" in gate_distribution
+    assert funnel["raw"] == 1
+    assert funnel["scored"] == 1

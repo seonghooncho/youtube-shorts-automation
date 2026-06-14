@@ -142,13 +142,13 @@ def test_end_to_end_cost_budget_controls(monkeypatch, tmp_path):
     assert calls["critic"] == 0
     assert summary["critic_skipped"] > 0
     assert summary["critic_skipped"] == summary["final_accepted"]
-    assert summary["source_scorecard_calls"] == 2
+    assert summary["source_scorecard_calls"] == 4
     assert summary["source_scorecard_skipped_by_prerank"] == 10
     assert summary["final_accepted"] == 2
     assert summary["final_rejected"] == 0
     assert summary["target_accepted_scripts"] == 2
     assert summary["stopped_after_target"] is True
-    assert summary["llm_calls_by_stage"]["source_scorecard"] == 2
+    assert summary["llm_calls_by_stage"]["source_scorecard"] == 4
     for key in (
         "llm_call_estimate_total",
         "estimated_output_token_budget_total",

@@ -507,14 +507,18 @@ def local_source_feasibility(post: dict) -> dict:
 def _source_llm_eval_limit() -> int:
     explicit = os.getenv("SOURCE_LLM_EVAL_LIMIT")
     if explicit is not None and explicit.strip():
-        return max(0, _int_env("SOURCE_LLM_EVAL_LIMIT", 4))
-    default = _int_env("SOURCE_LLM_EVAL_LIMIT_DEFAULT", 4)
-    max_limit = _int_env("SOURCE_LLM_EVAL_LIMIT_MAX", 6)
+        return max(0, _int_env("SOURCE_LLM_EVAL_LIMIT", 10))
+    default = _int_env("SOURCE_LLM_EVAL_LIMIT_DEFAULT", 10)
+    max_limit = _int_env("SOURCE_LLM_EVAL_LIMIT_MAX", 12)
     return max(0, min(default, max_limit))
 
 
 def _target_accepted_scripts() -> int:
     return max(1, _int_env("TARGET_ACCEPTED_SCRIPTS", 2))
+
+
+def _source_accepted_pool_target() -> int:
+    return max(_target_accepted_scripts(), _int_env("SCRIPT_SOURCE_DRAFT_LIMIT", 10))
 
 
 def _preflight_only() -> bool:
@@ -860,7 +864,7 @@ def filter_viable_posts():
         candidate_posts.sort(key=lambda item: float(item.get("local_source_priority") or 0), reverse=True)
         likely_viable = [post for post in candidate_posts if (post.get("local_feasibility") or {}).get("likely_script_gate_fit")]
         expected_source_calls = min(len(likely_viable), _source_llm_eval_limit())
-        expected_script_calls = min(len(likely_viable), _target_accepted_scripts())
+        expected_script_calls = min(len(likely_viable), _source_accepted_pool_target())
         summary = {
             "preflight_only": True,
             "raw_posts": len(raw_posts),
@@ -966,7 +970,7 @@ def filter_viable_posts():
                 post["source_quality_status"] = "accepted"
                 post["source_rejection_reason"] = ""
                 selected_posts.append(post)
-                if len(selected_posts) >= _target_accepted_scripts():
+                if len(selected_posts) >= _source_accepted_pool_target():
                     source_filter_stopped_after_target = True
                     remaining = posts_to_evaluate[post_index + 1 :]
                     for remaining_post in remaining:
@@ -1067,6 +1071,7 @@ def filter_viable_posts():
         "local_prerank_enabled": _truthy_env("SOURCE_LOCAL_PRERANK_ENABLED", "1"),
         "source_llm_eval_limit": _source_llm_eval_limit(),
         "target_accepted_scripts": _target_accepted_scripts(),
+        "source_accepted_pool_target": _source_accepted_pool_target(),
         "source_filter_stopped_after_target": source_filter_stopped_after_target,
         "source_scorecard_calls": source_scorecard_calls,
         "source_scorecard_skipped_by_prerank": source_scorecard_skipped_by_prerank,

@@ -261,7 +261,7 @@ def test_filter_stops_scorecard_calls_after_quota(monkeypatch, tmp_path):
     assert summary["llm_circuit_open"] is True
 
 
-def test_filter_target_two_stops_after_two_accepted_sources(monkeypatch, tmp_path):
+def test_filter_target_two_builds_wider_source_pool(monkeypatch, tmp_path):
     raw_path = tmp_path / "raw_posts.json"
     viable_path = tmp_path / "viable_posts.json"
     raw_path.write_text(json.dumps([_raw_post(i, strong=True) for i in range(10)]), encoding="utf-8")
@@ -285,10 +285,11 @@ def test_filter_target_two_stops_after_two_accepted_sources(monkeypatch, tmp_pat
 
     summary = json.loads((tmp_path / "source_filter_summary.json").read_text(encoding="utf-8"))
     viable = json.loads(viable_path.read_text(encoding="utf-8"))
-    assert calls["scorecard"] == 2
-    assert len(viable) == 2
+    assert calls["scorecard"] == 4
+    assert len(viable) == 4
     assert summary["source_llm_eval_limit"] == 4
-    assert summary["source_filter_stopped_after_target"] is True
+    assert summary["source_accepted_pool_target"] == 10
+    assert summary["source_filter_stopped_after_target"] is False
 
 
 def test_local_feasibility_rejects_sources_before_llm(monkeypatch, tmp_path):
