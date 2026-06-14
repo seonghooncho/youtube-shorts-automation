@@ -88,10 +88,17 @@ def filter_stage() -> None:
 
     _download_required("raw/raw_posts.json", RAW_POSTS_FILE)
     filter_viable_posts()
+    filter_summary = VIABLE_POSTS_FILE.with_name("source_filter_summary.json")
+    preflight_summary = VIABLE_POSTS_FILE.with_name("source_preflight_summary.json")
     viable_posts = _read_json_file(VIABLE_POSTS_FILE)
     if not viable_posts:
         print("✅ 품질 기준을 통과한 source가 없어 이번 생성 배치를 no-op 처리합니다.")
     store.upload_file(VIABLE_POSTS_FILE, "scripts/viable_posts.json")
+    if filter_summary.exists():
+        store.upload_file(filter_summary, "scripts/source_filter_summary.json")
+        _notify_llm_circuit_if_open(filter_summary, "filter")
+    if preflight_summary.exists():
+        store.upload_file(preflight_summary, "scripts/source_preflight_summary.json")
 
 
 def script_stage() -> None:
@@ -112,6 +119,10 @@ def script_stage() -> None:
     store.upload_file(FINAL_METADATA_FILE, "scripts/final_metadata.json")
     if FAILED_POSTS_FILE.exists():
         store.upload_file(FAILED_POSTS_FILE, "scripts/failed_posts.json")
+    generation_summary = FINAL_METADATA_FILE.with_name("generation_summary.json")
+    if generation_summary.exists():
+        store.upload_file(generation_summary, "scripts/generation_summary.json")
+        _notify_llm_circuit_if_open(generation_summary, "script")
     content_repo.upsert_items(metadata, "SCRIPTED")
 
 
@@ -360,6 +371,22 @@ def _log_generation_acceptance() -> None:
             )
         except Exception as exc:
             print(f"⚠️ Slack notify skipped: {exc}")
+
+
+def _notify_llm_circuit_if_open(summary_path, stage: str) -> None:
+    try:
+        summary = _read_json_file(summary_path)
+        if not isinstance(summary, dict) or not summary.get("llm_circuit_open"):
+            return
+        accepted = summary.get("final_accepted", summary.get("accepted", 0))
+        needed = summary.get("target_accepted_scripts", _desired_new_count())
+        send_slack_message(
+            "LLM circuit opened at "
+            f"{summary.get('llm_circuit_stage') or stage}: {summary.get('llm_circuit_reason')}. "
+            f"No more LLM calls will be made in this batch. Accepted so far: {accepted}. Needed: {needed}."
+        )
+    except Exception as exc:
+        print(f"⚠️ LLM circuit Slack notify skipped: {exc}")
 
 
 def _download_required(key, path) -> None:

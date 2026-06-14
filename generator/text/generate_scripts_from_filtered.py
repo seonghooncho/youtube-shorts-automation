@@ -41,6 +41,15 @@ from generator.text.script_quality import (
 )
 from generator.text.youtube_metadata import apply_youtube_metadata_style
 from shared.state import ContentRepository
+from shared.llm.circuit_breaker import (
+    LlmCircuitOpen,
+    assert_llm_circuit_closed,
+    is_llm_quota_or_auth_error,
+    is_llm_rate_limit_error,
+    llm_circuit_is_open,
+    llm_circuit_summary,
+    open_llm_circuit,
+)
 from shared.storage import S3Store
 from shared.utils.config import VIABLE_POSTS_FILE, FINAL_METADATA_FILE, FAILED_POSTS_FILE
 
@@ -82,6 +91,7 @@ EXAMPLE_JSON = """
 """.strip()
 
 def call_gpt_generate_script(title, content, post=None, regenerate_reason=None):
+    assert_llm_circuit_closed("script_generation")
     source = build_source_profile(post or {"title": title, "content": content})
     performance_context = _performance_context()
     target_min_chars, target_max_chars = _script_target_window()
@@ -198,7 +208,19 @@ def _script_target_window() -> tuple[int, int]:
 
 
 def _max_llm_drafts_per_source() -> int:
-    return max(1, _int_env("SCRIPT_MAX_LLM_DRAFTS_PER_SOURCE", 2))
+    return max(1, _int_env("SCRIPT_MAX_LLM_DRAFTS_PER_SOURCE", 1))
+
+
+def _target_accepted_scripts() -> int:
+    return max(1, _int_env("TARGET_ACCEPTED_SCRIPTS", 2))
+
+
+def _stop_after_accepted_target() -> bool:
+    return _truthy_env("SCRIPT_STOP_AFTER_ACCEPTED_TARGET", "1")
+
+
+def _allow_llm_rewrite_on_narrative_failure() -> bool:
+    return _truthy_env("SCRIPT_ALLOW_LLM_REWRITE_ON_NARRATIVE_FAILURE", "0")
 
 
 def _float_env(name: str, default: float) -> float:
@@ -556,13 +578,21 @@ def _synthetic_sources_allowed() -> bool:
     return _truthy_env("SCRIPT_ALLOW_SYNTHETIC_SOURCES") or _truthy_env("ALLOW_SYNTHETIC_SOURCES")
 
 
-def _truthy_env(name: str) -> bool:
-    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+def _truthy_env(name: str, default: str = "") -> bool:
+    return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _is_llm_quota_error(message: str) -> bool:
     lowered = (message or "").lower()
-    return "insufficient_quota" in lowered or "exceeded your current quota" in lowered or "rate_limit_exceeded" in lowered
+    return (
+        "llm_quota_unavailable" in lowered
+        or "llm_circuit_open" in lowered
+        or "insufficient_quota" in lowered
+        or "exceeded your current quota" in lowered
+        or "rate_limit_exceeded" in lowered
+        or is_llm_quota_or_auth_error(message)
+        or is_llm_rate_limit_error(message)
+    )
 
 
 def _build_local_fallback_metadata(post: Dict[str, Any], reason: str = "") -> Dict[str, Any]:
@@ -1101,7 +1131,13 @@ def _float_value(value: Any, default: float = 0.0) -> float:
 
 def _run_after_local_gate_critic(metadata: Dict[str, Any], post: dict) -> Dict[str, Any]:
     metadata["critic_stage"] = "after_local_gate"
-    critic = critique_script(_source_prompt_for_critic(post), metadata)
+    assert_llm_circuit_closed("script_critic")
+    try:
+        critic = critique_script(_source_prompt_for_critic(post), metadata)
+    except Exception as exc:
+        if is_llm_quota_or_auth_error(exc) or is_llm_rate_limit_error(exc):
+            open_llm_circuit(str(exc), "script_critic")
+        raise
     failure = _critic_hard_failure(critic)
     if failure:
         metadata["critic_attempt_count"] = int(metadata.get("critic_attempt_count") or 0) + 1
@@ -1215,10 +1251,15 @@ def _failure_record(
         "error": error,
         "stage": stage,
     }
+    category = _failure_category(error, stage=stage)
+    record["failure_category"] = category
     if generation_attempt_count is not None:
         record["generation_attempt_count"] = generation_attempt_count
+        record["llm_draft_count"] = generation_attempt_count
     if failure_action:
         record["failure_action"] = failure_action
+    elif category in {"quota_or_auth", "rate_limit"}:
+        record["failure_action"] = "circuit_breaker"
     telemetry = dict(generation_telemetry or {}) or _generation_telemetry_from_result(result)
     if telemetry:
         record["generation_telemetry"] = telemetry
@@ -1236,7 +1277,63 @@ def _failure_record(
         ):
             if key in metadata:
                 record[key] = metadata[key]
+        record["repair_attempt_count"] = int(bool(metadata.get("repair_only_retry_attempted"))) + int(bool(metadata.get("repair_actions")))
+        record["repair_actions"] = list(metadata.get("repair_actions") or [])[:12]
+        record["final_gate_errors"] = _gate_errors_from_message(error)
+    else:
+        record["repair_attempt_count"] = 0
+        record["repair_actions"] = []
+        record["final_gate_errors"] = _gate_errors_from_message(error)
     return record
+
+
+def _failure_category(error: str, *, stage: str = "") -> str:
+    lowered = str(error or "").lower()
+    if any(term in lowered for term in ("insufficient_quota", "quota", "invalid_api_key", "api key", "auth", "permission", "llm_circuit_open")):
+        return "quota_or_auth"
+    if "rate_limit" in lowered or "rate limit" in lowered or "429" in lowered:
+        return "rate_limit"
+    if stage == "source_preflight" or any(term in lowered for term in ("source_too_thin", "source_truncated", "source_marketability_reject")):
+        return "source_unsuitable"
+    if "native_viewer_critic_failed" in lowered:
+        return "critic_failed"
+    if "batch_diversity_failed" in lowered:
+        return "diversity_reject"
+    if any(term in lowered for term in ("script가 너무 짧", "script_too_short", "length_repair")):
+        return "length_repair_failed"
+    if any(term in lowered for term in ("schema", "validation", "output_parsed", "token", "json", "required", "missing key")):
+        return "schema_or_token"
+    metadata_terms = (
+        "title_quality",
+        "opening_visual_query",
+        "first_caption_hook",
+        "caption_chunks",
+        "missing_script_fingerprint",
+        "weak_retention_angle",
+        "weak_viewer_question",
+        "missing_first_frame_text",
+        "first_frame_text_too_long",
+        "missing_concrete_receipt_detail",
+    )
+    if any(term in lowered for term in metadata_terms):
+        return "metadata_repair_failed"
+    if any(term in lowered for term in ("weak_market_hook", "generic_reusable_line", "abstract_language_overload", "missing_concrete_details", "low_source_overlap")):
+        return "narrative_weak"
+    return "metadata_repair_failed" if "content_gate_failed" in lowered else "narrative_weak"
+
+
+def _gate_errors_from_message(error: str) -> list[str]:
+    text = str(error or "")
+    matches = re.findall(r"(?:content_gate_failed:[^:]+:)?([a-z][a-z0-9_]*(?::[a-z][a-z0-9_]*)?)", text)
+    ignored = {"post", "error", "failed", "script_generation", "source_preflight"}
+    errors = []
+    for match in matches:
+        code = match.strip(":")
+        if code in ignored or len(code) < 4:
+            continue
+        if code not in errors:
+            errors.append(code)
+    return errors[:10]
 
 
 def _load_previous_accepted_metadata(limit: int = 50) -> list[Dict[str, Any]]:
@@ -1284,6 +1381,9 @@ def generate_scripts_from_filtered():
     previous_history = _load_previous_accepted_metadata()
 
     for idx, post in enumerate(posts):
+        if _stop_after_accepted_target() and len(metadata_list) >= _target_accepted_scripts():
+            print(f"✅ target accepted scripts reached ({len(metadata_list)}/{_target_accepted_scripts()}); stopping script generation")
+            break
         title = post.get("title", "")
         content = post.get("content", "")
         origin_id = post.get("id", None)
@@ -1292,6 +1392,20 @@ def generate_scripts_from_filtered():
         prior_critic_attempt_count = 0
         prior_critic_failed_count = 0
         max_retries = _max_llm_drafts_per_source() - 1
+        if llm_circuit_is_open():
+            failed_items.append(
+                _failure_record(
+                    idx=idx,
+                    origin_id=origin_id,
+                    title=title,
+                    error=llm_circuit_summary().get("llm_circuit_reason") or "llm_circuit_open",
+                    stage="script_generation",
+                    generation_attempt_count=0,
+                    failure_action="circuit_breaker",
+                )
+            )
+            print(f"🚫 LLM circuit open; skipping post {idx} without LLM call")
+            continue
         preflight_error = _source_preflight_error(post)
         if preflight_error:
             failed_items.append(_failure_record(idx=idx, origin_id=origin_id, title=title, error=preflight_error, stage="source_preflight"))
@@ -1361,6 +1475,8 @@ def generate_scripts_from_filtered():
                 if metadata and metadata.get("critic_passed") is False:
                     prior_critic_attempt_count += int(metadata.get("critic_attempt_count") or 0)
                     prior_critic_failed_count += 1
+                if _is_llm_quota_error(msg):
+                    open_llm_circuit(msg, "script_generation")
                 if _is_llm_quota_error(msg) and _local_fallback_enabled():
                     llm_unavailable_reason = msg
                     try:
@@ -1372,7 +1488,26 @@ def generate_scripts_from_filtered():
                         failed_items.append(_failure_record(idx=idx, origin_id=origin_id, title=title, error=str(fallback_error), stage="script_generation", result=result, metadata=metadata, generation_telemetry=generation_error_telemetry))
                         print(f"🚫 로컬 fallback 실패 (post {idx}): {fallback_error}")
                         break
+                if _is_llm_quota_error(msg):
+                    failed_items.append(
+                        _failure_record(
+                            idx=idx,
+                            origin_id=origin_id,
+                            title=title,
+                            error=msg,
+                            stage="script_generation",
+                            generation_attempt_count=try_count + 1,
+                            failure_action="circuit_breaker",
+                            result=result,
+                            metadata=metadata,
+                            generation_telemetry=generation_error_telemetry,
+                        )
+                    )
+                    print(f"🚫 LLM circuit opened during script generation (post {idx}): {msg}")
+                    break
                 failure_action = classify_failure(msg, script_chars=char_count, repeated=try_count >= max_retries)
+                if failure_action == FailureAction.LLM_REWRITE_ONCE and not _allow_llm_rewrite_on_narrative_failure():
+                    failure_action = FailureAction.SKIP_SOURCE
                 if failure_action == FailureAction.REPAIR_ONLY and metadata is not None:
                     retry_metadata, retry_error = _repair_only_retry(metadata, post, metadata_list, previous_history)
                     if retry_metadata is not None:
@@ -1483,9 +1618,17 @@ def _generation_summary(posts: list[dict], accepted: list[dict], failed: list[di
     source_scorecard_skipped = int(source_filter_summary.get("source_scorecard_skipped_by_prerank") or 0)
     critic_budget = _int_env("SCRIPT_CRITIC_MAX_OUTPUT_TOKENS", 1400)
     failure_codes = _failure_code_counts([str(item.get("error") or "") for item in failed])
+    llm_calls_by_stage = {
+        "source_scorecard": source_scorecard_calls,
+        "script_draft": generation_telemetry["structured_attempts"],
+        "json_fallback": generation_telemetry["json_fallback_attempts"],
+        "critic": critic_attempted,
+    }
     summary = {
         "sources_considered": len(posts),
         "sources_skipped_preflight": sum(1 for item in failed if item.get("stage") == "source_preflight"),
+        "target_accepted_scripts": _target_accepted_scripts(),
+        "stopped_after_target": _stop_after_accepted_target() and len(accepted) >= _target_accepted_scripts(),
         "llm_drafts": sum(int(item.get("llm_draft_count") or item.get("generation_attempt_count") or 0) for item in accepted)
         + sum(int(item.get("generation_attempt_count") or 0) for item in failed),
         "llm_rewrites": sum(max(0, int(item.get("generation_attempt_count") or 0) - 1) for item in accepted)
@@ -1505,6 +1648,10 @@ def _generation_summary(posts: list[dict], accepted: list[dict], failed: list[di
         "json_fallback_failures": generation_telemetry["json_fallback_failures"],
         "source_scorecard_calls": source_scorecard_calls,
         "source_scorecard_skipped_by_prerank": source_scorecard_skipped,
+        "source_scorecard_skipped_after_quota": int(source_filter_summary.get("source_scorecard_skipped_after_quota") or 0),
+        "local_feasibility_rejected": int(source_filter_summary.get("local_feasibility_rejected") or 0),
+        "source_filter_stopped_after_target": bool(source_filter_summary.get("source_filter_stopped_after_target")),
+        "llm_calls_by_stage": llm_calls_by_stage,
         "llm_call_estimate_total": (
             generation_telemetry["structured_attempts"]
             + generation_telemetry["json_fallback_attempts"]
@@ -1519,12 +1666,22 @@ def _generation_summary(posts: list[dict], accepted: list[dict], failed: list[di
         "final_accepted": len(accepted),
         "final_rejected": len(failed),
         "top_failure_codes": failure_codes[:10],
+        "failure_category_counts": _failure_category_counts(failed),
+        "top_gate_errors": _top_gate_errors(failed),
+        **llm_circuit_summary(),
     }
+    summary["cost_waste_warning"] = bool(summary["final_accepted"] == 0 and summary["llm_call_estimate_total"] > 0)
     summary["operator_recommendation"] = _operator_recommendation(summary)
     return summary
 
 
 def _operator_recommendation(summary: dict) -> str:
+    if summary.get("llm_circuit_open"):
+        return (
+            "CHECK_LLM_CIRCUIT: "
+            f"{summary.get('llm_circuit_stage') or 'unknown'} opened circuit: "
+            f"{str(summary.get('llm_circuit_reason') or '')[:160]}"
+        )
     final_accepted = int(summary.get("final_accepted") or 0)
     sources_considered = int(summary.get("sources_considered") or 0)
     source_scorecard_calls = int(summary.get("source_scorecard_calls") or 0)
@@ -1604,6 +1761,25 @@ def _failure_code_counts(errors: list[str]) -> list[dict]:
     return [{"code": code, "count": count} for code, count in sorted(counts.items(), key=lambda item: item[1], reverse=True)]
 
 
+def _failure_category_counts(failed: list[dict]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for item in failed:
+        category = str(item.get("failure_category") or _failure_category(str(item.get("error") or ""), stage=str(item.get("stage") or "")))
+        counts[category] = counts.get(category, 0) + 1
+    return dict(sorted(counts.items(), key=lambda item: item[1], reverse=True))
+
+
+def _top_gate_errors(failed: list[dict]) -> list[dict]:
+    counts: dict[str, int] = {}
+    for item in failed:
+        for error in item.get("final_gate_errors") or _gate_errors_from_message(str(item.get("error") or "")):
+            counts[str(error)] = counts.get(str(error), 0) + 1
+    return [
+        {"code": code, "count": count}
+        for code, count in sorted(counts.items(), key=lambda item: item[1], reverse=True)[:10]
+    ]
+
+
 # 게시물 id로 재생성하는 함수(tts생성시 사용) — 이름/기능 변경 금지
 def regenerate_post_by_id(post_id, regenerate_reason=None, max_retries=2):
     """
@@ -1637,6 +1813,9 @@ def regenerate_post_by_id(post_id, regenerate_reason=None, max_retries=2):
         return None
 
     while try_count <= max_retries:
+        if llm_circuit_is_open():
+            print(f"🚫 LLM circuit open; 재생성 스킵 (postId={post_id})")
+            return None
         result = None
         metadata = None
         try:
@@ -1678,6 +1857,8 @@ def regenerate_post_by_id(post_id, regenerate_reason=None, max_retries=2):
                     f"{json.dumps(result.model_dump(), ensure_ascii=False, indent=2)}\n"
                 )
             msg = str(e)
+            if _is_llm_quota_error(msg):
+                open_llm_circuit(msg, "script_regenerate")
             if _is_llm_quota_error(msg) and _local_fallback_enabled():
                 try:
                     metadata = _build_local_fallback_metadata(target_post, msg)
@@ -1686,7 +1867,12 @@ def regenerate_post_by_id(post_id, regenerate_reason=None, max_retries=2):
                 except Exception as fallback_error:
                     print(f"🚫 로컬 fallback 재생성 실패 (postId={post_id}): {fallback_error}")
                     return None
+            if _is_llm_quota_error(msg):
+                print(f"🚫 LLM circuit opened during regeneration (postId={post_id}): {msg}")
+                return None
             failure_action = classify_failure(msg, script_chars=_script_chars_from_result(result), repeated=try_count >= max_retries)
+            if failure_action == FailureAction.LLM_REWRITE_ONCE and not _allow_llm_rewrite_on_narrative_failure():
+                failure_action = FailureAction.SKIP_SOURCE
             if failure_action == FailureAction.REPAIR_ONLY and metadata is not None:
                 retry_metadata, retry_error = _repair_only_retry(metadata, target_post, scratch_metadata, previous_history, append=False)
                 if retry_metadata is not None:

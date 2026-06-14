@@ -106,9 +106,13 @@ def test_end_to_end_cost_budget_controls(monkeypatch, tmp_path):
         )
         return draft
 
-    monkeypatch.setenv("SOURCE_LLM_EVAL_LIMIT", "8")
+    monkeypatch.delenv("SOURCE_LLM_EVAL_LIMIT", raising=False)
+    monkeypatch.setenv("SOURCE_LLM_EVAL_LIMIT_DEFAULT", "4")
+    monkeypatch.setenv("SOURCE_LLM_EVAL_LIMIT_MAX", "6")
+    monkeypatch.setenv("TARGET_ACCEPTED_SCRIPTS", "2")
     monkeypatch.setenv("SOURCE_LOCAL_PRERANK_ENABLED", "1")
-    monkeypatch.setenv("SCRIPT_MAX_LLM_DRAFTS_PER_SOURCE", "2")
+    monkeypatch.setenv("SCRIPT_MAX_LLM_DRAFTS_PER_SOURCE", "1")
+    monkeypatch.setenv("SCRIPT_STOP_AFTER_ACCEPTED_TARGET", "1")
     monkeypatch.setenv("SCRIPT_ENABLE_JSON_FALLBACK", "0")
     monkeypatch.setenv("SCRIPT_CRITIC_ENABLED", "1")
     monkeypatch.setenv("SCRIPT_CRITIC_STAGE", "after_local_gate")
@@ -132,16 +136,19 @@ def test_end_to_end_cost_budget_controls(monkeypatch, tmp_path):
     generate_scripts_from_filtered()
 
     summary = json.loads((tmp_path / "generation_summary.json").read_text(encoding="utf-8"))
-    assert calls["source_scorecard"] <= 8
-    assert calls["script"] <= len(viable) * 2
+    assert calls["source_scorecard"] <= 4
+    assert calls["script"] <= 2
     assert summary["json_fallback_attempts"] == 0
     assert calls["critic"] == 0
     assert summary["critic_skipped"] > 0
     assert summary["critic_skipped"] == summary["final_accepted"]
-    assert summary["source_scorecard_calls"] == 8
-    assert summary["source_scorecard_skipped_by_prerank"] == 6
-    assert summary["final_accepted"] > 0
+    assert summary["source_scorecard_calls"] == 2
+    assert summary["source_scorecard_skipped_by_prerank"] == 10
+    assert summary["final_accepted"] == 2
     assert summary["final_rejected"] == 0
+    assert summary["target_accepted_scripts"] == 2
+    assert summary["stopped_after_target"] is True
+    assert summary["llm_calls_by_stage"]["source_scorecard"] == 2
     for key in (
         "llm_call_estimate_total",
         "estimated_output_token_budget_total",

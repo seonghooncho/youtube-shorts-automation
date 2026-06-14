@@ -171,6 +171,8 @@ def test_repair_only_failure_does_not_call_llm_again(monkeypatch, tmp_path):
 
 def test_weak_hook_triggers_at_most_one_rewrite(monkeypatch, tmp_path):
     monkeypatch.setenv("SCRIPT_CRITIC_ENABLED", "0")
+    monkeypatch.setenv("SCRIPT_MAX_LLM_DRAFTS_PER_SOURCE", "2")
+    monkeypatch.setenv("SCRIPT_ALLOW_LLM_REWRITE_ON_NARRATIVE_FAILURE", "1")
 
     def always_weak(*_args, **_kwargs):
         raise ValueError("post 0 오류: ❌ 품질검증 실패: weak_market_hook: first sentence is weak")
@@ -182,6 +184,24 @@ def test_weak_hook_triggers_at_most_one_rewrite(monkeypatch, tmp_path):
     assert calls["llm"] == 2
     assert accepted == []
     assert rejected[0]["failure_action"] == "skip_source"
+
+
+def test_narrative_failure_does_not_rewrite_without_opt_in(monkeypatch, tmp_path):
+    monkeypatch.setenv("SCRIPT_CRITIC_ENABLED", "0")
+    monkeypatch.setenv("SCRIPT_MAX_LLM_DRAFTS_PER_SOURCE", "2")
+    monkeypatch.delenv("SCRIPT_ALLOW_LLM_REWRITE_ON_NARRATIVE_FAILURE", raising=False)
+
+    def always_weak(*_args, **_kwargs):
+        raise ValueError("post 0 오류: ❌ 품질검증 실패: weak_market_hook: first sentence is weak")
+
+    monkeypatch.setattr("generator.text.generate_scripts_from_filtered.validate_and_parse_metadata", always_weak)
+
+    calls, accepted, rejected = _run_generation(monkeypatch, tmp_path, [_draft(), _draft()])
+
+    assert calls["llm"] == 1
+    assert accepted == []
+    assert rejected[0]["failure_action"] == "skip_source"
+    assert rejected[0]["llm_draft_count"] == 1
 
 
 def test_fatal_source_skips_before_llm(monkeypatch, tmp_path):
@@ -346,6 +366,8 @@ def test_critic_always_forces_policy(monkeypatch):
 def test_critic_failure_causes_at_most_one_rewrite(monkeypatch, tmp_path):
     monkeypatch.setenv("SCRIPT_CRITIC_ENABLED", "1")
     monkeypatch.setenv("SCRIPT_CRITIC_STAGE", "after_local_gate")
+    monkeypatch.setenv("SCRIPT_MAX_LLM_DRAFTS_PER_SOURCE", "2")
+    monkeypatch.setenv("SCRIPT_ALLOW_LLM_REWRITE_ON_NARRATIVE_FAILURE", "1")
 
     def critic(call_count):
         return _failing_critic() if call_count == 1 else _passing_critic()
@@ -442,6 +464,49 @@ def test_two_failed_sources_keep_separate_exception_telemetry(monkeypatch, tmp_p
     assert rejected[1]["generation_telemetry"]["estimated_output_token_budget_total"] == 3800
     assert summary["structured_attempts"] == 3
     assert summary["estimated_output_token_budget_total"] >= 5400
+
+
+def test_script_quota_opens_circuit_and_skips_remaining_sources(monkeypatch, tmp_path):
+    viable = tmp_path / "viable_posts.json"
+    final = tmp_path / "final_metadata.json"
+    failed = tmp_path / "failed_posts.json"
+    viable.write_text(json.dumps([_post() | {"id": "quota-one"}, _post() | {"id": "quota-two"}]), encoding="utf-8")
+    calls = {"llm": 0, "critic": 0}
+
+    def quota_failure(*_args, **_kwargs):
+        calls["llm"] += 1
+        raise GenerateScriptError(
+            "Error code: 429 - insufficient_quota",
+            {
+                "structured_attempts": 1,
+                "json_fallback_attempts": 0,
+                "structured_failures": 1,
+                "json_fallback_failures": 0,
+                "estimated_output_token_budget_total": 1600,
+            },
+        )
+
+    monkeypatch.setenv("SCRIPT_MAX_LLM_DRAFTS_PER_SOURCE", "2")
+    monkeypatch.setenv("SCRIPT_ALLOW_LLM_REWRITE_ON_NARRATIVE_FAILURE", "1")
+    monkeypatch.setattr("generator.text.generate_scripts_from_filtered.VIABLE_POSTS_FILE", viable)
+    monkeypatch.setattr("generator.text.generate_scripts_from_filtered.FINAL_METADATA_FILE", final)
+    monkeypatch.setattr("generator.text.generate_scripts_from_filtered.FAILED_POSTS_FILE", failed)
+    monkeypatch.setattr("generator.text.generate_scripts_from_filtered._load_previous_accepted_metadata", lambda: [])
+    monkeypatch.setattr("generator.text.generate_scripts_from_filtered.call_gpt_generate_script", quota_failure)
+    monkeypatch.setattr("generator.text.generate_scripts_from_filtered.critique_script", lambda *_a, **_k: calls.__setitem__("critic", calls["critic"] + 1))
+
+    generate_scripts_from_filtered()
+
+    rejected = json.loads(failed.read_text(encoding="utf-8"))
+    summary = json.loads((tmp_path / "generation_summary.json").read_text(encoding="utf-8"))
+    assert calls["llm"] == 1
+    assert calls["critic"] == 0
+    assert [item["id"] for item in rejected] == ["quota-one", "quota-two"]
+    assert rejected[0]["failure_action"] == "circuit_breaker"
+    assert rejected[1]["generation_attempt_count"] == 0
+    assert summary["llm_circuit_open"] is True
+    assert summary["failure_category_counts"]["quota_or_auth"] == 2
+    assert summary["cost_waste_warning"] is True
 
 
 def test_dry_run_summary_prints_key_metrics(monkeypatch, tmp_path, capsys):

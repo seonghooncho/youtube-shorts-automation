@@ -12,6 +12,7 @@ from generator.text.filter_viable_posts import (
     _text_verbosity,
     compact_source_for_filter,
     filter_viable_posts,
+    local_source_feasibility,
     local_source_priority,
     source_acceptance_score,
 )
@@ -202,6 +203,7 @@ def test_filter_prerank_caps_llm_source_scorecard_calls(monkeypatch, tmp_path):
         return _strong_scorecard()
 
     monkeypatch.setenv("SOURCE_LLM_EVAL_LIMIT", "8")
+    monkeypatch.setenv("TARGET_ACCEPTED_SCRIPTS", "20")
     monkeypatch.setenv("SOURCE_LOCAL_PRERANK_ENABLED", "1")
     monkeypatch.setattr("generator.text.filter_viable_posts.RAW_POSTS_FILE", raw_path)
     monkeypatch.setattr("generator.text.filter_viable_posts.VIABLE_POSTS_FILE", viable_path)
@@ -213,12 +215,13 @@ def test_filter_prerank_caps_llm_source_scorecard_calls(monkeypatch, tmp_path):
     summary = json.loads((tmp_path / "source_filter_summary.json").read_text(encoding="utf-8"))
     assert calls["scorecard"] == 8
     assert summary["source_scorecard_calls"] == 8
-    assert summary["source_scorecard_skipped_by_prerank"] == 6
+    assert summary["source_scorecard_skipped_by_prerank"] == 2
+    assert summary["local_feasibility_rejected"] == 4
     assert summary["local_priority_cutoff_score"] > 0
     assert len(summary["local_priority_top_scores"]) == 10
     assert summary["local_priority_min_evaluated"] == summary["local_priority_cutoff_score"]
     assert summary["prerank_skipped_examples"]
-    assert summary["source_rejection_reason_counts"]["below_local_prerank_cutoff"] == 6
+    assert summary["source_rejection_reason_counts"]["below_local_prerank_cutoff"] == 2
     assert summary["accepted_source_archetypes"]["roommate_money"] == 8
     assert len(summary["accepted_examples"]) == 5
     assert summary["accepted_examples"][0]["id"]
@@ -238,6 +241,7 @@ def test_filter_stops_scorecard_calls_after_quota(monkeypatch, tmp_path):
         raise RuntimeError("llm_quota_unavailable: insufficient_quota")
 
     monkeypatch.setenv("SOURCE_LLM_EVAL_LIMIT", "6")
+    monkeypatch.setenv("TARGET_ACCEPTED_SCRIPTS", "20")
     monkeypatch.setenv("SOURCE_LOCAL_PRERANK_ENABLED", "1")
     monkeypatch.delenv("FILTER_LOCAL_FALLBACK_ENABLED", raising=False)
     monkeypatch.setattr("generator.text.filter_viable_posts.RAW_POSTS_FILE", raw_path)
@@ -254,6 +258,102 @@ def test_filter_stops_scorecard_calls_after_quota(monkeypatch, tmp_path):
     assert summary["source_scorecard_calls"] == 1
     assert summary["source_scorecard_skipped_after_quota"] == 5
     assert "llm_quota_unavailable" in summary["llm_unavailable_reason"]
+    assert summary["llm_circuit_open"] is True
+
+
+def test_filter_target_two_stops_after_two_accepted_sources(monkeypatch, tmp_path):
+    raw_path = tmp_path / "raw_posts.json"
+    viable_path = tmp_path / "viable_posts.json"
+    raw_path.write_text(json.dumps([_raw_post(i, strong=True) for i in range(10)]), encoding="utf-8")
+    calls = {"scorecard": 0}
+
+    def fake_scorecard(*_args, **_kwargs):
+        calls["scorecard"] += 1
+        return _strong_scorecard()
+
+    monkeypatch.delenv("SOURCE_LLM_EVAL_LIMIT", raising=False)
+    monkeypatch.setenv("SOURCE_LLM_EVAL_LIMIT_DEFAULT", "4")
+    monkeypatch.setenv("SOURCE_LLM_EVAL_LIMIT_MAX", "6")
+    monkeypatch.setenv("TARGET_ACCEPTED_SCRIPTS", "2")
+    monkeypatch.setenv("SOURCE_LOCAL_PRERANK_ENABLED", "1")
+    monkeypatch.setattr("generator.text.filter_viable_posts.RAW_POSTS_FILE", raw_path)
+    monkeypatch.setattr("generator.text.filter_viable_posts.VIABLE_POSTS_FILE", viable_path)
+    monkeypatch.setattr("generator.text.filter_viable_posts._get_client", lambda: object())
+    monkeypatch.setattr("generator.text.filter_viable_posts._ask_source_scorecard", fake_scorecard)
+
+    filter_viable_posts()
+
+    summary = json.loads((tmp_path / "source_filter_summary.json").read_text(encoding="utf-8"))
+    viable = json.loads(viable_path.read_text(encoding="utf-8"))
+    assert calls["scorecard"] == 2
+    assert len(viable) == 2
+    assert summary["source_llm_eval_limit"] == 4
+    assert summary["source_filter_stopped_after_target"] is True
+
+
+def test_local_feasibility_rejects_sources_before_llm(monkeypatch, tmp_path):
+    raw_path = tmp_path / "raw_posts.json"
+    viable_path = tmp_path / "viable_posts.json"
+    weak = _raw_post(1, strong=False)
+    weak["content"] = " ".join(["We had a long vague disagreement at home without any specific object."] * 14)
+    weak["content_char_count"] = len(weak["content"])
+    weak["content_word_count"] = len(weak["content"].split())
+    raw_path.write_text(json.dumps([weak, _raw_post(2, strong=True)]), encoding="utf-8")
+    calls = {"scorecard": 0}
+
+    def fake_scorecard(*_args, **_kwargs):
+        calls["scorecard"] += 1
+        return _strong_scorecard()
+
+    monkeypatch.setenv("TARGET_ACCEPTED_SCRIPTS", "20")
+    monkeypatch.setenv("SOURCE_LLM_EVAL_LIMIT", "8")
+    monkeypatch.setattr("generator.text.filter_viable_posts.RAW_POSTS_FILE", raw_path)
+    monkeypatch.setattr("generator.text.filter_viable_posts.VIABLE_POSTS_FILE", viable_path)
+    monkeypatch.setattr("generator.text.filter_viable_posts._get_client", lambda: object())
+    monkeypatch.setattr("generator.text.filter_viable_posts._ask_source_scorecard", fake_scorecard)
+
+    filter_viable_posts()
+
+    summary = json.loads((tmp_path / "source_filter_summary.json").read_text(encoding="utf-8"))
+    assert calls["scorecard"] == 1
+    assert summary["local_feasibility_rejected"] == 1
+    assert summary["local_feasibility_rejected_examples"][0]["id"] == weak["id"]
+
+
+def test_local_feasibility_accepts_concrete_receipt_source():
+    feasibility = local_source_feasibility(_raw_post(1, strong=True))
+
+    assert feasibility["likely_script_gate_fit"] is True
+    assert feasibility["can_make_title"] is True
+    assert feasibility["can_make_opening_visual_query"] is True
+    assert feasibility["has_receipt_or_concrete_detail"] is True
+
+
+def test_generation_preflight_only_makes_zero_llm_calls(monkeypatch, tmp_path, capsys):
+    raw_path = tmp_path / "raw_posts.json"
+    viable_path = tmp_path / "viable_posts.json"
+    raw_path.write_text(json.dumps([_raw_post(i, strong=True) for i in range(3)]), encoding="utf-8")
+    calls = {"scorecard": 0}
+
+    def fake_scorecard(*_args, **_kwargs):
+        calls["scorecard"] += 1
+        return _strong_scorecard()
+
+    monkeypatch.setenv("GENERATION_PREFLIGHT_ONLY", "1")
+    monkeypatch.setenv("TARGET_ACCEPTED_SCRIPTS", "2")
+    monkeypatch.setattr("generator.text.filter_viable_posts.RAW_POSTS_FILE", raw_path)
+    monkeypatch.setattr("generator.text.filter_viable_posts.VIABLE_POSTS_FILE", viable_path)
+    monkeypatch.setattr("generator.text.filter_viable_posts._get_client", lambda: object())
+    monkeypatch.setattr("generator.text.filter_viable_posts._ask_source_scorecard", fake_scorecard)
+
+    filter_viable_posts()
+
+    summary = json.loads((tmp_path / "source_preflight_summary.json").read_text(encoding="utf-8"))
+    assert calls["scorecard"] == 0
+    assert json.loads(viable_path.read_text(encoding="utf-8")) == []
+    assert summary["preflight_only"] is True
+    assert summary["expected_source_scorecard_calls"] == 3
+    assert "PREFLIGHT SUMMARY" in capsys.readouterr().out
 
 
 def test_filter_compacts_long_source_and_preserves_receipts_and_question():
@@ -289,6 +389,7 @@ def test_filter_summary_records_compaction_counts(monkeypatch, tmp_path):
     monkeypatch.setenv("FILTER_SOURCE_MAX_CHARS", "900")
     monkeypatch.setenv("FILTER_SOURCE_LONG_POST_MAX_CHARS", "800")
     monkeypatch.setenv("SOURCE_LLM_EVAL_LIMIT", "8")
+    monkeypatch.setenv("TARGET_ACCEPTED_SCRIPTS", "20")
     monkeypatch.setattr("generator.text.filter_viable_posts.RAW_POSTS_FILE", raw_path)
     monkeypatch.setattr("generator.text.filter_viable_posts.VIABLE_POSTS_FILE", viable_path)
     monkeypatch.setattr("generator.text.filter_viable_posts._get_client", lambda: object())
@@ -314,6 +415,7 @@ def test_local_priority_sorts_strong_sources_first(monkeypatch, tmp_path):
         return _strong_scorecard()
 
     monkeypatch.setenv("SOURCE_LLM_EVAL_LIMIT", "2")
+    monkeypatch.setenv("TARGET_ACCEPTED_SCRIPTS", "20")
     monkeypatch.setenv("SOURCE_LOCAL_PRERANK_ENABLED", "1")
     monkeypatch.setattr("generator.text.filter_viable_posts.RAW_POSTS_FILE", raw_path)
     monkeypatch.setattr("generator.text.filter_viable_posts.VIABLE_POSTS_FILE", viable_path)
@@ -339,6 +441,7 @@ def test_thin_post_rejected_before_source_scorecard(monkeypatch, tmp_path):
         return _strong_scorecard()
 
     monkeypatch.setenv("SOURCE_LLM_EVAL_LIMIT", "8")
+    monkeypatch.setenv("TARGET_ACCEPTED_SCRIPTS", "20")
     monkeypatch.setattr("generator.text.filter_viable_posts.RAW_POSTS_FILE", raw_path)
     monkeypatch.setattr("generator.text.filter_viable_posts.VIABLE_POSTS_FILE", viable_path)
     monkeypatch.setattr("generator.text.filter_viable_posts._get_client", lambda: object())
