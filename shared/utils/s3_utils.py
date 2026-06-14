@@ -15,12 +15,14 @@ load_dotenv()
 
 s3_store = S3Store()
 
-def upload_to_s3(file_path: str, s3_key: str):
+def upload_to_s3(file_path: str, s3_key: str) -> bool:
     try:
         s3_store.upload_file(file_path, s3_key)
         print(f"✅ Uploaded to S3: {s3_key}")
+        return True
     except Exception as e:
         print(f"🚨 S3 업로드 실패: {e}")
+        return False
 
 def download_from_s3(s3_key: str, file_path: str) -> bool:
     """

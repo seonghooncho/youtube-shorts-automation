@@ -108,6 +108,7 @@ def test_publisher_uses_ssm_upload_threshold(monkeypatch, tmp_path):
 def test_publisher_blocks_internal_upload_metadata(monkeypatch):
     monkeypatch.setenv("AWS_DEFAULT_REGION", "ap-northeast-2")
     publisher = _load_module("publisher_metadata_safety_test_module", "infra/terraform/lambda/publisher.py")
+    monkeypatch.setattr(publisher, "_setting", lambda name, default: default)
 
     reason = publisher._metadata_safety_error(
         {

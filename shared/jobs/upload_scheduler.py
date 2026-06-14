@@ -114,6 +114,18 @@ def upload_batch_pipeline():
             platform_ids["tiktok"] = upload_tiktok(str(target_local_path), f"{title} #shorts")
 
         if not platform_ids:
+            _mark_upload_skip(target, "UPLOAD_SKIPPED")
+            target["upload_skip_reason"] = "no_enabled_upload_platform"
+            target["upload_skipped_at"] = int(time.time())
+            _move_skipped_items_out_of_active(metadata_list, [target], metadata_key)
+            _mark_repo_status(
+                target,
+                "UPLOAD_SKIPPED",
+                {
+                    "upload_status": "UPLOAD_SKIPPED",
+                    "upload_skip_reason": "no_enabled_upload_platform",
+                },
+            )
             send_slack_message(f"✅ 활성화된 업로드 플랫폼이 없어 스킵: {title}")
             return
 
@@ -131,9 +143,9 @@ def upload_batch_pipeline():
         with open(FINAL_METADATA_FILE, "w", encoding="utf-8") as f:
             json.dump(metadata_list, f, ensure_ascii=False, indent=2)
 
-        upload_to_s3(str(FINAL_METADATA_FILE), metadata_key)
+        _upload_to_s3_required(str(FINAL_METADATA_FILE), metadata_key)
         if metadata_key != LEGACY_METADATA_KEY:
-            upload_to_s3(str(FINAL_METADATA_FILE), LEGACY_METADATA_KEY)
+            _upload_to_s3_required(str(FINAL_METADATA_FILE), LEGACY_METADATA_KEY)
         ContentRepository().mark_status(
             target["id"],
             "UPLOADED",
@@ -207,14 +219,14 @@ def _move_skipped_items_out_of_active(metadata_list: list[dict], skipped_items: 
     skipped_ids = {str(item.get("id")) for item in skipped_items if item.get("id") is not None}
     active = [item for item in metadata_list if str(item.get("id")) not in skipped_ids]
     _write_json(FINAL_METADATA_FILE, active)
-    upload_to_s3(str(FINAL_METADATA_FILE), metadata_key)
+    _upload_to_s3_required(str(FINAL_METADATA_FILE), metadata_key)
 
     rejected_path = get_temp_file("rejected_publish_metadata.json")
     rejected_path.parent.mkdir(parents=True, exist_ok=True)
     rejected_items = _load_rejected_metadata(rejected_path)
     rejected_items.extend(skipped_items)
     _write_json(rejected_path, rejected_items)
-    upload_to_s3(str(rejected_path), REJECTED_METADATA_KEY)
+    _upload_to_s3_required(str(rejected_path), REJECTED_METADATA_KEY)
     return active
 
 
@@ -233,6 +245,12 @@ def _load_rejected_metadata(path) -> list[dict]:
 def _write_json(path, data) -> None:
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def _upload_to_s3_required(path: str, key: str) -> None:
+    uploaded = upload_to_s3(path, key)
+    if uploaded is False:
+        raise RuntimeError(f"required_s3_upload_failed:{key}")
 
 
 def _mark_repo_status(item: dict, status: str, attrs: dict) -> None:
