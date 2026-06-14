@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from shared.jobs import upload_scheduler
 
 
@@ -220,6 +222,58 @@ def test_upload_scheduler_skips_missing_video_and_uploads_next_due(monkeypatch, 
     assert [item["id"] for item in storage[upload_scheduler.PUBLISH_METADATA_KEY]] == ["good"]
     assert storage[upload_scheduler.PUBLISH_METADATA_KEY][0]["upload_status"] == "UPLOADED"
     assert storage[upload_scheduler.REJECTED_METADATA_KEY][0]["upload_status"] == "VIDEO_MISSING"
+
+
+def test_upload_scheduler_no_enabled_platforms_is_permanent_skip(monkeypatch, tmp_path):
+    metadata_path = tmp_path / "final_metadata.json"
+    temp_dir = tmp_path / "temp"
+    storage = {
+        upload_scheduler.PUBLISH_METADATA_KEY: [_upload_safe_item("skip-platform")],
+    }
+    repo_updates = []
+    messages = []
+
+    def fake_download(key, path):
+        if key in storage:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(storage[key], f)
+            return True
+        if key == "videos/final/skip-platform.mp4":
+            with open(path, "wb") as f:
+                f.write(b"video")
+            return True
+        return False
+
+    def fake_upload(path, key):
+        storage[key] = json.loads(open(path, encoding="utf-8").read())
+
+    monkeypatch.setenv("TARGET_PLATFORMS", "instagram")
+    monkeypatch.delenv("INSTAGRAM_UPLOAD_ENABLED", raising=False)
+    monkeypatch.setattr(upload_scheduler, "FINAL_METADATA_FILE", metadata_path)
+    monkeypatch.setattr(upload_scheduler, "get_temp_file", lambda name: temp_dir / name)
+    monkeypatch.setattr(upload_scheduler, "download_from_s3", fake_download)
+    monkeypatch.setattr(upload_scheduler, "upload_to_s3", fake_upload)
+    monkeypatch.setattr(upload_scheduler, "upload_youtube", lambda *args: (_ for _ in ()).throw(AssertionError("should not upload")))
+    monkeypatch.setattr(upload_scheduler, "send_slack_message", messages.append)
+    monkeypatch.setattr(upload_scheduler, "clean_uploader_workspace", lambda: None)
+    monkeypatch.setattr(upload_scheduler, "ContentRepository", lambda: type("Repo", (), {"mark_status": lambda *args: repo_updates.append(args)})())
+
+    upload_scheduler.upload_batch_pipeline()
+    upload_scheduler.upload_batch_pipeline()
+
+    assert storage[upload_scheduler.PUBLISH_METADATA_KEY] == []
+    assert len(storage[upload_scheduler.REJECTED_METADATA_KEY]) == 1
+    assert storage[upload_scheduler.REJECTED_METADATA_KEY][0]["upload_status"] == "UPLOAD_SKIPPED"
+    assert storage[upload_scheduler.REJECTED_METADATA_KEY][0]["upload_skip_reason"] == "no_enabled_upload_platform"
+    assert len(repo_updates) == 1
+    assert any("활성화된 업로드 플랫폼" in message for message in messages)
+
+
+def test_required_metadata_upload_failure_raises(monkeypatch):
+    monkeypatch.setattr(upload_scheduler, "upload_to_s3", lambda path, key: False)
+
+    with pytest.raises(RuntimeError, match="required_s3_upload_failed:publish-ready/final_metadata.json"):
+        upload_scheduler._upload_to_s3_required("missing.json", upload_scheduler.PUBLISH_METADATA_KEY)
 
 
 def test_legacy_video_fallback_blocked_in_production(monkeypatch, tmp_path):
