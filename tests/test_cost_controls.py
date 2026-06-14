@@ -202,7 +202,7 @@ def test_token_overhead_counts_near_miss_rewrite(monkeypatch):
     assert summary["actual_token_budget"] == 3200
     assert summary["token_overhead"] == 1600
     assert summary["token_overhead_rate"] == 1
-    assert summary["token_overhead_status"] == "failed"
+    assert summary["token_overhead_status"] == "above_target"
     assert summary["token_overhead_by_stage"]["near_miss_rewrite"] == 1600
     assert summary["operator_recommendation"].startswith("CHECK_TOKEN_OVERHEAD")
 
@@ -224,7 +224,7 @@ def test_token_overhead_counts_json_fallback(monkeypatch):
     assert summary["minimum_once_token_budget"] == 1600
     assert summary["actual_token_budget"] == 3200
     assert summary["token_overhead_by_stage"]["json_fallback"] == 1600
-    assert summary["token_overhead_status"] == "failed"
+    assert summary["token_overhead_status"] == "above_target"
 
 
 def test_token_overhead_counts_same_source_retry_when_telemetry_only_has_last_call(monkeypatch):
@@ -237,7 +237,7 @@ def test_token_overhead_counts_same_source_retry_when_telemetry_only_has_last_ca
     assert summary["actual_token_budget"] == 4800
     assert summary["token_overhead_by_stage"]["same_source_retry"] == 3200
     assert summary["token_overhead_rate"] == 2
-    assert summary["token_overhead_status"] == "failed"
+    assert summary["token_overhead_status"] == "above_target"
 
 
 def test_token_overhead_counts_tts_regenerate_marker(monkeypatch):
@@ -250,24 +250,38 @@ def test_token_overhead_counts_tts_regenerate_marker(monkeypatch):
     assert summary["minimum_once_token_budget"] == 1600
     assert summary["actual_token_budget"] == 3200
     assert summary["token_overhead_by_stage"]["tts_regenerate"] == 1600
-    assert summary["token_overhead_status"] == "failed"
+    assert summary["token_overhead_status"] == "above_target"
 
 
-def test_near_miss_rewrite_budget_allows_only_within_ten_percent(monkeypatch):
-    monkeypatch.setattr(generation_module, "_load_source_filter_summary", lambda: {})
-    monkeypatch.delenv("TOKEN_OVERHEAD_MAX_RATE", raising=False)
-    ten_initial_drafts = [_token_item(id=f"source-{idx}", candidate_bucket="near_miss") for idx in range(10)]
+def test_select_final_candidates_uses_near_miss_backup_without_retry(monkeypatch):
+    monkeypatch.setenv("TARGET_ACCEPTED_SCRIPTS", "2")
+    monkeypatch.setenv("CANDIDATE_BACKUP_ACCEPT_SCORE", "70")
+    accepted = _token_item(id="accepted", candidate_bucket="accepted", candidate_score=82, hard_blockers=[])
+    backup = _token_item(id="backup", candidate_bucket="near_miss", candidate_score=74, hard_blockers=[])
+    weak = _token_item(id="weak", candidate_bucket="near_miss", candidate_score=69, hard_blockers=[])
 
-    assert generation_module._can_spend_retry_tokens(ten_initial_drafts, estimated_tokens=1600) is True
+    selected = generation_module._select_final_candidates([weak, backup, accepted])
 
-    ten_initial_drafts.append(_token_item(id="source-rewrite", near_miss_rewrite=True))
+    assert [item["id"] for item in selected] == ["accepted", "backup"]
+    assert selected[1]["selected_as_backup_candidate"] is True
+    assert selected[1]["candidate_selection_reason"] == "near_miss_backup_above_floor"
 
-    assert generation_module._can_spend_retry_tokens(ten_initial_drafts, estimated_tokens=1600) is False
 
+def test_near_miss_rewrite_skips_when_backup_candidates_can_fill_target(monkeypatch):
+    calls = {"llm": 0}
+    monkeypatch.setenv("TARGET_ACCEPTED_SCRIPTS", "2")
+    monkeypatch.setenv("CANDIDATE_BACKUP_ACCEPT_SCORE", "70")
+    monkeypatch.setattr(generation_module, "llm_circuit_is_open", lambda: False)
+    monkeypatch.setattr(
+        generation_module,
+        "call_gpt_generate_script",
+        lambda *_args, **_kwargs: calls.__setitem__("llm", calls["llm"] + 1),
+    )
+    candidate_pool = [
+        _token_item(id="accepted", candidate_bucket="accepted", candidate_score=82, hard_blockers=[]),
+        _token_item(id="backup", candidate_bucket="near_miss", candidate_score=74, hard_blockers=[]),
+    ]
 
-def test_near_miss_rewrite_budget_blocks_small_batches(monkeypatch):
-    monkeypatch.setattr(generation_module, "_load_source_filter_summary", lambda: {})
-    monkeypatch.delenv("TOKEN_OVERHEAD_MAX_RATE", raising=False)
-    two_initial_drafts = [_token_item(id=f"source-{idx}", candidate_bucket="near_miss") for idx in range(2)]
+    generation_module._rewrite_near_miss_candidates(candidate_pool, [{"id": "backup"}], [])
 
-    assert generation_module._can_spend_retry_tokens(two_initial_drafts, estimated_tokens=1600) is False
+    assert calls["llm"] == 0

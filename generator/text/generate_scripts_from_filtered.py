@@ -226,6 +226,10 @@ def _near_miss_rewrite_limit() -> int:
     return max(0, _int_env("SCRIPT_NEAR_MISS_REWRITE_LIMIT", 1))
 
 
+def _backup_accept_score() -> int:
+    return max(0, _int_env("CANDIDATE_BACKUP_ACCEPT_SCORE", 70))
+
+
 def _stop_after_accepted_target() -> bool:
     return _truthy_env("SCRIPT_STOP_AFTER_ACCEPTED_TARGET", "0")
 
@@ -1676,9 +1680,28 @@ def _print_dry_run_summary(summary: dict) -> None:
 
 
 def _select_final_candidates(candidate_pool: list[dict]) -> list[dict]:
+    target = _target_accepted_scripts()
     accepted = [item for item in candidate_pool if item.get("candidate_bucket") == "accepted" and not item.get("hard_blockers")]
     accepted.sort(key=lambda item: int(item.get("candidate_score") or 0), reverse=True)
-    selected = accepted[: _target_accepted_scripts()]
+    selected = accepted[:target]
+    selected_ids = {str(item.get("id") or id(item)) for item in selected}
+
+    if len(selected) < target:
+        backup_candidates = [
+            item
+            for item in candidate_pool
+            if item.get("candidate_bucket") == "near_miss"
+            and not item.get("hard_blockers")
+            and int(item.get("candidate_score") or 0) >= _backup_accept_score()
+            and str(item.get("id") or id(item)) not in selected_ids
+        ]
+        backup_candidates.sort(key=lambda item: int(item.get("candidate_score") or 0), reverse=True)
+        for item in backup_candidates[: max(0, target - len(selected))]:
+            item["selected_as_backup_candidate"] = True
+            item["candidate_selection_reason"] = "near_miss_backup_above_floor"
+            selected.append(item)
+            selected_ids.add(str(item.get("id") or id(item)))
+
     for item in selected:
         item["selected_for_final"] = True
     return selected
@@ -1705,17 +1728,21 @@ def _rewrite_near_miss_candidates(
         return
     near_misses = [item for item in candidate_pool if item.get("candidate_bucket") == "near_miss"]
     near_misses.sort(key=lambda item: int(item.get("candidate_score") or 0), reverse=True)
+    backup_ready = [
+        item
+        for item in near_misses
+        if not item.get("hard_blockers") and int(item.get("candidate_score") or 0) >= _backup_accept_score()
+    ]
+    if accepted_count + len(backup_ready) >= _target_accepted_scripts():
+        print(
+            "✅ near-miss rewrite skipped: enough backup candidates "
+            f"accepted={accepted_count} backups={len(backup_ready)} target={_target_accepted_scripts()}"
+        )
+        return
     post_by_id = {str(post.get("id")): post for post in posts}
     rewrites = 0
     for candidate in near_misses:
         if rewrites >= _near_miss_rewrite_limit() or needed <= 0 or llm_circuit_is_open():
-            break
-        if not _can_spend_retry_tokens(candidate_pool, estimated_tokens=_first_script_token_budget()):
-            candidate["near_miss_rewrite_skipped_reason"] = "token_overhead_budget_exhausted"
-            print(
-                "🚫 near-miss rewrite skipped by token budget "
-                f"id={candidate.get('id')} score={candidate.get('candidate_score')}"
-            )
             break
         source_id = str(candidate.get("id") or "")
         post = post_by_id.get(source_id)
@@ -1744,24 +1771,6 @@ def _rewrite_near_miss_candidates(
         except Exception as exc:
             rewrites += 1
             print(f"🚫 near-miss rewrite failed id={source_id}: {exc}")
-
-
-def _can_spend_retry_tokens(candidate_pool: list[Dict[str, Any]], *, estimated_tokens: int) -> bool:
-    if estimated_tokens <= 0:
-        return True
-    budget = _token_budget_summary(
-        candidate_pool,
-        candidate_pool,
-        source_scorecard_calls=int(_load_source_filter_summary().get("source_scorecard_calls") or 0),
-        critic_attempted=sum(
-            int(item.get("critic_attempt_count") or 0) + int(item.get("prior_critic_attempt_count") or 0)
-            for item in candidate_pool
-        ),
-        critic_budget=_int_env("SCRIPT_CRITIC_MAX_OUTPUT_TOKENS", 1400),
-    )
-    allowed_overhead = budget["minimum_once_token_budget"] * _token_overhead_max_rate()
-    projected_overhead = budget["token_overhead"] + estimated_tokens
-    return projected_overhead <= allowed_overhead
 
 
 def _near_miss_rewrite_reason(candidate: dict) -> str:
@@ -1947,6 +1956,7 @@ def _generation_summary(posts: list[dict], accepted: list[dict], failed: list[di
         "final_rejected": len(failed),
         "candidate_pool_count": len(candidate_pool),
         "near_miss_count": sum(1 for item in candidate_pool if item.get("candidate_bucket") == "near_miss"),
+        "backup_selected_count": sum(1 for item in accepted if item.get("selected_as_backup_candidate")),
         "best_near_miss_score": max([int(item.get("candidate_score") or 0) for item in candidate_pool if item.get("candidate_bucket") == "near_miss"] or [0]),
         "best_near_miss_reasons": _best_near_miss_reasons(candidate_pool),
         "top_failure_codes": failure_codes[:10],
@@ -2031,6 +2041,7 @@ def _token_budget_summary(
         "actual_token_budget": int(round(actual_total)),
         "token_overhead": int(round(overhead)),
         "token_overhead_rate": overhead_rate,
+        "token_overhead_target_rate": _token_overhead_target_rate(),
         "token_overhead_status": _token_overhead_status(overhead_rate),
         "actual_token_budget_by_stage": {key: int(round(value)) for key, value in actual_by_stage.items()},
         "token_overhead_by_stage": {key: int(round(value)) for key, value in overhead_by_stage.items()},
@@ -2085,16 +2096,22 @@ def _is_tts_regenerate_token_item(item: dict) -> bool:
 
 
 def _token_overhead_status(rate: float) -> str:
-    limit = _token_overhead_max_rate()
-    if rate > limit:
-        return "failed"
-    if rate > limit / 2:
-        return "warning"
+    target = _token_overhead_target_rate()
+    if rate > target:
+        return "above_target"
+    if rate > target / 2:
+        return "watch"
     return "ok"
 
 
-def _token_overhead_max_rate() -> float:
-    return max(0.0, _float_env("TOKEN_OVERHEAD_MAX_RATE", 0.10))
+def _token_overhead_target_rate() -> float:
+    raw = os.getenv("TOKEN_OVERHEAD_TARGET_RATE")
+    if raw is None:
+        raw = os.getenv("TOKEN_OVERHEAD_MAX_RATE")
+    try:
+        return max(0.0, float(raw)) if raw is not None else 0.10
+    except ValueError:
+        return 0.10
 
 
 def _source_scorecard_token_budget() -> int:
@@ -2144,8 +2161,8 @@ def _operator_recommendation(summary: dict) -> str:
         if sources_considered == 0:
             return "CHECK_SOURCE_FILTER: 0 accepted after source scorecard calls."
         return "CHECK_GATE: source filter accepted items but script gate rejected all."
-    if token_overhead_status == "failed":
-        return f"CHECK_TOKEN_OVERHEAD: token overhead is {token_overhead_rate:.1%}; review retries and fallbacks."
+    if token_overhead_status == "above_target":
+        return f"CHECK_TOKEN_OVERHEAD: token overhead is {token_overhead_rate:.1%}; review retry mix and source breadth."
     if json_fallback_attempts > 0:
         return "CHECK_COST: json_fallback_attempts are non-zero; review structured output reliability."
     if structured_attempts > 0 and structured_failures > structured_attempts / 2:
