@@ -533,7 +533,7 @@ def _local_high_confidence_accept_enabled() -> bool:
 
 
 def _local_high_confidence_accept_limit() -> int:
-    default = _target_accepted_scripts()
+    default = _source_accepted_pool_target()
     return max(0, _int_env("SOURCE_LOCAL_HIGH_CONFIDENCE_ACCEPT_LIMIT", default))
 
 
@@ -542,7 +542,7 @@ def _local_high_confidence_min_priority() -> float:
 
 
 def _stop_after_local_high_confidence_target() -> bool:
-    return _truthy_env("SOURCE_STOP_AFTER_LOCAL_HIGH_CONFIDENCE_TARGET", "1")
+    return _truthy_env("SOURCE_STOP_AFTER_LOCAL_HIGH_CONFIDENCE_TARGET", "0")
 
 
 def _is_local_high_confidence_source(post: dict) -> bool:

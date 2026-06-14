@@ -223,7 +223,7 @@ def _source_draft_limit() -> int:
 
 
 def _near_miss_rewrite_limit() -> int:
-    return max(0, _int_env("SCRIPT_NEAR_MISS_REWRITE_LIMIT", 1))
+    return max(0, _int_env("SCRIPT_NEAR_MISS_REWRITE_LIMIT", 0))
 
 
 def _backup_accept_score() -> int:

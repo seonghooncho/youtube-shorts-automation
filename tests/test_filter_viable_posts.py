@@ -307,7 +307,6 @@ def test_high_confidence_sources_skip_llm_scorecard_by_default(monkeypatch, tmp_
 
     monkeypatch.setenv("SOURCE_LLM_EVAL_LIMIT", "4")
     monkeypatch.setenv("TARGET_ACCEPTED_SCRIPTS", "2")
-    monkeypatch.setenv("SOURCE_LOCAL_HIGH_CONFIDENCE_ACCEPT_LIMIT", "2")
     monkeypatch.setenv("SOURCE_LOCAL_HIGH_CONFIDENCE_MIN_PRIORITY", "3.0")
     monkeypatch.setattr("generator.text.filter_viable_posts.RAW_POSTS_FILE", raw_path)
     monkeypatch.setattr("generator.text.filter_viable_posts.VIABLE_POSTS_FILE", viable_path)
@@ -319,10 +318,10 @@ def test_high_confidence_sources_skip_llm_scorecard_by_default(monkeypatch, tmp_
     viable = json.loads(viable_path.read_text(encoding="utf-8"))
     summary = json.loads((tmp_path / "source_filter_summary.json").read_text(encoding="utf-8"))
     assert calls["scorecard"] == 0
-    assert len(viable) == 2
+    assert len(viable) == 4
     assert all(post["source_scorecard_path"] == "local_high_confidence" for post in viable)
-    assert summary["local_high_confidence_accepted"] == 2
-    assert summary["source_scorecard_skipped_by_local_accept"] == 2
+    assert summary["local_high_confidence_accepted"] == 4
+    assert summary["source_scorecard_skipped_by_local_accept"] == 4
     assert summary["source_scorecard_calls"] == 0
 
 
